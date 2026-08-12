@@ -1,0 +1,227 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Setup Workforce Workspace — CaveWorkers</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=Playfair+Display:ital,wght@0,600;1,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/command.css">
+  <link rel="stylesheet" href="/static/onboarding.css">
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+</head>
+<body class="onboarding-body">
+  <div class="sky onboarding-sky">
+    <div class="rain"></div>
+    <div class="moon"></div>
+    <div class="meteor"></div>
+
+    <nav class="nav">
+      <div class="wrap nav-row">
+        <a href="/" class="brand">
+          <span class="brand-mark"></span>
+          CaveWorkers
+        </a>
+        <div class="mono eyebrow"><span>✦</span> Workspace Setup Wizard</div>
+      </div>
+    </nav>
+
+    <div class="wrap onboarding-wrap">
+      <!-- Progress Bar -->
+      <div class="wizard-progress">
+        <div class="progress-step active" id="step-dot-1">
+          <span class="step-num">1</span>
+          <span class="step-name">Company</span>
+        </div>
+        <div class="progress-line"></div>
+        <div class="progress-step" id="step-dot-2">
+          <span class="step-num">2</span>
+          <span class="step-name">Subscription</span>
+        </div>
+        <div class="progress-line"></div>
+        <div class="progress-step" id="step-dot-3">
+          <span class="step-num">3</span>
+          <span class="step-name">AI Employees</span>
+        </div>
+        <div class="progress-line"></div>
+        <div class="progress-step" id="step-dot-4">
+          <span class="step-num">4</span>
+          <span class="step-name">Payment</span>
+        </div>
+      </div>
+
+      <div class="wizard-card">
+        <div id="onboarding-error" class="auth-error" style="display: none;"></div>
+
+        <!-- Step 1: Company Profile -->
+        <div class="wizard-step" id="step-1">
+          <div class="step-header">
+            <span class="mono eyebrow">Step 1 of 4</span>
+            <h2>Set up your company profile</h2>
+            <p>We'll personalize your AI employees for your industry and organization size.</p>
+          </div>
+
+          <div class="form-group">
+            <label for="company_name">Company Name *</label>
+            <input type="text" id="company_name" placeholder="e.g. Acme Corp / Northstar Technologies" required>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label for="industry">Industry</label>
+              <select id="industry">
+                <option value="Technology">Technology &amp; Software</option>
+                <option value="Finance">Finance &amp; Banking</option>
+                <option value="E-commerce">E-commerce &amp; Retail</option>
+                <option value="Healthcare">Healthcare &amp; Biotech</option>
+                <option value="Agency">Marketing &amp; Agency</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="team_size">Team Size</label>
+              <select id="team_size">
+                <option value="1-10">1-10 employees</option>
+                <option value="11-50">11-50 employees</option>
+                <option value="51-200">51-200 employees</option>
+                <option value="201+">201+ employees</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="step-actions">
+            <button class="btn btn-primary" id="step1-next">Continue →</button>
+          </div>
+        </div>
+
+        <!-- Step 2: Subscription Plan -->
+        <div class="wizard-step" id="step-2" style="display: none;">
+          <div class="step-header">
+            <span class="mono eyebrow">Step 2 of 4</span>
+            <h2>Choose your subscription plan</h2>
+            <p>Pick the plan that fits your team size. You can upgrade anytime.</p>
+          </div>
+
+          <div class="plans-grid">
+            <% Object.keys(plans || {}).forEach(function(tier_key) { var plan = plans[tier_key]; %>
+            <div class="plan-card <% if (tier_key === 'growth') { %>recommended<% } %><% if (tier_key === 'free_trial') { %> free-trial<% } %>" data-tier="<%= tier_key %>" data-max-employees="<%= plan.max_employees %>">
+              <% if (tier_key === 'growth') { %><span class="rec-badge">Most Popular</span><% } %>
+              <% if (tier_key === 'free_trial') { %><span class="trial-badge">Start here</span><% } %>
+              <h3><%= plan.name %></h3>
+              <% if (tier_key === 'free_trial') { %>
+              <div class="plan-price">Free<span>for 3 days</span></div>
+              <% } else { %>
+              <div class="plan-price">$<%= plan.price %><span>/mo</span></div>
+              <% } %>
+              <p class="plan-desc"><%= plan.description %></p>
+              <ul class="plan-features">
+                <% (plan.features || ['AI employees', 'Permissioned tools', 'HITL Approvals']).forEach(function(feat) { %>
+                <li>✓ <%= feat %></li>
+                <% }); %>
+              </ul>
+              <button class="btn plan-select-btn" data-tier="<%= tier_key %>">Select <%= plan.name %></button>
+            </div>
+            <% }); %>
+          </div>
+
+          <div class="step-actions">
+            <button class="btn btn-light" id="step2-back">← Back</button>
+            <button class="btn btn-primary" id="step2-next">Continue →</button>
+          </div>
+        </div>
+
+        <!-- Step 3: Select Employees & Skills -->
+        <div class="wizard-step" id="step-3" style="display: none;">
+          <div class="step-header">
+            <span class="mono eyebrow">Step 3 of 4</span>
+            <h2>Assemble your AI crew</h2>
+            <p>Select the AI employees you want on your team. Each one assists with a specific domain — and every consequential action pauses for your approval.</p>
+          </div>
+
+          <div class="catalog-grid">
+            <% (employee_catalog || []).forEach(function(emp) { %>
+            <div class="emp-card" data-emp-id="<%= emp.id %>">
+              <div class="emp-header">
+                <input type="checkbox" class="emp-checkbox" value="<%= emp.id %>" id="chk-<%= emp.id %>" checked>
+                <span class="emp-icon" style="background: <%= emp.color %>;"><%= emp.name.charAt(0) %></span>
+                <div>
+                  <h4 style="color: <%= emp.color %>;"><%= emp.name %></h4>
+                  <small><%= emp.role %> • <%= emp.department %></small>
+                </div>
+              </div>
+              <p class="emp-desc"><%= emp.system_prompt || emp.role %></p>
+              <div class="emp-skills">
+                <label>Custom Skills / Tools:</label>
+                <div class="skills-chips" id="skills-<%= emp.id %>">
+                  <% (emp.default_tools || []).forEach(function(tool) { %>
+                  <span class="chip"><%= tool %></span>
+                  <% }); %>
+                </div>
+                <div class="add-skill-row">
+                  <input type="text" class="new-skill-input" placeholder="+ Add skill (e.g. Gmail)" data-emp-id="<%= emp.id %>">
+                </div>
+              </div>
+            </div>
+            <% }); %>
+          </div>
+
+          <div class="step-actions">
+            <button class="btn btn-light" id="step3-back">← Back</button>
+            <button class="btn btn-primary" id="step3-next">Continue →</button>
+          </div>
+        </div>
+
+        <!-- Step 4: Checkout Payment -->
+        <div class="wizard-step" id="step-4" style="display: none;">
+          <div class="step-header">
+            <span class="mono eyebrow">Step 4 of 4</span>
+            <h2>Review &amp; pay</h2>
+            <p>Review your selections and complete payment to activate your AI workforce.</p>
+          </div>
+
+          <div class="order-summary-card">
+            <h3>Order Summary</h3>
+            <div class="summary-row">
+              <span>Selected Plan:</span>
+              <strong id="sum-plan-name">Free Trial</strong>
+            </div>
+            <div class="summary-row">
+              <span>Billing Cycle:</span>
+              <span>Monthly</span>
+            </div>
+            <div class="summary-row">
+              <span>Assigned AI Employees:</span>
+              <span id="sum-emp-count">2 Employees</span>
+            </div>
+            <div class="summary-divider"></div>
+            <div class="summary-row total">
+              <span>Total Amount:</span>
+              <strong id="sum-total">Free for 3 days</strong>
+            </div>
+          </div>
+
+          <div class="step-actions">
+            <button class="btn btn-light" id="step4-back">← Back</button>
+            <button class="btn btn-primary pay-btn" id="pay-now-btn">⚡ Pay &amp; Activate</button>
+          </div>
+        </div>
+
+        <!-- Step 5: Complete -->
+        <div class="wizard-step" id="step-5" style="display: none; text-align: center; padding: 40px 0;">
+          <div class="success-icon">🚀</div>
+          <h2 style="font: 600 34px 'Playfair Display', serif; color: var(--aqua);">You're all set! 🎉</h2>
+          <p id="activation-message" style="color: rgba(255,255,255,0.7); font-size: 16px; margin: 16px 0 32px;">Your AI crew is configured and ready. Head to the operations room to assign your first task — consequential actions will always pause for your review.</p>
+          <a href="/command" class="btn btn-primary">Go to Dashboard ↗</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/csrf.js"></script>
+  <script>
+    window.RAZORPAY_KEY = <%- JSON.stringify(razorpay_key || "") %>;
+  </script>
+  <script src="/static/onboarding.js"></script>
+</body>
+</html>

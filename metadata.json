@@ -1,0 +1,6 @@
+{
+  "name": "CaveWorkers",
+  "description": "Digital Workforce OS for managing AI employees, task routing, permissioned tools, and human-in-the-loop approvals.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

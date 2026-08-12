@@ -1,0 +1,31 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*firebase-adminsdk*.json
+*service-account*.json
+*credentials*.json
+*api_keys*.csv
+*.pem
+*.key
+
+# Local data
+data/*.db
+data/*.db-wal
+data/*.db-shm
+data/uploads/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

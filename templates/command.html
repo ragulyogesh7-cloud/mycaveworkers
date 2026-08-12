@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0c100e">
+  <meta name="description" content="Caveworkers operations room — direct your AI workforce.">
+  <title>Caveworkers — Operations room</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/command.css">
+</head>
+<body class="command-body">
+  <div class="app-shell">
+    <aside class="side-rail">
+      <a class="brand" href="/"><span class="brand-mark"></span><span>Caveworkers</span></a>
+      <div class="rail-label">OPERATE</div>
+      <a class="rail-link active" href="#command"><i></i>Command center</a>
+      <a class="rail-link" href="#task-dashboard-section"><i></i>Task Dashboard <span class="rail-badge" id="task-count-badge">0</span></a>
+      <a class="rail-link" href="#team"><i></i>AI employees</a>
+      <a class="rail-link" href="#approvals-section"><i></i>Approvals <span class="rail-badge" id="approval-count-badge">0</span></a>
+      <a class="rail-link" href="#tools-section"><i></i>Tool access</a>
+      <div class="rail-label rail-gap">OBSERVE</div>
+      <a class="rail-link" href="#activity-panel"><i></i>Task ledger</a>
+      <a class="rail-link" href="#knowledge-section"><i></i>Knowledge base</a>
+      <a class="rail-link" href="/settings"><i></i>Workspace settings</a>
+        <div class="rail-footer"><span class="system-dot"></span><div><b id="rail-system-status">Systems standby</b><small>Health refreshes on load</small></div></div>
+    </aside>
+
+    <main class="command-main" id="command">
+      <header class="app-topbar">
+        <button class="menu-button" id="menuButton" aria-label="Open navigation">☰</button>
+        <div class="workspace-name"><span class="status-dot"></span><span><%= (user && user.company_name) || "Your workspace" %></span><small>AI OPERATIONS</small></div>
+        <div class="top-actions"><a class="settings-link" href="/settings">Configure workspace <span>↗</span></a><a id="logout-btn" href="/logout" class="logout-button" style="text-decoration:none; display:inline-flex; align-items:center;">Sign out</a></div>
+      </header>
+
+      <div class="command-wrap">
+        <section class="command-intro">
+          <div><p class="eyebrow">OPERATIONS ROOM / LIVE</p><h1>Direct the work.<br><em>Keep the control.</em></h1></div>
+          <p>Give your AI crew a clear brief. Work runs through permissioned tools, consequential actions pause for your approval, and every handoff is recorded.</p>
+        </section>
+
+        <section class="composer" aria-labelledby="new-task-heading">
+          <div class="composer-meta"><span class="composer-kicker">NEW ASSIGNMENT</span><span class="secure-tag">● AUDIT LOG ON</span></div>
+          <h2 id="new-task-heading">What needs to move forward?</h2>
+          <div class="input-shell"><textarea id="request" rows="3" placeholder="Turn approved business data into a reviewed operations brief."></textarea><button class="run-button" id="run">Route task <span>↗</span></button></div>
+          <div class="composer-foot"><span><i class="signal-dot"></i> Caveworkers selects the right employee and records every handoff.</span><span>Human approval remains on for consequential actions.</span></div>
+        </section>
+
+        <section class="signal-strip" aria-label="Workspace health">
+          <div><span>WORKFORCE</span><b id="signal-workforce">Checking…</b></div><div><span>SYSTEMS</span><b id="signal-systems">Checking…</b></div><div><span>ACCESS</span><b id="signal-access">Checking…</b></div><div><span>REVIEW</span><b id="signal-review">Human-led</b></div>
+        </section>
+
+        <div class="content-grid primary-grid conversation-grid">
+          <article class="panel-block team-panel" id="team"><div class="panel-head"><div><p class="panel-kicker">DIRECT LINE</p><h2>Talk to your AI team</h2></div><a href="/settings" class="panel-link">Manage team ↗</a></div><div class="conversation-workspace"><aside class="conversation-roster" id="conversation-employees"><p class="empty-state-sm">Loading your AI crew…</p></aside><section class="conversation-thread"><div class="thread-head"><div class="avatar thread-avatar" id="chat-employee-avatar">AI</div><div><h3 id="chat-employee-name">Select an employee</h3><p id="chat-employee-role">Choose someone from your crew to start a direct conversation.</p></div><a href="/settings" class="thread-tools-link">MCP skills ↗</a></div><div class="thread-context" id="chat-employee-tools">No employee selected</div><div class="conversation-messages" id="conversation-messages"><p class="empty-state-sm">Select an AI employee to open their direct line.</p></div><form class="conversation-form" id="conversation-form"><textarea id="conversation-input" rows="2" placeholder="Give an instruction, ask a question, or request an update…" disabled></textarea><button type="submit" id="conversation-send" disabled>Send ↗</button></form></section></div></article>
+          <article class="panel-block approvals-panel" id="approvals-section"><div class="panel-head"><div><p class="panel-kicker">HUMAN CHECKPOINT</p><h2>Approvals</h2></div><span class="pending-label" id="approvals-status-text">Checking queue</span></div><div id="approvals-list" class="approvals-list"><p class="empty-state-sm">Checking for actions that need your approval…</p></div></article>
+        </div>
+
+        <div class="content-grid secondary-grid">
+          <article class="panel-block" id="tools-section"><div class="panel-head"><div><p class="panel-kicker">MCP-STYLE CONNECTORS</p><h2>Employee skills &amp; tools</h2></div><a href="/settings" class="panel-link">Attach connector ↗</a></div><p class="tool-explainer">Attach a permissioned connector to the employee who needs it. Caveworkers keeps each connector scoped, visible, and approval-aware.</p><div id="tools-catalog" class="tools-catalog"></div></article>
+          <article class="panel-block knowledge-panel" id="knowledge-section"><div class="panel-head"><div><p class="panel-kicker">SHARED CONTEXT</p><h2>Knowledge base</h2></div><span class="pending-label">PRIVATE TO WORKSPACE</span></div><form id="knowledge-form" class="knowledge-form"><input type="text" id="knowledge-title" placeholder="Document name" required><textarea id="knowledge-content" rows="2" placeholder="Add a policy, process, brief or internal context…" required></textarea><button type="submit" class="text-button">Add to knowledge base <span>↗</span></button></form><div id="knowledge-list" class="knowledge-list"></div></article>
+        </div>
+
+        <section class="content-grid secondary-grid" id="office-section">
+          <article class="panel-block" id="live-office-panel">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">WORKFORCE DESKFORCE</p>
+                <h2>Live Digital Office</h2>
+              </div>
+              <span class="live-pill" id="office-count-tag">3 EMPLOYEES ACTIVE</span>
+            </div>
+            <p class="tool-explainer">Real-time status of your specialized AI crew, active tasks, inter-agent collaborations, and permissioned tool locks.</p>
+            <div id="digital-office-roster" class="office-roster">
+              <p class="empty-state-sm">Loading workforce statuses...</p>
+            </div>
+          </article>
+
+          <article class="panel-block roi-panel" id="roi-section">
+            <div class="panel-head">
+              <div>
+                <p class="panel-kicker">ECONOMIC VALUE</p>
+                <h2>Workforce ROI Metrics</h2>
+              </div>
+              <span class="complete-tag" id="roi-multiplier-tag">SAVINGS INSIGHT</span>
+            </div>
+            <div class="roi-card-grid">
+              <div class="roi-metric">
+                <span>HUMAN EQUIVALENT WORKLOAD</span>
+                <b id="roi-human-cost">$13,500 / mo</b>
+                <small>Based on 3 full-time specialists</small>
+              </div>
+              <div class="roi-metric">
+                <span>CAVEWORKERS SUBSCRIPTION</span>
+                <b id="roi-ai-cost">$85 / mo</b>
+                <small>Growth Tier (All tools attached)</small>
+              </div>
+              <div class="roi-metric highlight">
+                <span>NET MONTHLY SAVINGS</span>
+                <b id="roi-net-savings" class="green">$13,415 / mo</b>
+                <small id="roi-annual-projection">Projected Annual: $160,980</small>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <article class="panel-block task-dashboard-panel" id="task-dashboard-section">
+          <div class="panel-head">
+            <div>
+              <p class="panel-kicker">ALL WORKSPACE ASSIGNMENTS &amp; TRACES</p>
+              <h2>Task Dashboard</h2>
+            </div>
+            <div class="dashboard-head-actions">
+              <span class="live-pill" id="task-metrics-summary">3 TOTAL TASKS</span>
+            </div>
+          </div>
+          <p class="tool-explainer">Monitor every assignment given to your AI workforce. Inspect execution plans, inter-agent delegation traces, tool calls, and human sign-off checkpoints.</p>
+
+          <div class="dashboard-controls">
+            <div class="search-input-box">
+              <input type="text" id="task-search-input" placeholder="🔍 Search tasks by keyword, employee, or output..." onkeyup="filterTaskDashboard()">
+            </div>
+            <div class="dashboard-filter-tabs">
+              <button class="filter-tab active" data-filter="all" onclick="setTaskFilter('all', this)">All Tasks (<span id="count-all">0</span>)</button>
+              <button class="filter-tab" data-filter="completed" onclick="setTaskFilter('completed', this)">Completed (<span id="count-completed">0</span>)</button>
+              <button class="filter-tab" data-filter="pending_approval" onclick="setTaskFilter('pending_approval', this)">Awaiting Sign-off (<span id="count-pending">0</span>)</button>
+            </div>
+          </div>
+
+          <div id="task-dashboard-grid" class="task-grid">
+            <p class="empty-state-sm">Loading Task Dashboard...</p>
+          </div>
+        </article>
+
+        <article class="panel-block ledger-panel" id="activity-panel"><div class="panel-head"><div><p class="panel-kicker">TRACEABLE WORK</p><h2>Task ledger &amp; Agent Bus</h2></div><button id="refresh" class="refresh-button">↻ Refresh signals</button></div><div id="activity" class="event-feed activity-feed"><p class="empty-state">No activity yet. Your work will appear here as your crew gets started.</p></div></article>
+
+        <section class="results-block" id="results" hidden aria-live="polite"><div class="result-top"><div><p class="panel-kicker">TASK REPORT</p><h2 id="result-title">Task complete</h2></div><span class="complete-tag">✓ COMPLETE</span></div><p class="result-body" id="result-answer"></p><div class="trace-box"><p class="panel-kicker">EXECUTION TRACE</p><div id="trace-steps" class="trace-steps"></div></div><p class="disclaimer">Caveworkers records the real state of every action. If a tool or service is unreachable, that is reported — never fabricated.</p></section>
+      </div>
+    </main>
+  </div>
+  <script src="/static/csrf.js"></script>
+  <script src="/static/command.js"></script>
+  <script>
+    document.getElementById('logout-btn')?.addEventListener('click', async () => {
+      await fetch('/api/session-logout', { method: 'POST' });
+      window.location.href = '/login';
+    });
+  </script>
+</body>
+</html>

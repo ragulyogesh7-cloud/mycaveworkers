@@ -1,0 +1,379 @@
+const $ = (selector) => document.querySelector(selector);
+let employees = [];
+let activeEmployeeId = null;
+
+function safe(value) {
+  const node = document.createElement('span');
+  node.textContent = String(value ?? '');
+  return node.innerHTML;
+}
+
+function formatTime(iso) {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? 'Now' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+}
+
+async function responseJson(url, options) {
+  const response = await fetch(url, options);
+  const data = await response.json();
+  if (!response.ok) {
+    const error = new Error(data.error || 'The request could not be completed.');
+    error.upgradeRequired = Boolean(data.upgrade_required);
+    throw error;
+  }
+  return data;
+}
+
+async function loadBilling() {
+  try {
+    const billing = await responseJson('/api/billing');
+    const workspace = $('.workspace-name > span:nth-child(2)');
+    if (workspace && billing.company_name) workspace.textContent = billing.company_name;
+  } catch (error) { console.error('Unable to load subscription details:', error); }
+}
+
+const SIGNAL_LABELS = {
+  healthy: 'Nominal',
+  degraded: 'Degraded',
+  down: 'Offline',
+};
+
+function signalClass(status) {
+  return status === 'healthy' ? 'signal-ok' : status === 'degraded' ? 'signal-warn' : 'signal-down';
+}
+
+async function loadHealth() {
+  const workforce = $('#signal-workforce');
+  const systems = $('#signal-systems');
+  const access = $('#signal-access');
+  if (!workforce || !systems || !access) return;
+  try {
+    const health = await fetch('/api/health').then((r) => r.json());
+    const overall = health.status || 'unknown';
+    workforce.textContent = SIGNAL_LABELS[overall] || overall;
+    workforce.className = signalClass(overall);
+    const db = health.components?.database?.status || 'unknown';
+    const payments = health.components?.payments?.status || 'unconfigured';
+    systems.textContent = db === 'up' ? 'Connected' : db === 'down' ? 'Offline' : 'Checking…';
+    systems.className = db === 'up' ? 'signal-ok' : db === 'down' ? 'signal-down' : 'signal-warn';
+    access.textContent = payments === 'configured' ? 'Configured' : 'Not configured';
+    access.className = payments === 'configured' ? 'signal-ok' : 'signal-warn';
+  } catch (error) {
+    [workforce, systems, access].forEach((el) => { if (el) { el.textContent = 'Unavailable'; el.className = 'signal-down'; } });
+  }
+}
+
+function activeEmployee() {
+  return employees.find((employee) => employee.id === activeEmployeeId);
+}
+
+async function loadEmployees() {
+  const roster = $('#conversation-employees');
+  try {
+    employees = await responseJson('/api/employees');
+    if (!employees.length) {
+      roster.innerHTML = '<p class="empty-state-sm">Your crew is empty. Add employees in Workspace Settings.</p>';
+      return;
+    }
+    roster.innerHTML = employees.map((employee) => `
+      <button class="conversation-person" data-employee-id="${safe(employee.id)}" type="button">
+        <span class="avatar" style="--color:${safe(employee.color)}">${safe(employee.name?.[0] || 'AI')}</span>
+        <span><b>${safe(employee.name)}</b><small>${safe(employee.role)}</small></span><i class="person-status" aria-label="Available"></i>
+      </button>`).join('');
+    const preferred = employees.some((employee) => employee.id === activeEmployeeId) ? activeEmployeeId : employees[0].id;
+    await selectEmployee(preferred);
+  } catch (error) {
+    console.error('Unable to load employees:', error);
+    roster.innerHTML = '<p class="empty-state-sm">Your crew could not be loaded right now.</p>';
+  }
+}
+
+async function selectEmployee(employeeId) {
+  activeEmployeeId = employeeId;
+  const employee = activeEmployee();
+  if (!employee) return;
+  document.querySelectorAll('.conversation-person').forEach((item) => item.classList.toggle('active', item.dataset.employeeId === employeeId));
+  const avatar = $('#chat-employee-avatar');
+  avatar.textContent = employee.name?.slice(0, 2).toUpperCase() || 'AI';
+  avatar.style.setProperty('--color', employee.color || '#c5f36a');
+  $('#chat-employee-name').textContent = employee.name;
+  $('#chat-employee-role').textContent = `${employee.role} · ${employee.department}`;
+  const permissions = employee.permissions || [];
+  $('#chat-employee-tools').innerHTML = permissions.length
+    ? permissions.map((permission) => `<span class="chat-tool">${safe(permission.tool_name)} · ${safe(String(permission.access_level).replace('_', ' '))}</span>`).join('')
+    : 'No MCP-style connectors attached yet';
+  $('#conversation-input').disabled = false;
+  $('#conversation-send').disabled = false;
+  $('#conversation-input').placeholder = `Message ${employee.name}…`;
+  await loadConversation();
+}
+
+function renderConversation(messages) {
+  const container = $('#conversation-messages');
+  if (!messages.length) {
+    const employee = activeEmployee();
+    container.innerHTML = `<p class="empty-state-sm">Start a direct line with ${safe(employee?.name || 'your employee')}. They will respond here and retain the conversation context.</p>`;
+    return;
+  }
+  container.innerHTML = messages.map((message) => `
+    <div class="chat-message ${message.sender === 'manager' ? 'manager' : 'employee'}">${safe(message.body)}<time>${message.sender === 'manager' ? 'You' : safe(activeEmployee()?.name || 'Employee')} · ${formatTime(message.created_at)}</time></div>`).join('');
+  container.scrollTop = container.scrollHeight;
+}
+
+async function loadConversation() {
+  if (!activeEmployeeId) return;
+  const container = $('#conversation-messages');
+  container.innerHTML = '<p class="chat-typing">Opening direct line…</p>';
+  try {
+    const conversation = await responseJson(`/api/employees/${encodeURIComponent(activeEmployeeId)}/conversation`);
+    renderConversation(conversation.messages || []);
+  } catch (error) {
+    container.innerHTML = `<p class="empty-state-sm">${safe(error.message)}</p>`;
+  }
+}
+
+async function sendConversation(event) {
+  event.preventDefault();
+  const input = $('#conversation-input');
+  const message = input.value.trim();
+  if (!message || !activeEmployeeId) return;
+  const button = $('#conversation-send');
+  button.disabled = true;
+  input.disabled = true;
+  const container = $('#conversation-messages');
+  container.insertAdjacentHTML('beforeend', `<div class="chat-message manager">${safe(message)}<time>You · Now</time></div><p class="chat-typing">${safe(activeEmployee()?.name || 'Employee')} is working…</p>`);
+  container.scrollTop = container.scrollHeight;
+  input.value = '';
+  try {
+    const result = await responseJson(`/api/employees/${encodeURIComponent(activeEmployeeId)}/conversation`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message })
+    });
+    const typing = $('.chat-typing');
+    if (typing) typing.remove();
+    container.insertAdjacentHTML('beforeend', `<div class="chat-message employee">${safe(result.employee_message.body)}<time>${safe(activeEmployee()?.name || 'Employee')} · Now</time></div>`);
+    container.scrollTop = container.scrollHeight;
+    loadActivity();
+  } catch (error) {
+    const typing = $('.chat-typing');
+    if (typing) typing.textContent = error.upgradeRequired ? `${error.message} Open Workspace Settings to upgrade.` : error.message;
+    else container.insertAdjacentHTML('beforeend', `<p class="empty-state-sm">${safe(error.message)}</p>`);
+  } finally {
+    button.disabled = false;
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+async function loadApprovals() {
+  const countBadge = $('#approval-count-badge'); const statusText = $('#approvals-status-text'); const container = $('#approvals-list');
+  try {
+    const approvals = await responseJson('/api/approvals');
+    countBadge.textContent = approvals.length;
+    statusText.textContent = approvals.length ? `${approvals.length} waiting for review` : 'Queue clear';
+    container.innerHTML = approvals.length ? approvals.map((approval) => `<div class="approval-item"><div class="approval-top"><span class="approval-tool">${safe(approval.tool_name)}</span><span class="live-pill">REVIEW NEEDED</span></div><p class="approval-summary">${safe(approval.action_summary)}</p><div class="approval-actions"><button class="btn-sm btn-approve" data-approval-id="${approval.id}" data-approval-status="approved">Approve ✓</button><button class="btn-sm btn-reject" data-approval-id="${approval.id}" data-approval-status="rejected">Reject</button></div></div>`).join('') : '<p class="empty-state-sm">Nothing needs your approval. Caveworkers will always pause consequential actions.</p>';
+  } catch (error) { console.error('Unable to load approvals:', error); statusText.textContent = 'Queue unavailable'; }
+}
+
+async function resolveApproval(id, status) {
+  try { await responseJson(`/api/approvals/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) }); await Promise.all([loadApprovals(), loadActivity()]); } catch (error) { alert(error.message); }
+}
+
+async function loadTools() {
+  const container = $('#tools-catalog');
+  try {
+    const connectors = await responseJson('/api/mcp-connectors');
+    container.innerHTML = connectors.length ? connectors.map((connector) => `<div class="tool-card"><div class="tool-card-title"><span>${safe(connector.name.toUpperCase())}</span><span class="live-pill">MCP READY</span></div><p class="tool-card-desc">${safe(connector.description)}</p><span class="tool-server">${safe(connector.server)} · ${safe(String(connector.default_access_level).replace('_', ' '))}</span></div>`).join('') : '<p class="empty-state-sm">No connectors are available.</p>';
+  } catch (error) { console.error('Unable to load connectors:', error); }
+}
+
+async function loadKnowledge() {
+  const container = $('#knowledge-list');
+  try { const documents = await responseJson('/api/knowledge'); container.innerHTML = documents.length ? documents.map((document) => `<div class="knowledge-item"><b>[${safe(String(document.category).toUpperCase())}] ${safe(document.title)}</b><span>${safe(String(document.content).slice(0, 90))}${document.content.length > 90 ? '…' : ''}</span></div>`).join('') : '<p class="empty-state-sm">No context has been added yet.</p>'; } catch (error) { console.error('Unable to load knowledge:', error); }
+}
+
+async function loadOfficeStatus() {
+  const roster = $('#digital-office-roster');
+  const countTag = $('#office-count-tag');
+  if (!roster) return;
+  try {
+    const data = await responseJson('/api/office/status');
+    if (countTag) countTag.textContent = `${data.total_active_employees} EMPLOYEES ACTIVE`;
+    roster.innerHTML = (data.office || []).map((emp) => `
+      <div class="office-card">
+        <div class="office-card-top">
+          <div class="office-card-name">
+            <span class="avatar" style="--color:${safe(emp.color)}">${safe(emp.name?.[0] || 'AI')}</span>
+            <div><b>${safe(emp.name)}</b><small>${safe(emp.role)}</small></div>
+          </div>
+          <span class="office-status-pill ${safe(emp.status)}">${safe(emp.status.replace('_', ' ').toUpperCase())}</span>
+        </div>
+        <div class="office-task-desc">${safe(emp.current_task)}</div>
+        <div class="office-meta">
+          <span>${emp.collaborating_with ? `🤝 ${safe(emp.collaborating_with)}` : `Tools: ${safe((emp.tools || []).join(', '))}`}</span>
+          <span class="office-autonomy">${safe(emp.autonomy_level)}</span>
+        </div>
+      </div>`).join('');
+  } catch (err) {
+    console.error('Unable to load office status:', err);
+  }
+}
+
+async function loadRoiMetrics() {
+  try {
+    const roi = await responseJson('/api/roi');
+    if ($('#roi-human-cost')) $('#roi-human-cost').textContent = roi.human_equivalent_monthly_cost;
+    if ($('#roi-ai-cost')) $('#roi-ai-cost').textContent = roi.caveworkers_subscription_cost;
+    if ($('#roi-net-savings')) $('#roi-net-savings').textContent = roi.net_monthly_savings;
+    if ($('#roi-annual-projection')) $('#roi-annual-projection').textContent = `Projected Annual: ${roi.annual_projected_savings}`;
+    if ($('#roi-multiplier-tag')) $('#roi-multiplier-tag').textContent = `${roi.roi_multiplier} ROI SAVINGS`;
+  } catch (err) {
+    console.error('Unable to load ROI metrics:', err);
+  }
+}
+
+let allTasksCache = [];
+let currentTaskFilter = 'all';
+
+async function loadTaskDashboard() {
+  const grid = $('#task-dashboard-grid');
+  const summary = $('#task-metrics-summary');
+  const badge = $('#task-count-badge');
+  if (!grid) return;
+
+  try {
+    const res = await responseJson('/api/tasks');
+    allTasksCache = res.tasks || [];
+    if (badge) badge.textContent = res.total_count || allTasksCache.length;
+    if (summary) summary.textContent = `${res.total_count || 0} TOTAL TASKS`;
+
+    if ($('#count-all')) $('#count-all').textContent = res.total_count || 0;
+    if ($('#count-completed')) $('#count-completed').textContent = res.completed_count || 0;
+    if ($('#count-pending')) $('#count-pending').textContent = res.pending_approval_count || 0;
+
+    renderFilteredTasks();
+  } catch (err) {
+    console.error('Unable to load Task Dashboard:', err);
+    grid.innerHTML = '<p class="empty-state-sm">Unable to load tasks at this time.</p>';
+  }
+}
+
+function setTaskFilter(filter, btn) {
+  currentTaskFilter = filter;
+  document.querySelectorAll('.filter-tab').forEach((t) => t.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  renderFilteredTasks();
+}
+
+function filterTaskDashboard() {
+  renderFilteredTasks();
+}
+
+function renderFilteredTasks() {
+  const grid = $('#task-dashboard-grid');
+  if (!grid) return;
+
+  const searchQuery = ($('#task-search-input')?.value || '').toLowerCase().trim();
+
+  let filtered = allTasksCache.filter((t) => {
+    if (currentTaskFilter !== 'all' && t.status !== currentTaskFilter) return false;
+    if (searchQuery) {
+      const matchQ = (t.question || '').toLowerCase().includes(searchQuery);
+      const matchA = (t.answer || '').toLowerCase().includes(searchQuery);
+      const matchO = (t.owner_info?.name || '').toLowerCase().includes(searchQuery);
+      if (!matchQ && !matchA && !matchO) return false;
+    }
+    return true;
+  });
+
+  if (!filtered.length) {
+    grid.innerHTML = '<p class="empty-state-sm">No tasks match the selected filter.</p>';
+    return;
+  }
+
+  grid.innerHTML = filtered.map((t) => {
+    const owner = t.owner_info || {};
+    const statusText = t.status === 'pending_approval' ? 'Awaiting Sign-off' : t.status === 'completed' ? 'Completed' : 'In Progress';
+
+    return `
+      <div class="task-card" id="task-card-${t.id}">
+        <div class="task-card-top">
+          <div class="task-owner-info">
+            <span class="task-owner-avatar" style="background:${owner.color || '#3b82f6'}22; color:${owner.color || '#3b82f6'}; border:1px solid ${owner.color || '#3b82f6'}55">
+              ${safe(owner.name?.[0] || 'A')}
+            </span>
+            <div class="task-owner-name">
+              <b>${safe(owner.name || 'AI Employee')}</b>
+              <small>${safe(owner.role || 'AI Specialist')} · ${safe(owner.employee_code || 'CW_EMP')}</small>
+            </div>
+          </div>
+          <span class="task-status-pill ${safe(t.status)}">${safe(statusText)}</span>
+        </div>
+
+        <div class="task-question">Task #${t.id}: ${safe(t.question)}</div>
+
+        ${t.plan ? `<div class="task-plan-box"><b>EXECUTION PLAN:</b> ${safe(t.plan)}</div>` : ''}
+
+        <div class="task-answer-box">${safe(t.answer || 'Processing task execution...')}</div>
+
+        <div class="task-actions">
+          <span class="task-time">Created: ${formatTime(t.created_at)}</span>
+          <div class="task-btn-group">
+            ${t.has_pending_approval ? `<button class="btn-sm btn-approve" onclick="resolveApproval(${t.approval_id}, 'approved')">Approve HITL Action ✓</button>` : ''}
+            <button class="btn-sm text-button" onclick="toggleTaskTrace(${t.id})">Inspect Full Trace ▾</button>
+          </div>
+        </div>
+
+        <div class="task-trace-drawer" id="trace-drawer-${t.id}">
+          <p class="panel-kicker" style="margin-bottom:8px;">AGENT INTERFACE &amp; EXECUTION STEPS</p>
+          <div class="trace-steps">
+            ${(t.trace || []).map((step) => `
+              <div class="trace-step ${safe(step.kind)}">
+                <div class="trace-step-top">
+                  <span class="trace-badge">${safe(step.kind)}</span>
+                  <b>${safe(step.sender)}</b> → <b>${safe(step.receiver)}</b>
+                  <time>${formatTime(step.created_at)}</time>
+                </div>
+                <div>${safe(step.body)}</div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      </div>
+    `;
+  }).join('');
+}
+
+function toggleTaskTrace(taskId) {
+  const drawer = document.getElementById(`trace-drawer-${taskId}`);
+  if (drawer) {
+    drawer.style.display = drawer.style.display === 'block' ? 'none' : 'block';
+  }
+}
+
+async function loadActivity() {
+  const container = $('#activity');
+  try { const activity = await responseJson('/api/activity'); const messages = activity.messages || []; container.innerHTML = messages.length ? messages.map((message) => `<div class="event"><time>${formatTime(message.created_at)}</time><b>${safe(message.sender)}</b> → <b>${safe(message.receiver)}</b><span> · ${safe(message.kind)}</span> — ${safe(message.body)}</div>`).join('') : '<p class="empty-state">No activity yet. Your work will appear here as your crew gets started.</p>'; } catch (error) { console.error('Unable to load activity:', error); }
+}
+
+function renderTrace(trace) { const container = $('#trace-steps'); container.innerHTML = trace?.length ? trace.map((step) => `<div class="trace-step ${safe(step.kind)}"><div class="trace-step-top"><span class="trace-badge">${safe(step.kind)}</span><b>${safe(step.sender)}</b> → <b>${safe(step.receiver)}</b><time>${formatTime(step.created_at)}</time></div><div>${safe(step.body)}</div></div>`).join('') : '<p class="empty-state-sm">No execution trace was recorded.</p>'; }
+
+$('#conversation-form')?.addEventListener('submit', sendConversation);
+$('#knowledge-form')?.addEventListener('submit', async (event) => { event.preventDefault(); const title = $('#knowledge-title').value.trim(); const content = $('#knowledge-content').value.trim(); if (!title || !content) return; try { await responseJson('/api/knowledge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, content, category: 'policy' }) }); $('#knowledge-title').value = ''; $('#knowledge-content').value = ''; await loadKnowledge(); } catch (error) { alert(error.message); } });
+$('#run')?.addEventListener('click', async () => { const request = $('#request').value.trim(); if (!request) return $('#request').focus(); const button = $('#run'); button.disabled = true; button.textContent = 'Routing task…'; try { const task = await responseJson('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request }) }); $('#results').hidden = false; $('#result-title').textContent = `Task #${task.id} · ${task.participants.join(' → ')}`; $('#result-answer').textContent = task.answer; renderTrace(task.trace); $('#results').scrollIntoView({ behavior: 'smooth', block: 'start' }); await Promise.all([loadApprovals(), loadActivity(), loadOfficeStatus(), loadRoiMetrics(), loadTaskDashboard()]); } catch (error) { $('#results').hidden = false; $('#result-title').textContent = error.upgradeRequired ? 'Trial ended' : 'Task could not run'; $('#result-answer').textContent = error.upgradeRequired ? `${error.message} Open Workspace Settings to choose a paid plan.` : error.message; } finally { button.disabled = false; button.innerHTML = 'Route task <span>↗</span>'; } });
+document.addEventListener('click', (event) => { const person = event.target.closest('.conversation-person'); if (person) selectEmployee(person.dataset.employeeId); const approval = event.target.closest('[data-approval-id]'); if (approval) resolveApproval(approval.dataset.approvalId, approval.dataset.approvalStatus); });
+$('#refresh')?.addEventListener('click', () => Promise.all([loadBilling(), loadEmployees(), loadApprovals(), loadTools(), loadKnowledge(), loadActivity(), loadHealth(), loadOfficeStatus(), loadRoiMetrics(), loadTaskDashboard()]));
+$('#menuButton')?.addEventListener('click', () => document.querySelector('.side-rail')?.classList.toggle('is-open'));
+$('#logout-btn')?.addEventListener('click', async (e) => {
+  e.preventDefault();
+  try {
+    if (window.firebaseAuth && window.firebaseAuth.signOut) {
+      await window.firebaseAuth.signOut();
+    }
+  } catch (err) { console.warn('Firebase signout note:', err); }
+  try {
+    await fetch('/api/session-logout', { method: 'POST' });
+  } catch (err) { console.warn('Logout fetch note:', err); }
+  window.location.replace('/login');
+});
+
+(async () => { await Promise.all([loadBilling(), loadApprovals(), loadTools(), loadKnowledge(), loadActivity(), loadHealth(), loadOfficeStatus(), loadRoiMetrics(), loadTaskDashboard()]); await loadEmployees(); })();
