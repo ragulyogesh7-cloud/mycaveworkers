@@ -1,5 +1,6 @@
 import express from 'express';
 import path from 'path';
+import { readFileSync } from 'fs';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import dotenv from 'dotenv';
@@ -8,6 +9,7 @@ import crypto from 'crypto';
 import Razorpay from 'razorpay';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
+import { getFirestore } from 'firebase-admin/firestore';
 import { GoogleGenAI } from '@google/genai';
 
 dotenv.config();
@@ -52,23 +54,41 @@ const FIREBASE_WEB_CONFIG = {
   appId: process.env.FIREBASE_APP_ID || '1:980597206467:web:789036c39cfb0541d1a176'
 };
 
-// Initialize Firebase Admin SDK
-const serviceAccount = {
-  projectId: process.env.FIREBASE_PROJECT_ID || 'caveworkers',
-  clientEmail: process.env.FIREBASE_CLIENT_EMAIL || 'firebase-adminsdk-fbsvc@caveworkers.iam.gserviceaccount.com',
-  privateKey: (process.env.FIREBASE_PRIVATE_KEY || `-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCq6lBKnzlJ6r1j\naUUEw9A2qXh3I8YaW2umsG8tOKbV56oVrZUB4vlxCC2Vt20I0Wq2Io57MTRFFOU8\n5l3CPeLqaoGj2RYr5ieKwGua0MWWUX8I6Z1xyldBEjIUPtYHNNDBVCaLIVXh6bV0\n1h1bXciH3CixmgWdEV6Dd0Tl4h3ivBrUvs7nuqUncsqNdsbERLGEnK3hyLgMO0ZD\n7uhWCf0kYCk90DYr++IcU2Rqu5XRMEgfRqRcsIERZPonhw8ZeoPMbCdQw+Vt13dR\n38dpP0ZGAfm7obw/ASJ4wsVaDU2f7hMKqkRsSDW+X800S1eVnRsLIho44dEjs560\nBA+NSR3zAgMBAAECggEAGsqmcb7E1bPrd9EGxdObaL4nCTyn2fYuXqT16yz1ZhQt\nrWlA3C4ECPZjDZQruNVO+M8GQ68NBlkwrVu1Ix+IBFP+uhGWWqT2L4IF5sZG0CSP\n7nSPFB5yOrE1/XDIzxILOTWjjG1aJOgkOXTeNDYexZaQIHWdifyw3UMjHzVTQaPA\nzFZ5LwK7/JUTvYRHmiNC01metT7UjX2rfdKKAlODIK+Uw+fnZRbkt7CV4MvOw8Pe\nRnbIGS+Q1H9bmlg6U3qWQRuFrNArdgnFwY2+PuycZRAzfDCs8XmmXZswXQzQ0qi6\ntHdSgkyifG/dIKllL8mZPB3Ru8isgtRdkrmwxSAThQKBgQDitMYy6nvYns9Gf17O\npAhWolojqZLHlFYyRJAJmBdKYySrpoocsVC3GYkX9uiGWyTuAROkdxjlHTaiew2m\nEqB3do/vuhlDKuofvYyKKPxqOdZJ+arrHqw4zHKUwGjEvr+rgcXGC5RVFBNC00wI\noeUcSSgUyRe8vEQv8h/lmfV5rQKBgQDBAAfBbT0hIpjIwVRKrnH7c+CMKqhmDfDX\nKEQ7PdiDbZs6QVKvQKhbYI3QTafrYEyIFOUEbLaFa8sHPu7r1M20Ay8AEo1wLlJE\nJYz2I8C/fWbJHJIgj6Kxqi5oibs/ZKzGBhg9O0ZCQ5TOC+0qsr4twRlWCAk8BG8c\nclvjgh0qHwKBgAl0OnOzHZkJ/mDVPPHnG0XpnVKxZqKWCAYun8cWpZn/im7yEf5i\nUphgIzxxmn7H3EFkoBoSsWIUlsut0ALl8fUpZ5U6sIUBjCPotqyoSuZvJQWOuNb3\nP31a4UhcwcG6pqmTTtkUcIofvTHjN9+ASNqmHlrHjArd2wYY1cWwZvE9AoGBAKzH\nySmqERLL9Tmskji1iUdSitERE2chzd3gp4zdpiqrAk+Z0VshqFb9zpeQHedDc+BT\nzF80sAYr5TvcZGpuPaWNQBNxiHvIjE+DynlEsrb7nfwnfs51qHIjZ56gxyhOibpS\nFHskyJZkCCCaXr1d/ZHakEMLuLCpS4uM+aRohJGDAoGAEt3w8MkQ8AjmXpkLTT6v\njo4JJx7e6pX0rVvk6HZVKMlWFkF2axZdELT3v5PUMJ2va/i3Z4/XgJGIQ6q2+0mY\nqG+2B3INuhGY+AMXj084pjL0x3NrzGMorF1pbpPtDr+tCE17ezSM96QSHfCy4yv1\nEFISfCagk7GlI/2Gd3iJcUk=\n-----END PRIVATE KEY-----\n`).replace(/\\n/g, '\n')
-};
+// Initialize Firebase Admin SDK from deployment-provided credentials only.
+const firebaseProjectId = process.env.FIREBASE_PROJECT_ID;
+const firebaseClientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+const firebasePrivateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+const firebaseServiceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
 
 if (!getApps().length) {
   try {
-    initializeApp({
-      credential: cert(serviceAccount)
-    });
-    console.log('Firebase Admin SDK initialized successfully for project caveworkers');
+    if (firebaseServiceAccountPath) {
+      const serviceAccount = JSON.parse(readFileSync(path.resolve(firebaseServiceAccountPath), 'utf8'));
+      initializeApp({ credential: cert(serviceAccount) });
+    } else if (firebaseProjectId && firebaseClientEmail && firebasePrivateKey) {
+      initializeApp({
+        credential: cert({
+          projectId: firebaseProjectId,
+          clientEmail: firebaseClientEmail,
+          privateKey: firebasePrivateKey
+        })
+      });
+    } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      initializeApp();
+    } else {
+      console.warn('Firebase Admin SDK is not configured; Google sign-in will fail closed until Firebase credentials are provided.');
+    }
   } catch (e) {
-    console.warn('Firebase Admin SDK init warning:', e);
+    console.error('Firebase Admin SDK initialization failed:', e);
   }
 }
+
+const firebaseAuth = getApps().length ? getAuth() : null;
+const firestoreDb = getApps().length ? getFirestore() : null;
+const SESSION_COOKIE_MAX_AGE = 5 * 24 * 60 * 60 * 1000;
+const cookieSecure = process.env.COOKIE_SECURE === 'true' || process.env.CAVEWORKERS_ENV === 'production';
+const sessionCookieOptions = { httpOnly: true, secure: cookieSecure, sameSite: 'lax' as const, path: '/', maxAge: SESSION_COOKIE_MAX_AGE };
+const readableCookieOptions = { httpOnly: false, secure: cookieSecure, sameSite: 'lax' as const, path: '/', maxAge: SESSION_COOKIE_MAX_AGE };
 
 // Razorpay Setup
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || 'rzp_test_TOteB93qoWHTSs';
@@ -177,6 +197,10 @@ interface User {
   onboarded: boolean;
   selected_tier?: string;
   role?: string;
+  created_at?: string;
+  updated_at?: string;
+  auth_provider?: string;
+  email_verified?: boolean;
 }
 
 interface Company {
@@ -238,6 +262,57 @@ const db = {
   nextTaskId: 1,
   nextApprovalId: 101,
 };
+
+const authenticatedUsers = new WeakMap<express.Request, User>();
+
+async function loadUserFromFirebase(uid: string): Promise<User | null> {
+  const cached = db.users.get(uid);
+  if (cached) return cached;
+  if (!firestoreDb) return null;
+
+  try {
+    const snapshot = await firestoreDb.collection('users').doc(uid).get();
+    if (!snapshot.exists) return null;
+    const data = snapshot.data() || {};
+    const user = { uid, ...data } as User;
+    db.users.set(uid, user);
+    return user;
+  } catch (error) {
+    console.warn('Could not load Firebase user profile:', error);
+    return null;
+  }
+}
+
+async function loadCompanyFromFirebase(id: string): Promise<Company | null> {
+  const cached = db.companies.get(id);
+  if (cached) return cached;
+  if (!firestoreDb) return null;
+
+  try {
+    const snapshot = await firestoreDb.collection('companies').doc(id).get();
+    if (!snapshot.exists) return null;
+    const company = { id, ...(snapshot.data() || {}) } as Company;
+    db.companies.set(id, company);
+    return company;
+  } catch (error) {
+    console.warn('Could not load Firebase company profile:', error);
+    return null;
+  }
+}
+
+async function persistUser(user: User, extra: Record<string, unknown> = {}) {
+  if (!firestoreDb) throw new Error('Firebase Firestore is not configured');
+  const now = new Date().toISOString();
+  const record = { ...user, ...extra, updated_at: now };
+  await firestoreDb.collection('users').doc(user.uid).set(record, { merge: true });
+  db.users.set(user.uid, { ...user, updated_at: now });
+}
+
+async function persistCompany(company: Company) {
+  if (!firestoreDb) throw new Error('Firebase Firestore is not configured');
+  await firestoreDb.collection('companies').doc(company.id).set(company, { merge: true });
+  db.companies.set(company.id, company);
+}
 
 // Seed default user & company for seamless previewing
 const DEFAULT_UID = 'user_demo_123';
@@ -393,26 +468,9 @@ db.tasks.set(103, {
 });
 db.nextTaskId = 104;
 
-// Helper to resolve current user
+// Helper to resolve the verified Firebase user attached by the session middleware.
 function getAuthUser(req: express.Request): User | null {
-  const uid = req.cookies?.demo_uid;
-  if (!uid) {
-    return null;
-  }
-  let user = db.users.get(uid);
-  if (!user) {
-    user = {
-      uid,
-      email: 'user@caveworkers.com',
-      display_name: 'Workspace Manager',
-      company_id: `org_${uid.slice(0, 10)}`,
-      company_name: 'Acme Operations',
-      onboarded: true,
-      selected_tier: 'growth'
-    };
-    db.users.set(uid, user);
-  }
-  return user;
+  return authenticatedUsers.get(req) || null;
 }
 
 function getAuthUserOrDefault(req: express.Request): User {
@@ -426,6 +484,31 @@ function getAuthUserOrDefault(req: express.Request): User {
     selected_tier: 'growth'
   };
 }
+
+// Verify Firebase session cookies before protected routes are evaluated.
+app.use(async (req, res, next) => {
+  const sessionCookie = req.cookies?.__session;
+  if (!sessionCookie || !firebaseAuth) return next();
+
+  try {
+    const decoded = await firebaseAuth.verifySessionCookie(sessionCookie, true);
+    const user = await loadUserFromFirebase(decoded.uid);
+    if (!user) throw new Error('Firebase user profile not found');
+    authenticatedUsers.set(req, user);
+  } catch (_error) {
+    res.clearCookie('__session', { path: '/' });
+    res.clearCookie('cw_csrf', { path: '/' });
+  }
+  next();
+});
+
+// All non-auth API routes require the verified Firebase session above.
+app.use('/api', (req, res, next) => {
+  const publicApiPaths = new Set(['/health', '/session-login', '/session-logout']);
+  if (publicApiPaths.has(req.path)) return next();
+  if (!getAuthUser(req)) return res.status(401).json({ error: 'Authentication required.' });
+  next();
+});
 
 // ── PAGE ROUTES ──────────────────────────────────────────
 
@@ -501,78 +584,88 @@ app.get('/api/health', (_req, res) => {
     components: {
       database: { status: 'up' },
       payments: { status: RAZORPAY_KEY_ID ? 'configured' : 'unconfigured' },
-      firebase: { status: 'active' },
+      firebase: { status: firebaseAuth && firestoreDb ? 'active' : 'unconfigured' },
       mcp_bus: { status: 'active' }
     }
   });
 });
 
 app.post('/api/session-login', async (req, res) => {
-  const { idToken, email, display_name, photo_url } = req.body || {};
-  let decodedUser: any = null;
-
-  if (idToken && getApps().length) {
-    try {
-      decodedUser = await getAuth().verifyIdToken(idToken);
-    } catch (e) {
-      console.warn('Firebase token verification note:', e);
-    }
+  const { idToken } = req.body || {};
+  if (!idToken || !firebaseAuth || !firestoreDb) {
+    return res.status(503).json({ error: 'Google sign-in is not configured on this server.' });
   }
 
-  const userEmail = decodedUser?.email || email || 'ragulyogesh7@gmail.com';
-  const userName = decodedUser?.name || display_name || 'Ragul Yogesh';
-  const userPhoto = decodedUser?.picture || photo_url || '';
-  const uid = decodedUser?.uid || `usr_google_${Buffer.from(userEmail).toString('hex').slice(0, 12)}`;
+  let decodedUser: any;
+  try {
+    decodedUser = await firebaseAuth.verifyIdToken(idToken);
+  } catch (_error) {
+    return res.status(401).json({ error: 'The Google sign-in token is invalid or expired.' });
+  }
 
-  let user = db.users.get(uid);
-  if (!user) {
-    user = {
-      uid,
-      email: userEmail,
-      display_name: userName,
-      photo_url: userPhoto,
-      company_id: `org_${uid.slice(0, 8)}`,
-      company_name: 'Acme Operations',
-      onboarded: true,
-      selected_tier: 'growth',
-      role: 'admin'
-    };
-    db.users.set(uid, user);
+  if (!decodedUser?.uid || !decodedUser.email || decodedUser.firebase?.sign_in_provider !== 'google.com') {
+    return res.status(401).json({ error: 'Please sign in with a verified Google account.' });
+  }
 
-    if (!db.companies.has(user.company_id)) {
-      db.companies.set(user.company_id, {
-        id: user.company_id,
-        name: 'Acme Operations',
+  const now = new Date().toISOString();
+  const existingUser = await loadUserFromFirebase(decodedUser.uid);
+  const user: User = {
+    ...(existingUser || {}),
+    uid: decodedUser.uid,
+    email: decodedUser.email,
+    display_name: decodedUser.name || existingUser?.display_name || decodedUser.email.split('@')[0],
+    photo_url: decodedUser.picture || existingUser?.photo_url || '',
+    company_id: existingUser?.company_id || 'org_' + decodedUser.uid.slice(0, 10),
+    company_name: existingUser?.company_name || 'Acme Operations',
+    onboarded: existingUser?.onboarded ?? true,
+    selected_tier: existingUser?.selected_tier || 'growth',
+    role: existingUser?.role || 'admin',
+    created_at: existingUser?.created_at || now,
+    updated_at: now
+  };
+
+  try {
+    await persistUser(user, {
+      auth_provider: decodedUser.firebase?.sign_in_provider || 'google.com',
+      email_verified: Boolean(decodedUser.email_verified)
+    });
+
+    const existingCompany = await loadCompanyFromFirebase(user.company_id!);
+    if (!existingCompany) {
+      const company: Company = {
+        id: user.company_id!,
+        name: user.company_name || 'Acme Operations',
         industry: 'Technology',
         team_size: '11-50',
-        owner_uid: uid,
-        tier: 'growth',
+        owner_uid: user.uid,
+        tier: user.selected_tier || 'growth',
         status: 'active',
         selected_employees: ['sarah', 'david', 'alex', 'mike'],
-        created_at: new Date().toISOString()
-      });
-      db.orgEmployees.set(user.company_id, db.orgEmployees.get(DEFAULT_COMPANY_ID) || []);
-      db.knowledge.set(user.company_id, db.knowledge.get(DEFAULT_COMPANY_ID) || []);
+        created_at: now
+      };
+      await persistCompany(company);
+      db.orgEmployees.set(company.id, db.orgEmployees.get(DEFAULT_COMPANY_ID) || []);
+      db.knowledge.set(company.id, db.knowledge.get(DEFAULT_COMPANY_ID) || []);
     }
-  } else {
-    if (userName) user.display_name = userName;
-    if (userPhoto) user.photo_url = userPhoto;
-    if (userEmail) user.email = userEmail;
+
+    const sessionCookie = await firebaseAuth.createSessionCookie(idToken, { expiresIn: SESSION_COOKIE_MAX_AGE });
+    const csrfToken = crypto.randomBytes(32).toString('hex');
+    res.cookie('__session', sessionCookie, sessionCookieOptions);
+    res.cookie('cw_csrf', csrfToken, readableCookieOptions);
+    res.json({
+      status: 'success',
+      redirect: user.onboarded ? '/command' : '/onboarding',
+      csrf_token: csrfToken
+    });
+  } catch (error) {
+    console.error('Firebase session persistence failed:', error);
+    res.status(500).json({ error: 'Could not save your account to Firebase. Please try again.' });
   }
-
-  res.cookie('demo_uid', uid, { httpOnly: true, secure: false, sameSite: 'lax' });
-  res.cookie('__session', 'session_token_' + Date.now(), { httpOnly: true, secure: false, sameSite: 'lax' });
-  res.cookie('csrf_token', 'csrf_token_caveworkers', { httpOnly: false, secure: false, sameSite: 'lax' });
-
-  res.json({
-    status: 'success',
-    redirect: '/command',
-    csrf_token: 'csrf_token_caveworkers'
-  });
 });
 
 app.post('/api/session-logout', (_req, res) => {
   res.clearCookie('__session', { path: '/' });
+  res.clearCookie('cw_csrf', { path: '/' });
   res.clearCookie('csrf_token', { path: '/' });
   res.clearCookie('demo_uid', { path: '/' });
   res.json({ status: 'logged_out' });
@@ -580,6 +673,7 @@ app.post('/api/session-logout', (_req, res) => {
 
 app.get('/logout', (_req, res) => {
   res.clearCookie('__session', { path: '/' });
+  res.clearCookie('cw_csrf', { path: '/' });
   res.clearCookie('csrf_token', { path: '/' });
   res.clearCookie('demo_uid', { path: '/' });
   res.redirect('/login');
@@ -612,16 +706,16 @@ app.get('/api/billing', (req, res) => {
   });
 });
 
-app.post('/api/onboarding/save-profile', (req, res) => {
+app.post('/api/onboarding/save-profile', async (req, res) => {
   const user = getAuthUser(req);
   const { display_name, photo_url } = req.body || {};
   if (display_name) user.display_name = display_name;
   if (photo_url) user.photo_url = photo_url;
-  db.users.set(user.uid, user);
+  await persistUser(user);
   res.json({ ok: true });
 });
 
-app.post('/api/onboarding/save-company', (req, res) => {
+app.post('/api/onboarding/save-company', async (req, res) => {
   const user = getAuthUser(req);
   const { company_name, industry, team_size } = req.body || {};
   if (!company_name) {
@@ -630,9 +724,7 @@ app.post('/api/onboarding/save-company', (req, res) => {
   const company_id = `org_${user.uid.slice(0, 10)}`;
   user.company_id = company_id;
   user.company_name = company_name;
-  db.users.set(user.uid, user);
-
-  db.companies.set(company_id, {
+  const company: Company = {
     id: company_id,
     name: company_name,
     industry: industry || 'Technology',
@@ -641,12 +733,14 @@ app.post('/api/onboarding/save-company', (req, res) => {
     tier: 'free_trial',
     status: 'active',
     created_at: new Date().toISOString()
-  });
+  };
+  await persistUser(user);
+  await persistCompany(company);
 
   res.json({ ok: true, company_id });
 });
 
-app.post('/api/onboarding/select-plan', (req, res) => {
+app.post('/api/onboarding/select-plan', async (req, res) => {
   const user = getAuthUser(req);
   const { tier } = req.body || {};
   if (tier && SUBSCRIPTION_PLANS[tier]) {
@@ -654,12 +748,14 @@ app.post('/api/onboarding/select-plan', (req, res) => {
     if (user.company_id && db.companies.has(user.company_id)) {
       const comp = db.companies.get(user.company_id)!;
       comp.tier = tier;
+      await persistCompany(comp);
     }
+    await persistUser(user);
   }
   res.json({ ok: true, tier: user.selected_tier });
 });
 
-app.post('/api/onboarding/select-employees', (req, res) => {
+app.post('/api/onboarding/select-employees', async (req, res) => {
   const user = getAuthUser(req);
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const { employee_ids } = req.body || {};
@@ -683,14 +779,19 @@ app.post('/api/onboarding/select-employees', (req, res) => {
       }
     });
     db.orgEmployees.set(companyId, orgEmps);
+    const company = db.companies.get(companyId);
+    if (company) {
+      company.selected_employees = employee_ids;
+      await persistCompany(company);
+    }
   }
   res.json({ ok: true, employees_added: (employee_ids || []).length });
 });
 
-app.post('/api/onboarding/complete', (req, res) => {
+app.post('/api/onboarding/complete', async (req, res) => {
   const user = getAuthUser(req);
   user.onboarded = true;
-  db.users.set(user.uid, user);
+  await persistUser(user);
 
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const logs = db.activity.get(companyId) || [];
@@ -721,7 +822,7 @@ app.get('/api/company', (req, res) => {
   res.json(company);
 });
 
-app.post('/api/company', (req, res) => {
+app.post('/api/company', async (req, res) => {
   const user = getAuthUser(req);
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const company = db.companies.get(companyId) || {
@@ -734,7 +835,8 @@ app.post('/api/company', (req, res) => {
   };
   Object.assign(company, req.body);
   if (req.body.name) user.company_name = req.body.name;
-  db.companies.set(companyId, company);
+  await persistUser(user);
+  await persistCompany(company);
   res.json({ ok: true, company });
 });
 

@@ -49,9 +49,6 @@
           <span>Continue with Google</span>
         </button>
 
-        <button id="google-demo-login-btn" class="google-btn" style="margin-top: 10px; background: #1a231c; border-color: #3b503e; color: #c5f36a;">
-          <span>⚡ Instant Google Sign-In (ragulyogesh7@gmail.com)</span>
-        </button>
 
         <div class="trust-indicators">
           <span>🔒 Secure Google Sign-In</span>
@@ -68,70 +65,62 @@
 
   <script type="module">
     import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
-    import { getAuth, GoogleAuthProvider, signInWithPopup } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+    import { getAuth, GoogleAuthProvider, getRedirectResult, signInWithPopup, signInWithRedirect } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
 
     const firebaseConfig = <%- JSON.stringify(firebase_config || {}) %>;
     const app = initializeApp(firebaseConfig);
     const auth = getAuth(app);
     const provider = new GoogleAuthProvider();
+    provider.setCustomParameters({ prompt: "select_account" });
 
     const loginBtn = document.getElementById("google-login-btn");
     const errorDiv = document.getElementById("auth-error");
 
-    const demoBtn = document.getElementById("google-demo-login-btn");
-
-    async function loginDirectly(email = "ragulyogesh7@gmail.com", displayName = "Ragul Yogesh") {
-      errorDiv.style.display = "none";
-      if (demoBtn) { demoBtn.disabled = true; demoBtn.textContent = "Authenticating with Google Workspace..."; }
-      try {
-        const res = await fetch("/api/session-login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email, display_name: displayName })
-        });
-        const data = await res.json();
-        if (res.ok && data.status === "success") {
-          window.location.href = data.redirect || "/command";
-        } else {
-          throw new Error(data.error || "Session creation failed.");
-        }
-      } catch (err) {
-        errorDiv.textContent = err.message || "Sign-in failed.";
-        errorDiv.style.display = "block";
-        if (demoBtn) { demoBtn.disabled = false; demoBtn.textContent = "⚡ Instant Google Sign-In (ragulyogesh7@gmail.com)"; }
-      }
+    function showError(message) {
+      errorDiv.textContent = message;
+      errorDiv.style.display = "block";
+      loginBtn.disabled = false;
+      loginBtn.innerHTML = '<span>Continue with Google</span>';
     }
 
-    if (demoBtn) {
-      demoBtn.addEventListener("click", () => loginDirectly("ragulyogesh7@gmail.com", "Ragul Yogesh"));
+    async function createServerSession(user) {
+      const idToken = await user.getIdToken(true);
+      const res = await fetch("/api/session-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ idToken })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.status !== "success") {
+        throw new Error(data.error || "Could not create a secure CaveWorkers session.");
+      }
+      window.location.assign(data.redirect || "/command");
+    }
+
+    async function handleGoogleResult(result) {
+      if (result?.user) await createServerSession(result.user);
+    }
+
+    try {
+      await handleGoogleResult(await getRedirectResult(auth));
+    } catch (error) {
+      showError(error?.message || "Google sign-in could not be completed.");
     }
 
     loginBtn.addEventListener("click", async () => {
       errorDiv.style.display = "none";
       loginBtn.disabled = true;
-      loginBtn.innerHTML = `<span>Signing in...</span>`;
-
+      loginBtn.innerHTML = '<span>Signing in securely...</span>';
       try {
         const result = await signInWithPopup(auth, provider);
-        const user = result.user;
-        const idToken = await user.getIdToken();
-
-        const res = await fetch("/api/session-login", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ idToken: idToken, email: user.email, display_name: user.displayName, photo_url: user.photoURL })
-        });
-
-        const data = await res.json();
-        if (res.ok && data.status === "success") {
-          window.location.href = data.redirect || "/command";
-        } else {
-          throw new Error(data.error || "Failed to create session");
+        await handleGoogleResult(result);
+      } catch (error) {
+        if (error?.code === "auth/popup-blocked") {
+          await signInWithRedirect(auth, provider);
+          return;
         }
-      } catch (err) {
-        // Handle unauthorized domain or popup restrictions silently without logging to console.error
-        console.warn("Notice: proceeding with Google Workspace sign-in.");
-        loginDirectly("ragulyogesh7@gmail.com", "Ragul Yogesh");
+        showError(error?.message || "Google sign-in could not be completed.");
       }
     });
   </script>
