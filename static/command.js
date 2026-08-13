@@ -24,11 +24,43 @@ async function responseJson(url, options) {
   return data;
 }
 
+let trialCountdownTimer = null;
+function renderTrialBanner(billing) {
+  const banner = $('#trial-banner');
+  const title = $('#trial-banner-text');
+  const detail = $('#trial-banner-detail');
+  if (!banner || !title || !detail) return;
+  if (trialCountdownTimer) window.clearInterval(trialCountdownTimer);
+  const isTrial = billing.tier_key === 'free_trial' && billing.trial_ends_at;
+  if (!isTrial) { banner.hidden = true; return; }
+
+  banner.hidden = false;
+  const endsAt = new Date(billing.trial_ends_at).getTime();
+  const render = () => {
+    const remaining = endsAt - Date.now();
+    if (remaining <= 0) {
+      banner.classList.add('expired');
+      title.textContent = 'Your free trial has ended.';
+      detail.textContent = 'Workspace actions are paused until you upgrade.';
+      return;
+    }
+    banner.classList.remove('expired');
+    const totalHours = Math.ceil(remaining / (60 * 60 * 1000));
+    const days = Math.floor(totalHours / 24);
+    const hours = totalHours % 24;
+    title.textContent = days > 0 ? `${days} day${days === 1 ? '' : 's'} left on your free trial.` : `${hours} hour${hours === 1 ? '' : 's'} left on your free trial.`;
+    detail.textContent = `Trial access ends ${new Date(endsAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}.`;
+  };
+  render();
+  trialCountdownTimer = window.setInterval(render, 60 * 1000);
+}
+
 async function loadBilling() {
   try {
     const billing = await responseJson('/api/billing');
     const workspace = $('.workspace-name > span:nth-child(2)');
     if (workspace && billing.company_name) workspace.textContent = billing.company_name;
+    renderTrialBanner(billing);
   } catch (error) { console.error('Unable to load subscription details:', error); }
 }
 

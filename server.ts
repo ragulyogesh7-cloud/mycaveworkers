@@ -17,6 +17,11 @@ dotenv.config();
 const app = express();
 const PORT = 3000;
 const HOST = '0.0.0.0';
+const IS_PRODUCTION = process.env.CAVEWORKERS_ENV === 'production';
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((origin) => origin.trim()).filter(Boolean);
+if (IS_PRODUCTION && ALLOWED_ORIGINS.length === 0) {
+  throw new Error('ALLOWED_ORIGINS must be configured in production.');
+}
 
 let genAIClient: GoogleGenAI | null = null;
 if (process.env.GEMINI_API_KEY) {
@@ -31,8 +36,14 @@ if (process.env.GEMINI_API_KEY) {
   }
 }
 
-app.use(cors({ origin: true, credentials: true }));
-app.use(express.json());
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
+    return callback(new Error('Origin not allowed by CORS'));
+  },
+  credentials: true
+}));
+app.use(express.json({ verify: (req, _res, buffer) => { (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer); } }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
@@ -91,8 +102,12 @@ const sessionCookieOptions = { httpOnly: true, secure: cookieSecure, sameSite: '
 const readableCookieOptions = { httpOnly: false, secure: cookieSecure, sameSite: 'lax' as const, path: '/', maxAge: SESSION_COOKIE_MAX_AGE };
 
 // Razorpay Setup
-const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || 'rzp_test_TOteB93qoWHTSs';
-const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || 'r3dvDLjQcvllQtL7ipJYmoW4';
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || '';
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || '';
+const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || '';
+if (IS_PRODUCTION && (!RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET || !RAZORPAY_WEBHOOK_SECRET)) {
+  throw new Error('RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, and RAZORPAY_WEBHOOK_SECRET are required in production.');
+}
 
 let razorpayClient: Razorpay | null = null;
 try {
@@ -212,6 +227,10 @@ interface Company {
   tier: string;
   status: string;
   selected_employees?: string[];
+  trial_started_at?: string;
+  trial_ends_at?: string;
+  payment_verified_at?: string;
+  payment_id?: string;
   created_at: string;
 }
 
@@ -264,6 +283,16 @@ const db = {
 };
 
 const authenticatedUsers = new WeakMap<express.Request, User>();
+const pendingPaymentOrders = new Map<string, { uid: string; company_id: string; tier: string; amount: number; created_at: string }>();
+const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
+function rateLimitKey(req: express.Request, scope: string): string { return `${scope}:${req.ip || req.socket.remoteAddress || 'unknown'}`; }
+function isRateLimited(key: string, limit: number, windowMs: number): boolean {
+  const now = Date.now();
+  const current = rateLimitBuckets.get(key);
+  if (!current || now >= current.resetAt) { rateLimitBuckets.set(key, { count: 1, resetAt: now + windowMs }); return false; }
+  current.count += 1;
+  return current.count > limit;
+}
 
 async function loadUserFromFirebase(uid: string): Promise<User | null> {
   const cached = db.users.get(uid);
@@ -502,13 +531,56 @@ app.use(async (req, res, next) => {
   next();
 });
 
+// Every unsafe API request must echo the same token issued in the readable CSRF cookie.
+app.use('/api', (req, res, next) => {
+  const unsafe = /^(POST|PUT|PATCH|DELETE)$/i.test(req.method);
+  const publicPath = req.path === '/session-login' || req.path === '/session-logout' || req.path === '/payments/webhook';
+  if (!unsafe || publicPath) return next();
+
+  const cookieToken = req.cookies?.cw_csrf || '';
+  const headerToken = req.get('x-csrf-token') || '';
+  const matches = cookieToken && headerToken && cookieToken.length === headerToken.length && crypto.timingSafeEqual(Buffer.from(cookieToken), Buffer.from(headerToken));
+  if (!matches) return res.status(403).json({ error: 'CSRF validation failed.' });
+  next();
+});
+
+// Apply local-process request limits until a shared edge limiter is configured for multi-instance production.
+app.use('/api', (req, res, next) => {
+  const limits: Record<string, [number, number]> = {
+    '/session-login': [10, 15 * 60 * 1000],
+    '/task': [30, 60 * 1000],
+    '/tasks': [30, 60 * 1000],
+    '/payments/create-order': [8, 15 * 60 * 1000],
+    '/payments/verify': [12, 15 * 60 * 1000],
+    '/payments/webhook': [120, 60 * 1000]
+  };
+  const rule = limits[req.path];
+  if (!rule || !isRateLimited(rateLimitKey(req, req.path), rule[0], rule[1])) return next();
+  return res.status(429).json({ error: 'Too many requests. Please try again later.' });
+});
+
 // All non-auth API routes require the verified Firebase session above.
 app.use('/api', (req, res, next) => {
-  const publicApiPaths = new Set(['/health', '/session-login', '/session-logout']);
+  const publicApiPaths = new Set(['/health', '/session-login', '/session-logout', '/payments/webhook']);
   if (publicApiPaths.has(req.path)) return next();
   if (!getAuthUser(req)) return res.status(401).json({ error: 'Authentication required.' });
   next();
 });
+
+async function enforceWorkspaceAccess(req: express.Request, res: express.Response): Promise<boolean> {
+  const user = getAuthUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Authentication required.' });
+    return true;
+  }
+  const company = user.company_id ? await loadCompanyFromFirebase(user.company_id) || db.companies.get(user.company_id) : null;
+  if (!company) return false;
+  if (company.tier === 'free_trial' && company.trial_ends_at && Date.now() >= Date.parse(company.trial_ends_at)) {
+    res.status(402).json({ error: 'Your free trial has ended. Upgrade to continue using workspace actions.', upgrade_required: true, trial_ends_at: company.trial_ends_at });
+    return true;
+  }
+  return false;
+}
 
 // ── PAGE ROUTES ──────────────────────────────────────────
 
@@ -615,10 +687,10 @@ app.post('/api/session-login', async (req, res) => {
     email: decodedUser.email,
     display_name: decodedUser.name || existingUser?.display_name || decodedUser.email.split('@')[0],
     photo_url: decodedUser.picture || existingUser?.photo_url || '',
-    company_id: existingUser?.company_id || 'org_' + decodedUser.uid.slice(0, 10),
-    company_name: existingUser?.company_name || 'Acme Operations',
-    onboarded: existingUser?.onboarded ?? true,
-    selected_tier: existingUser?.selected_tier || 'growth',
+    company_id: existingUser?.company_id,
+    company_name: existingUser?.company_name,
+    onboarded: existingUser?.onboarded ?? false,
+    selected_tier: existingUser?.selected_tier || 'free_trial',
     role: existingUser?.role || 'admin',
     created_at: existingUser?.created_at || now,
     updated_at: now
@@ -630,8 +702,8 @@ app.post('/api/session-login', async (req, res) => {
       email_verified: Boolean(decodedUser.email_verified)
     });
 
-    const existingCompany = await loadCompanyFromFirebase(user.company_id!);
-    if (!existingCompany) {
+    const existingCompany = user.company_id ? await loadCompanyFromFirebase(user.company_id) : null;
+    if (user.company_id && !existingCompany) {
       const company: Company = {
         id: user.company_id!,
         name: user.company_name || 'Acme Operations',
@@ -684,15 +756,26 @@ app.get('/api/me', (req, res) => {
   res.json(user);
 });
 
-app.get('/api/billing', (req, res) => {
+app.get('/api/billing', async (req, res) => {
   const user = getAuthUser(req);
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const company = db.companies.get(companyId) || {
-    id: companyId,
-    name: user.company_name || 'Acme Operations',
-    tier: user.selected_tier || 'growth',
-    status: 'active'
-  };
+  const company: Company = user.company_id
+    ? await loadCompanyFromFirebase(companyId) || db.companies.get(companyId) || {
+      id: companyId,
+      name: user.company_name || 'Acme Operations',
+      tier: user.selected_tier || 'free_trial',
+      status: 'active',
+      owner_uid: user.uid,
+      created_at: new Date().toISOString()
+    }
+    : db.companies.get(companyId) || {
+      id: companyId,
+      name: user.company_name || 'Acme Operations',
+      tier: user.selected_tier || 'free_trial',
+      status: 'active',
+      owner_uid: user.uid,
+      created_at: new Date().toISOString()
+    };
   const plan = SUBSCRIPTION_PLANS[company.tier] || SUBSCRIPTION_PLANS.growth;
   const activeEmps = (db.orgEmployees.get(companyId) || []).length;
 
@@ -702,7 +785,11 @@ app.get('/api/billing', (req, res) => {
     tier_key: company.tier,
     active_employees: activeEmps,
     max_employees: plan.max_employees,
-    quota_remaining: Math.max(0, plan.max_employees - activeEmps)
+    quota_remaining: Math.max(0, plan.max_employees - activeEmps),
+    status: company.status,
+    trial_started_at: company.trial_started_at,
+    trial_ends_at: company.trial_ends_at,
+    upgrade_required: company.tier === 'free_trial' && Boolean(company.trial_ends_at && Date.now() >= Date.parse(company.trial_ends_at))
   });
 });
 
@@ -745,10 +832,20 @@ app.post('/api/onboarding/select-plan', async (req, res) => {
   const { tier } = req.body || {};
   if (tier && SUBSCRIPTION_PLANS[tier]) {
     user.selected_tier = tier;
-    if (user.company_id && db.companies.has(user.company_id)) {
-      const comp = db.companies.get(user.company_id)!;
-      comp.tier = tier;
-      await persistCompany(comp);
+    if (user.company_id) {
+      const comp = await loadCompanyFromFirebase(user.company_id) || db.companies.get(user.company_id);
+      if (comp) {
+        comp.tier = tier;
+        if (tier === 'free_trial') {
+          const trialStartedAt = comp.trial_started_at || new Date().toISOString();
+          comp.trial_started_at = trialStartedAt;
+          comp.trial_ends_at = comp.trial_ends_at || new Date(Date.parse(trialStartedAt) + (SUBSCRIPTION_PLANS.free_trial.trial_days || 3) * 24 * 60 * 60 * 1000).toISOString();
+          comp.status = 'active';
+        } else {
+          comp.status = 'payment_pending';
+        }
+        await persistCompany(comp);
+      }
     }
     await persistUser(user);
   }
@@ -761,6 +858,11 @@ app.post('/api/onboarding/select-employees', async (req, res) => {
   const { employee_ids } = req.body || {};
 
   if (Array.isArray(employee_ids)) {
+    const companyForPlan = user.company_id ? await loadCompanyFromFirebase(user.company_id) : null;
+    const plan = SUBSCRIPTION_PLANS[user.selected_tier || companyForPlan?.tier || 'free_trial'] || SUBSCRIPTION_PLANS.free_trial;
+    if (employee_ids.length > plan.max_employees) {
+      return res.status(402).json({ error: `${plan.name} allows up to ${plan.max_employees} AI employees. Upgrade to add more.`, upgrade_required: true });
+    }
     const orgEmps: OrgEmployee[] = [];
     employee_ids.forEach((empId: string) => {
       const cat = EMPLOYEE_CATALOG.find((e) => e.id === empId);
@@ -779,7 +881,7 @@ app.post('/api/onboarding/select-employees', async (req, res) => {
       }
     });
     db.orgEmployees.set(companyId, orgEmps);
-    const company = db.companies.get(companyId);
+    const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId);
     if (company) {
       company.selected_employees = employee_ids;
       await persistCompany(company);
@@ -791,6 +893,18 @@ app.post('/api/onboarding/select-employees', async (req, res) => {
 app.post('/api/onboarding/complete', async (req, res) => {
   const user = getAuthUser(req);
   user.onboarded = true;
+  if (user.company_id) {
+    const company = await loadCompanyFromFirebase(user.company_id) || db.companies.get(user.company_id);
+    if (company) {
+      if (company.tier === 'free_trial' && !company.trial_started_at) {
+        const started = new Date();
+        company.trial_started_at = started.toISOString();
+        company.trial_ends_at = new Date(started.getTime() + (SUBSCRIPTION_PLANS.free_trial.trial_days || 3) * 24 * 60 * 60 * 1000).toISOString();
+      }
+      company.status = 'active';
+      await persistCompany(company);
+    }
+  }
   await persistUser(user);
 
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
@@ -808,16 +922,18 @@ app.post('/api/onboarding/complete', async (req, res) => {
   res.json({ ok: true, redirect: '/command' });
 });
 
-app.get('/api/company', (req, res) => {
+app.get('/api/company', async (req, res) => {
   const user = getAuthUser(req);
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const company = db.companies.get(companyId) || {
+  const company = user.company_id ? await loadCompanyFromFirebase(companyId) || db.companies.get(companyId) : db.companies.get(companyId) || {
     id: companyId,
     name: user.company_name || 'Acme Operations',
     industry: 'Technology',
     team_size: '11-50',
-    tier: user.selected_tier || 'growth',
-    status: 'active'
+    tier: user.selected_tier || 'free_trial',
+    status: 'active',
+    owner_uid: user.uid,
+    created_at: new Date().toISOString()
   };
   res.json(company);
 });
@@ -851,13 +967,19 @@ app.get('/api/employees', (req, res) => {
   res.json(emps);
 });
 
-app.post('/api/employees/configure', (req, res) => {
+app.post('/api/employees/configure', async (req, res) => {
   const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const { employee_id, action } = req.body || {};
 
   let emps = db.orgEmployees.get(companyId) || [];
   if (action === 'add') {
+    const companyForPlan = user.company_id ? await loadCompanyFromFirebase(user.company_id) : null;
+    const plan = SUBSCRIPTION_PLANS[user.selected_tier || companyForPlan?.tier || 'free_trial'] || SUBSCRIPTION_PLANS.free_trial;
+    if (emps.length >= plan.max_employees) {
+      return res.status(402).json({ error: `${plan.name} allows up to ${plan.max_employees} AI employees. Upgrade to add more.`, upgrade_required: true });
+    }
     const cat = EMPLOYEE_CATALOG.find((e) => e.id === employee_id);
     if (cat && !emps.some((e) => e.id === employee_id)) {
       emps.push({
@@ -880,8 +1002,9 @@ app.post('/api/employees/configure', (req, res) => {
   res.json({ ok: true, active_count: emps.length });
 });
 
-app.post('/api/employees/:id/tools', (req, res) => {
+app.post('/api/employees/:id/tools', async (req, res) => {
   const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const empId = req.params.id;
   const { tool_name, action, access_level } = req.body || {};
@@ -1172,6 +1295,7 @@ In response to "${question}", work was routed through permissioned workspace too
 
 app.post('/api/task', async (req, res) => {
   const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const { request: question } = req.body || {};
   const result = await handleTaskRoutingAsync(question || 'Operations review', companyId);
@@ -1180,6 +1304,7 @@ app.post('/api/task', async (req, res) => {
 
 app.post('/api/tasks', async (req, res) => {
   const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const { request: question } = req.body || {};
   const result = await handleTaskRoutingAsync(question || 'Operations review', companyId);
@@ -1346,68 +1471,104 @@ app.get('/api/activity', (req, res) => {
 });
 
 app.post('/api/payments/create-order', async (req, res) => {
+  const user = getAuthUser(req);
   const { tier } = req.body || {};
-  const plan = SUBSCRIPTION_PLANS[tier || 'growth'] || SUBSCRIPTION_PLANS.growth;
-  const amountInPaise = Math.round((plan.price_inr || plan.price * 83 || 6999) * 100);
+  const plan = SUBSCRIPTION_PLANS[tier || user.selected_tier || 'growth'];
+  if (!plan || tier === 'free_trial') return res.status(400).json({ error: 'A paid plan is required to create a payment order.' });
+  if (!razorpayClient || !RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET) return res.status(503).json({ error: 'Payments are not configured on this server.' });
 
-  if (razorpayClient) {
-    try {
-      const order = await razorpayClient.orders.create({
-        amount: amountInPaise,
-        currency: 'INR',
-        receipt: `rcpt_${Date.now()}`
-      });
-      return res.json({
-        order_id: order.id,
-        amount: order.amount,
-        currency: order.currency,
-        key_id: RAZORPAY_KEY_ID
-      });
-    } catch (err: any) {
-      console.warn('Razorpay SDK order creation note:', err?.message || err);
-    }
+  const amountInPaise = Math.round((plan.price_inr || plan.price * 83) * 100);
+  try {
+    const order = await razorpayClient.orders.create({
+      amount: amountInPaise,
+      currency: 'INR',
+      receipt: `rcpt_${user.uid}_${Date.now()}`,
+      notes: { uid: user.uid, company_id: user.company_id || DEFAULT_COMPANY_ID, tier: tier || user.selected_tier || 'growth' }
+    });
+    pendingPaymentOrders.set(order.id, { uid: user.uid, company_id: user.company_id || DEFAULT_COMPANY_ID, tier: tier || user.selected_tier || 'growth', amount: Number(order.amount), created_at: new Date().toISOString() });
+    return res.json({ order_id: order.id, amount: order.amount, currency: order.currency, key_id: RAZORPAY_KEY_ID });
+  } catch (err: any) {
+    console.error('Razorpay order creation failed:', err?.message || err);
+    return res.status(502).json({ error: 'Could not create a payment order. Please try again.' });
   }
-
-  res.json({
-    order_id: 'order_live_' + Date.now(),
-    amount: amountInPaise,
-    currency: 'INR',
-    key_id: RAZORPAY_KEY_ID
-  });
 });
 
-app.post('/api/payments/verify', (req, res) => {
-  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+app.post('/api/payments/webhook', async (req, res) => {
+  if (!RAZORPAY_WEBHOOK_SECRET) return res.status(503).json({ error: 'Payment webhooks are not configured.' });
+  const rawBody = (req as express.Request & { rawBody?: Buffer }).rawBody || Buffer.from(JSON.stringify(req.body || {}));
+  const providedSignature = req.get('x-razorpay-signature') || '';
+  const expectedSignature = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET).update(rawBody).digest('hex');
+  const valid = providedSignature.length === expectedSignature.length && crypto.timingSafeEqual(Buffer.from(providedSignature), Buffer.from(expectedSignature));
+  if (!valid) return res.status(401).json({ error: 'Invalid payment webhook signature.' });
 
-  if (razorpay_order_id && razorpay_payment_id && razorpay_signature && RAZORPAY_KEY_SECRET) {
-    try {
-      const body = razorpay_order_id + '|' + razorpay_payment_id;
-      const expectedSignature = crypto
-        .createHmac('sha256', RAZORPAY_KEY_SECRET)
-        .update(body.toString())
-        .digest('hex');
+  const event = req.body?.event;
+  if (!['payment.authorized', 'payment.captured'].includes(event)) return res.json({ received: true });
+  const payment = req.body?.payload?.payment?.entity;
+  const orderId = payment?.order_id;
+  const paymentId = payment?.id;
+  if (!orderId || !paymentId) return res.status(400).json({ error: 'Payment webhook payload is incomplete.' });
 
-      if (expectedSignature === razorpay_signature) {
-        const user = getAuthUser(req);
-        if (user.company_id && db.companies.has(user.company_id)) {
-          const comp = db.companies.get(user.company_id)!;
-          comp.tier = user.selected_tier || 'growth';
-          comp.status = 'active';
-        }
-        return res.json({ status: 'verified', tier: user.selected_tier || 'growth' });
+  try {
+    let pending = pendingPaymentOrders.get(orderId);
+    if (!pending && razorpayClient) {
+      const order = await razorpayClient.orders.fetch(orderId);
+      const notes = order.notes || {};
+      if (notes.uid && notes.company_id && notes.tier) {
+        pending = { uid: String(notes.uid), company_id: String(notes.company_id), tier: String(notes.tier), amount: Number(order.amount), created_at: new Date().toISOString() };
       }
-    } catch (e) {
-      console.warn('Razorpay signature verification note:', e);
     }
-  }
+    if (!pending) return res.status(202).json({ received: true, reason: 'Payment order is not pending in this workspace.' });
 
-  const user = getAuthUser(req);
-  if (user.company_id && db.companies.has(user.company_id)) {
-    const comp = db.companies.get(user.company_id)!;
-    comp.tier = user.selected_tier || 'growth';
-    comp.status = 'active';
+    const company = await loadCompanyFromFirebase(pending.company_id) || db.companies.get(pending.company_id);
+    if (company) {
+      company.tier = pending.tier;
+      company.status = 'active';
+      company.payment_verified_at = new Date().toISOString();
+      company.payment_id = paymentId;
+      await persistCompany(company);
+    }
+    const linkedUser = await loadUserFromFirebase(pending.uid);
+    if (linkedUser) {
+      linkedUser.selected_tier = pending.tier;
+      await persistUser(linkedUser, { payment_id: paymentId });
+    }
+    pendingPaymentOrders.delete(orderId);
+    return res.json({ received: true });
+  } catch (error) {
+    console.error('Razorpay webhook processing failed:', error);
+    return res.status(500).json({ error: 'Webhook processing failed.' });
   }
-  res.json({ status: 'verified', tier: user.selected_tier || 'growth' });
+});
+
+app.post('/api/payments/verify', async (req, res) => {
+  const user = getAuthUser(req);
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !RAZORPAY_KEY_SECRET) return res.status(402).json({ error: 'A valid Razorpay payment is required.', payment_required: true });
+
+  const pending = pendingPaymentOrders.get(razorpay_order_id);
+  if (!pending || pending.uid !== user.uid) return res.status(403).json({ error: 'Payment order is invalid or does not belong to this account.' });
+
+  try {
+    const body = razorpay_order_id + '|' + razorpay_payment_id;
+    const expectedSignature = crypto.createHmac('sha256', RAZORPAY_KEY_SECRET).update(body).digest('hex');
+    const valid = expectedSignature.length === razorpay_signature.length && crypto.timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(razorpay_signature));
+    if (!valid) return res.status(402).json({ error: 'Payment signature verification failed.', payment_required: true });
+
+    const company = await loadCompanyFromFirebase(pending.company_id) || db.companies.get(pending.company_id);
+    if (!company) return res.status(400).json({ error: 'Workspace not found for this payment.' });
+    company.tier = pending.tier;
+    company.status = 'active';
+    company.payment_verified_at = new Date().toISOString();
+    company.payment_id = razorpay_payment_id;
+    await persistCompany(company);
+    user.selected_tier = pending.tier;
+    await persistUser(user, { payment_id: razorpay_payment_id });
+    pendingPaymentOrders.delete(razorpay_order_id);
+    return res.json({ status: 'verified', tier: pending.tier });
+  } catch (error) {
+    console.error('Razorpay signature verification failed:', error);
+    return res.status(502).json({ error: 'Payment verification could not be completed. Please contact support if you were charged.' });
+  }
 });
 
 app.get('/api/roi', (req, res) => {

@@ -32,3 +32,13 @@ Before enabling user login, activate **Google** under Firebase Authentication pr
 The server accepts one of these credential configurations: `FIREBASE_SERVICE_ACCOUNT_PATH` pointing to a service-account JSON file, the environment trio `FIREBASE_PROJECT_ID` / `FIREBASE_CLIENT_EMAIL` / `FIREBASE_PRIVATE_KEY`, or `GOOGLE_APPLICATION_CREDENTIALS` for an application-default credential. Keep these values in the deployment secret store; do not commit them.
 
 After a successful Google sign-in, the server verifies the Firebase ID token, writes the account profile to `users/{firebase_uid}` in Firestore with merge semantics, creates or updates the related `companies/{company_id}` document, and issues a Firebase session cookie. The client no longer accepts email or display-name values as a substitute for a verified Google token.
+
+## Trial, payment, and request controls
+
+New workspaces start with a three-day `free_trial` window when onboarding is completed. The command center displays the remaining time, and expired trial workspaces receive `402` responses with `upgrade_required: true` for protected workspace actions. Paid plan activation requires a real Razorpay order and a server-verified signature; missing or invalid payment data never activates a paid tier.
+
+Configure `RAZORPAY_WEBHOOK_SECRET` in the deployment secret store and register `https://YOUR_DOMAIN/api/payments/webhook` in Razorpay. The webhook validates `X-Razorpay-Signature`, accepts captured or authorized payment events, and synchronizes the payment status to the Firestore company and user records. The client-side payment verification remains as an immediate response path, while the webhook provides an idempotent provider confirmation path.
+
+The server now checks the `X-CSRF-Token` header against the `cw_csrf` cookie for unsafe API methods, restricts credentialed CORS to `ALLOWED_ORIGINS`, and applies local-process rate limits to login, task, and payment endpoints. The bundled limiter is not shared between instances; use an external edge limiter or Redis-backed limiter before horizontal scaling.
+
+Core operational Maps remain process-local in this release. Users and companies are persisted to Firestore, while tasks, approvals, conversations, connector state, knowledge entries, and activity logs still require a later Firestore or Postgres migration before multi-instance production deployment.

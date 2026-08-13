@@ -110,12 +110,18 @@ document.addEventListener("DOMContentLoaded", () => {
       const order = await postJson("/api/payments/create-order", { tier: selectedPlan });
 
       const verifyAndComplete = async (paymentDetails = {}) => {
+        if (!paymentDetails.razorpay_order_id || !paymentDetails.razorpay_payment_id || !paymentDetails.razorpay_signature) {
+          showError("Razorpay did not return a verifiable payment. No changes were made to your workspace.");
+          button.disabled = false;
+          button.textContent = "Pay & activate workforce";
+          return;
+        }
         button.textContent = "Verifying payment…";
         try {
           await postJson("/api/payments/verify", {
-            razorpay_order_id: paymentDetails.razorpay_order_id || order.order_id,
-            razorpay_payment_id: paymentDetails.razorpay_payment_id || `pay_verified_${Date.now()}`,
-            razorpay_signature: paymentDetails.razorpay_signature || "verified_sig"
+            razorpay_order_id: paymentDetails.razorpay_order_id,
+            razorpay_payment_id: paymentDetails.razorpay_payment_id,
+            razorpay_signature: paymentDetails.razorpay_signature
           });
           await postJson("/api/onboarding/complete");
           goToStep(5);
@@ -139,16 +145,20 @@ document.addEventListener("DOMContentLoaded", () => {
             theme: { color: "#c5f36a" }
           });
           checkout.on("payment.failed", function (resp) {
-            console.warn("Razorpay payment modal note:", resp);
-            verifyAndComplete();
+            console.warn("Razorpay payment failed:", resp);
+            showError(resp?.error?.description || "Payment was declined. No changes were made to your workspace.");
+            button.disabled = false;
+            button.textContent = "Pay & activate workforce";
           });
           checkout.open();
         } catch (rErr) {
-          console.warn("Razorpay popup error, proceeding with instant verification:", rErr);
-          await verifyAndComplete();
+          console.warn("Razorpay popup error:", rErr);
+          showError("The payment window could not be opened. Please try again.");
+          button.disabled = false;
+          button.textContent = "Pay & activate workforce";
         }
       } else {
-        await verifyAndComplete();
+        throw new Error("Payment checkout is unavailable. Please try again later.");
       }
     } catch (error) {
       showError(error.message);
