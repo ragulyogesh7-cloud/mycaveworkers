@@ -329,18 +329,29 @@ async function loadCompanyFromFirebase(id: string): Promise<Company | null> {
   }
 }
 
+function stripUndefined<T>(value: T): T {
+  if (Array.isArray(value)) return value.filter((item) => item !== undefined).map((item) => stripUndefined(item)) as T;
+  if (!value || typeof value !== 'object' || value instanceof Date || Buffer.isBuffer(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .map(([key, item]) => [key, stripUndefined(item)])
+  ) as T;
+}
+
 async function persistUser(user: User, extra: Record<string, unknown> = {}) {
   if (!firestoreDb) throw new Error('Firebase Firestore is not configured');
   const now = new Date().toISOString();
-  const record = { ...user, ...extra, updated_at: now };
+  const record = stripUndefined({ ...user, ...extra, updated_at: now });
   await firestoreDb.collection('users').doc(user.uid).set(record, { merge: true });
-  db.users.set(user.uid, { ...user, updated_at: now });
+  db.users.set(user.uid, stripUndefined({ ...user, ...extra, updated_at: now }) as User);
 }
 
 async function persistCompany(company: Company) {
   if (!firestoreDb) throw new Error('Firebase Firestore is not configured');
-  await firestoreDb.collection('companies').doc(company.id).set(company, { merge: true });
-  db.companies.set(company.id, company);
+  const record = stripUndefined(company);
+  await firestoreDb.collection('companies').doc(company.id).set(record, { merge: true });
+  db.companies.set(company.id, record as Company);
 }
 
 // Seed default user & company for seamless previewing
@@ -729,9 +740,10 @@ app.post('/api/session-login', async (req, res) => {
       redirect: user.onboarded ? '/command' : '/onboarding',
       csrf_token: csrfToken
     });
-  } catch (error) {
-    console.error('Firebase session persistence failed:', error);
-    res.status(500).json({ error: 'Could not save your account to Firebase. Please try again.' });
+  } catch (error: any) {
+    const code = typeof error?.code === 'string' ? error.code : 'session_persistence_failed';
+    console.error('Firebase session persistence failed:', { code, message: error?.message || String(error) });
+    res.status(500).json({ error: 'Could not create a secure CaveWorkers session.', code });
   }
 });
 

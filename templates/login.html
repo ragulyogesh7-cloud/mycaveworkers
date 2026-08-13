@@ -87,13 +87,16 @@
       const idToken = await user.getIdToken(true);
       const res = await fetch("/api/session-login", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
         credentials: "same-origin",
         body: JSON.stringify({ idToken })
       });
-      const data = await res.json().catch(() => ({}));
+      const responseText = await res.text();
+      let data = {};
+      try { data = responseText ? JSON.parse(responseText) : {}; } catch (_error) { /* keep a safe fallback */ }
       if (!res.ok || data.status !== "success") {
-        throw new Error(data.error || "Could not create a secure CaveWorkers session.");
+        const suffix = data.code ? ` (${data.code})` : ` [HTTP ${res.status}]`;
+        throw new Error(`${data.error || "Could not create a secure CaveWorkers session."}${suffix}`);
       }
       window.location.assign(data.redirect || "/command");
     }
