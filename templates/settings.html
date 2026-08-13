@@ -120,6 +120,7 @@
     .connection-meta { margin-top: 4px; color: rgba(255,255,255,.5); font: 10px 'DM Mono', monospace; }
     @media(max-width:760px) { .upgrade-grid, .custom-mcp-grid { grid-template-columns: 1fr; } .custom-mcp-grid .wide { grid-column: auto; } }
   </style>
+  <link rel="stylesheet" href="/static/settings.css">
 </head>
 <body class="command-body">
   <div class="sky sky-command">
@@ -337,8 +338,8 @@
       document.getElementById("catalog-list").innerHTML = catalog.map(c => `
         <div class="employee-tool-item" style="padding: 16px 0;">
           <div>
-            <strong style="color: ${c.color}; font-size: 16px;">${c.icon} ${c.name} (${c.role})</strong>
-            <p style="margin: 4px 0 0; font-size: 12px; color: rgba(255,255,255,0.6);">${c.description}</p>
+            <strong style="color: ${c.color}; font-size: 16px;"><span class="catalog-avatar">${c.icon || c.name?.[0] || 'AI'}</span>${c.name} (${c.role})</strong>
+            <p style="margin: 4px 0 0; font-size: 12px; color: rgba(255,255,255,0.6);">${c.description || c.system_prompt || c.department || 'AI workforce specialist'}</p>
           </div>
           <div>
             ${activeIds.includes(c.id) 

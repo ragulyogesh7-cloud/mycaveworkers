@@ -1,0 +1,25 @@
+.settings-grid { grid-template-columns: 245px minmax(0, 1fr) !important; gap: 17px !important; margin-top: 25px !important; }
+.settings-nav { padding: 10px !important; align-self: start; }
+.settings-nav button { margin: 2px 0 !important; padding: 11px 12px !important; border: 1px solid transparent !important; border-radius: 11px !important; color: var(--muted) !important; background: transparent !important; font-size: 11px !important; transition: transform 160ms var(--ease-out), background 160ms var(--ease-out), border-color 160ms var(--ease-out), color 160ms var(--ease-out) !important; }
+.settings-nav button:hover { color: var(--chalk) !important; background: rgba(255,255,255,.052) !important; transform: translateX(2px); }
+.settings-nav button.active { color: var(--chalk) !important; border-color: rgba(126,232,255,.20) !important; background: linear-gradient(105deg, rgba(126,232,255,.15), rgba(174,182,255,.07)) !important; }
+.settings-panel { padding: 28px !important; }
+.settings-panel h3 { margin: 0 0 13px !important; color: var(--chalk) !important; font-size: 28px !important; line-height: 1 !important; }
+.settings-panel h4 { color: var(--chalk) !important; letter-spacing: -.03em; }
+.settings-panel p { color: var(--muted) !important; }
+.tool-add-card { padding: 19px !important; margin-bottom: 18px !important; }
+.tool-add-card h4 { color: var(--aqua) !important; }
+.tool-add-card label { margin-bottom: 6px !important; color: var(--muted) !important; font-size: 10px !important; }
+.tool-add-card select, .tool-add-card input { height: 42px !important; margin: 0 !important; }
+.tool-add-card button { margin-top: 14px !important; }
+.employee-tool-item, .connection-row { display: flex; align-items: center; justify-content: space-between; gap: 13px; padding: 12px 0 !important; border-top: 1px solid rgba(213,229,255,.11) !important; border-bottom: 0 !important; color: var(--muted); font-size: 11px; }
+.employee-tool-item:first-child, .connection-row:first-child { border-top: 0 !important; }
+.badge-access { border: 1px solid rgba(126,232,255,.22) !important; border-radius: 7px !important; color: var(--aqua) !important; background: rgba(126,232,255,.07) !important; font: 8px "DM Mono", monospace !important; letter-spacing: .05em; text-transform: uppercase; }
+.btn-danger { border-radius: 8px !important; padding: 6px 9px !important; color: #ffb8ca !important; }
+.connection-meta { color: var(--faint) !important; font: 9px "DM Mono", monospace !important; }
+.upgrade-grid { grid-template-columns: repeat(3, 1fr) !important; gap: 10px !important; }
+.upgrade-card { padding: 15px !important; border-color: var(--line) !important; border-radius: 15px !important; background: rgba(255,255,255,.035) !important; transition: transform 180ms var(--ease-out), border-color 180ms var(--ease-out), background 180ms var(--ease-out) !important; }
+.upgrade-card:hover { transform: translateY(-3px); border-color: rgba(126,232,255,.35) !important; background: rgba(126,232,255,.07) !important; }
+.upgrade-card h5 { color: var(--chalk) !important; font-size: 14px !important; }.upgrade-card p { color: var(--muted) !important; }.upgrade-price { color: var(--aqua) !important; }
+@media(max-width:920px) { .settings-grid { grid-template-columns: 1fr !important; }.settings-nav { display: flex !important; overflow-x: auto; }.settings-nav button { flex: 0 0 auto; white-space: nowrap; }.upgrade-grid { grid-template-columns: 1fr !important; } }
+.catalog-avatar { display: inline-grid; place-items: center; width: 24px; height: 24px; margin-right: 8px; border: 1px solid currentColor; border-radius: 8px; background: color-mix(in srgb, currentColor 12%, transparent); font: 9px "DM Mono", monospace; vertical-align: middle; }

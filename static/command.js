@@ -377,3 +377,44 @@ $('#logout-btn')?.addEventListener('click', async (e) => {
 });
 
 (async () => { await Promise.all([loadBilling(), loadApprovals(), loadTools(), loadKnowledge(), loadActivity(), loadHealth(), loadOfficeStatus(), loadRoiMetrics(), loadTaskDashboard()]); await loadEmployees(); })();
+
+
+// Liquid-glass interaction polish. This is progressive enhancement only; all core task flows above remain independent of motion.
+(function initialiseLiquidGlassMotion() {
+  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const revealTargets = document.querySelectorAll('.command-intro, .composer, .signal-strip, .panel-block, .results-block');
+
+  revealTargets.forEach((element, index) => {
+    element.classList.add('reveal');
+    element.style.setProperty('--reveal-delay', `${Math.min(index * 35, 180)}ms`);
+  });
+
+  if (reducedMotion || !('IntersectionObserver' in window)) {
+    revealTargets.forEach((element) => element.classList.add('is-visible'));
+  } else {
+    const revealObserver = new IntersectionObserver((entries, observer) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          entry.target.classList.add('is-visible');
+          observer.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.08 });
+    revealTargets.forEach((element) => revealObserver.observe(element));
+  }
+
+  document.addEventListener('pointermove', (event) => {
+    const surface = event.target.closest('.composer, .panel-block, .results-block');
+    if (!surface) return;
+    const bounds = surface.getBoundingClientRect();
+    surface.style.setProperty('--pointer-x', `${event.clientX - bounds.left}px`);
+    surface.style.setProperty('--pointer-y', `${event.clientY - bounds.top}px`);
+  }, { passive: true });
+
+  document.addEventListener('pointerleave', (event) => {
+    const surface = event.target.closest?.('.composer, .panel-block, .results-block');
+    if (!surface) return;
+    surface.style.removeProperty('--pointer-x');
+    surface.style.removeProperty('--pointer-y');
+  }, true);
+})();
