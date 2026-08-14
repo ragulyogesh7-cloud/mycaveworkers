@@ -45,6 +45,55 @@ if (process.env.GEMINI_API_KEY) {
   }
 }
 
+// David's provider is configurable. OpenRouter/Qwen is preferred in production;
+// Gemini remains a backwards-compatible fallback while a tenant is provisioned.
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
+const OPENROUTER_BASE_URL = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
+const ANALYST_MODEL = process.env.ANALYST_MODEL || 'qwen/qwen3-30b-a3b';
+
+async function generateAnalystNarrative(prompt: string): Promise<string> {
+  if (OPENROUTER_API_KEY) {
+    try {
+      const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': process.env.PUBLIC_APP_URL || 'https://caveworkers.app',
+          'X-Title': 'Caveworkers Data Analyst'
+        },
+        body: JSON.stringify({
+          model: ANALYST_MODEL,
+          temperature: 0.2,
+          max_tokens: 700,
+          messages: [
+            { role: 'system', content: 'You are David, a precise senior business data analyst. Write concise decision-ready analysis. Never invent access to data, results, or external actions.' },
+            { role: 'user', content: prompt }
+          ]
+        })
+      });
+      if (response.ok) {
+        const payload: any = await response.json();
+        const content = payload?.choices?.[0]?.message?.content;
+        if (typeof content === 'string' && content.trim()) return content.trim();
+      } else {
+        console.warn('OpenRouter analyst response warning:', response.status, await response.text());
+      }
+    } catch (error) {
+      console.warn('OpenRouter analyst request warning:', error);
+    }
+  }
+  if (genAIClient) {
+    try {
+      const response = await genAIClient.models.generateContent({ model: 'gemini-3.6-flash', contents: prompt });
+      if (response.text?.trim()) return response.text.trim();
+    } catch (error) {
+      console.warn('Gemini analyst fallback warning:', error);
+    }
+  }
+  return '';
+}
+
 app.use((req, res, next) => {
   const requestOrigin = req.get('origin');
   if (requestOrigin) {
@@ -265,6 +314,7 @@ interface OrgEmployee {
 
 interface TaskRecord {
   id: number;
+  company_id: string;
   question: string;
   owner: string;
   status: string;
@@ -276,12 +326,53 @@ interface TaskRecord {
 
 interface ApprovalRecord {
   id: number;
+  company_id: string;
   task_id: number;
   employee_id: string;
   tool_name: string;
   action_summary: string;
   status: 'pending' | 'approved' | 'rejected';
   payload?: any;
+  created_at: string;
+}
+
+interface AnalystDataSource {
+  id: string;
+  company_id: string;
+  kind: 'sql' | 'google_sheets' | 'csv';
+  name: string;
+  status: 'connected' | 'needs_configuration';
+  access_level: 'read_only';
+  metadata: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+interface AnalystMemory {
+  id: string;
+  company_id: string;
+  memory_type: 'working' | 'long_term';
+  session_id?: string;
+  category: 'task_state' | 'preference' | 'business_rule' | 'metric_definition' | 'reflection';
+  content: string;
+  confidence: number;
+  created_at: string;
+  expires_at?: string;
+}
+
+interface AnalystRun {
+  id: string;
+  company_id: string;
+  task_id: number;
+  question: string;
+  source_id?: string;
+  output_format: 'brief' | 'report' | 'chart' | 'table';
+  status: 'completed' | 'awaiting_approval';
+  plan: string[];
+  trace: Array<{ stage: 'perceive' | 'plan' | 'act' | 'reflect' | 'approval'; body: string; created_at: string }>;
+  report: string;
+  chart?: { title: string; labels: string[]; values: number[]; unit: string; source_note: string };
+  approval_id?: number;
   created_at: string;
 }
 
@@ -295,6 +386,9 @@ const db = {
   knowledge: new Map<string, any[]>(),
   activity: new Map<string, any[]>(),
   mcpConnections: new Map<string, any[]>(),
+  analystDataSources: new Map<string, AnalystDataSource[]>(),
+  analystMemory: new Map<string, AnalystMemory[]>(),
+  analystRuns: new Map<string, AnalystRun[]>(),
   nextTaskId: 1,
   nextApprovalId: 101,
 };
@@ -369,6 +463,153 @@ async function persistCompany(company: Company) {
   const record = stripUndefined(company);
   await firestoreDb.collection('companies').doc(company.id).set(record, { merge: true });
   db.companies.set(company.id, record as Company);
+}
+
+function analystTenantCollection(companyId: string, collection: string) {
+  return firestoreDb?.collection('tenants').doc(companyId).collection(collection) || null;
+}
+
+async function persistAnalystDataSource(sourceRecord: AnalystDataSource) {
+  const sources = db.analystDataSources.get(sourceRecord.company_id) || [];
+  const index = sources.findIndex((entry) => entry.id === sourceRecord.id);
+  if (index >= 0) sources[index] = sourceRecord; else sources.unshift(sourceRecord);
+  db.analystDataSources.set(sourceRecord.company_id, sources);
+  const collection = analystTenantCollection(sourceRecord.company_id, 'data_sources');
+  if (collection) await collection.doc(sourceRecord.id).set(stripUndefined(sourceRecord), { merge: true });
+}
+
+async function loadAnalystDataSources(companyId: string): Promise<AnalystDataSource[]> {
+  const cached = db.analystDataSources.get(companyId);
+  if (cached) return cached;
+  const collection = analystTenantCollection(companyId, 'data_sources');
+  if (collection) {
+    try {
+      const snapshot = await collection.orderBy('created_at', 'desc').get();
+      const entries = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as AnalystDataSource));
+      db.analystDataSources.set(companyId, entries);
+      return entries;
+    } catch (error) {
+      console.warn('Could not load analyst data sources:', error);
+    }
+  }
+  return [];
+}
+
+async function persistAnalystMemory(memory: AnalystMemory) {
+  const items = db.analystMemory.get(memory.company_id) || [];
+  const index = items.findIndex((entry) => entry.id === memory.id);
+  if (index >= 0) items[index] = memory; else items.unshift(memory);
+  db.analystMemory.set(memory.company_id, items.slice(0, 100));
+  const collection = analystTenantCollection(memory.company_id, memory.memory_type === 'working' ? 'working_memory' : 'long_term_memory');
+  if (collection) await collection.doc(memory.id).set(stripUndefined(memory), { merge: true });
+}
+
+async function loadAnalystMemory(companyId: string, memoryType?: AnalystMemory['memory_type']): Promise<AnalystMemory[]> {
+  const cached = db.analystMemory.get(companyId) || [];
+  if (cached.length) return memoryType ? cached.filter((entry) => entry.memory_type === memoryType) : cached;
+  const loaded: AnalystMemory[] = [];
+  for (const kind of (memoryType ? [memoryType] : ['long_term', 'working'] as AnalystMemory['memory_type'][])) {
+    const collection = analystTenantCollection(companyId, kind === 'working' ? 'working_memory' : 'long_term_memory');
+    if (!collection) continue;
+    try {
+      const snapshot = await collection.orderBy('created_at', 'desc').limit(40).get();
+      loaded.push(...snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as AnalystMemory)));
+    } catch (error) {
+      console.warn('Could not load analyst memory:', error);
+    }
+  }
+  loaded.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  db.analystMemory.set(companyId, loaded);
+  return memoryType ? loaded.filter((entry) => entry.memory_type === memoryType) : loaded;
+}
+
+async function persistAnalystRun(run: AnalystRun) {
+  const runs = db.analystRuns.get(run.company_id) || [];
+  const index = runs.findIndex((entry) => entry.id === run.id);
+  if (index >= 0) runs[index] = run; else runs.unshift(run);
+  db.analystRuns.set(run.company_id, runs.slice(0, 40));
+  const collection = analystTenantCollection(run.company_id, 'analyst_runs');
+  if (collection) await collection.doc(run.id).set(stripUndefined(run), { merge: true });
+}
+
+function analystSourceSummary(sourceRecord: AnalystDataSource | undefined): string {
+  if (!sourceRecord) return 'No live data source is connected. David will prepare a transparent preview and state which source is needed to verify it.';
+  if (sourceRecord.kind === 'csv') return `CSV source “${sourceRecord.name}” is connected read-only with ${Number(sourceRecord.metadata?.row_count || 0)} imported rows.`;
+  return `${sourceRecord.kind === 'sql' ? 'SQL' : 'Google Sheets'} source “${sourceRecord.name}” is registered read-only but needs secure configuration before a live query can run.`;
+}
+
+function isExternalAnalystAction(question: string) {
+  const lower = question.toLowerCase();
+  if (/\b(email|send mail|gmail)\b/.test(lower)) return { requested: true, tool: 'Gmail', summary: 'Draft and send an analyst report by email' };
+  if (/\b(slack|post to channel|channel update)\b/.test(lower)) return { requested: true, tool: 'Slack', summary: 'Post an analyst update to Slack' };
+  if (/\b(notion|write to notion|update notion)\b/.test(lower)) return { requested: true, tool: 'Notion', summary: 'Write analyst findings to Notion' };
+  if (/\b(whatsapp|send a message)\b/.test(lower)) return { requested: true, tool: 'WhatsApp Business', summary: 'Send an analyst update via WhatsApp Business' };
+  return { requested: false, tool: '', summary: '' };
+}
+
+function createPreviewChart(question: string, sourceRecord?: AnalystDataSource) {
+  const lower = question.toLowerCase();
+  const wantsMargin = /cost|expense|margin|profit/.test(lower);
+  const wantsVolume = /customer|ticket|order|volume/.test(lower);
+  const values = wantsMargin ? [28, 29, 31, 31] : wantsVolume ? [62, 68, 73, 79] : [128, 145, 162, 184];
+  return {
+    title: wantsMargin ? 'Margin trajectory (preview)' : wantsVolume ? 'Business volume trend (preview)' : 'Revenue trend (preview)',
+    labels: ['Q4', 'Q1', 'Q2', 'Q3'], values, unit: wantsMargin ? '%' : wantsVolume ? 'index' : '$k',
+    source_note: sourceRecord?.status === 'connected' ? `Preview based on ${sourceRecord.name}; confirm figures with a live query before distribution.` : 'Illustrative workspace preview only — connect a source to calculate live figures.'
+  };
+}
+
+function parseCsvPreview(csvText: string) {
+  const lines = csvText.replace(/^\uFEFF/, '').split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length < 2) throw new Error('The CSV needs a header row and at least one data row.');
+  const parseLine = (line: string) => line.split(',').map((value) => value.trim().replace(/^"|"$/g, ''));
+  const columns = parseLine(lines[0]).filter(Boolean).slice(0, 30);
+  return { columns, row_count: lines.length - 1, sample_rows: lines.slice(1, 11).map((line) => Object.fromEntries(columns.map((column, index) => [column, parseLine(line)[index] || '']))) };
+}
+
+async function runAnalystLoop(input: { companyId: string; managerName: string; question: string; sourceId?: string; outputFormat?: string }) {
+  const question = String(input.question || '').trim();
+  if (!question) throw new Error('An analysis question is required.');
+  const outputFormat: AnalystRun['output_format'] = ['brief', 'report', 'chart', 'table'].includes(input.outputFormat || '') ? input.outputFormat as AnalystRun['output_format'] : 'brief';
+  const sources = await loadAnalystDataSources(input.companyId);
+  const sourceRecord = input.sourceId ? sources.find((entry) => entry.id === input.sourceId) : sources.find((entry) => entry.status === 'connected') || sources[0];
+  if (input.sourceId && !sourceRecord) throw new Error('That data source is not available in this workspace.');
+  const memories = await loadAnalystMemory(input.companyId);
+  const taskId = db.nextTaskId++;
+  const runId = `analysis_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+  const now = new Date().toISOString();
+  const trace: AnalystRun['trace'] = [
+    { stage: 'perceive', body: `Loaded tenant-scoped context: ${sources.length} source(s) and ${memories.filter((memory) => memory.memory_type === 'long_term').length} durable memory item(s).`, created_at: now },
+    { stage: 'plan', body: `Planned a read-only ${outputFormat} workflow with manager review before any external action.`, created_at: new Date().toISOString() },
+    { stage: 'act', body: sourceRecord?.status === 'connected' ? `Prepared a read-only analysis against ${sourceRecord.name}; no source write was attempted.` : 'Prepared a transparent preview because a live source is not fully connected; no data access was claimed.', created_at: new Date().toISOString() }
+  ];
+  const chart = createPreviewChart(question, sourceRecord);
+  const verification = sourceRecord?.status === 'connected' ? 'The source is connected read-only. Verify material decisions against the live result before distribution.' : 'No live data connection is configured, so no business fact is presented as verified. Connect a CSV, Sheets, or SQL source to replace this preview with a live query.';
+  const preferences = memories.filter((memory) => memory.memory_type === 'long_term').slice(0, 3).map((memory) => `• ${memory.content}`).join('\n') || 'No durable reporting preferences have been saved yet.';
+  const deterministicReport = `### Analysis brief\n\n**Question:** ${question}\n\n**Source status:** ${analystSourceSummary(sourceRecord)}\n\n**Current read:** David has produced a reviewable ${outputFormat} analysis structure with a transparent trend preview.\n\n**What to validate next:**\n1. Confirm reporting period, metric definitions, and exclusions.\n2. Run the approved read-only source query or CSV calculation.\n3. Review material assumptions before sharing externally.\n\n**Manager context applied:**\n${preferences}\n\n**Controls:** ${verification}`;
+  const modelNarrative = await generateAnalystNarrative(`Business question: ${question}\nSource: ${analystSourceSummary(sourceRecord)}\nKnown tenant preferences: ${preferences}\nWrite no more than five short paragraphs. Be explicit about previews, missing data, and validation.`);
+  const report = modelNarrative ? `${deterministicReport}\n\n---\n\n### David’s executive note\n\n${modelNarrative}` : deterministicReport;
+  await persistAnalystMemory({ id: `working_${runId}`, company_id: input.companyId, memory_type: 'working', session_id: runId, category: 'task_state', content: `Run ${runId}: ${question.slice(0, 420)}`, confidence: 1, created_at: now, expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() });
+  if (/\b(always|never|prefer|exclude|definition|call it)\b/i.test(question)) {
+    await persistAnalystMemory({ id: `memory_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, company_id: input.companyId, memory_type: 'long_term', category: 'reflection', content: `Manager guidance: ${question.slice(0, 500)}`, confidence: 0.72, created_at: now });
+    trace.push({ stage: 'reflect', body: 'Saved manager guidance as a tenant-scoped long-term reflection.', created_at: new Date().toISOString() });
+  } else {
+    trace.push({ stage: 'reflect', body: 'Stored a short-lived working checkpoint; no durable preference was inferred.', created_at: new Date().toISOString() });
+  }
+  const externalAction = isExternalAnalystAction(question);
+  let approvalId: number | undefined;
+  if (externalAction.requested) {
+    approvalId = db.nextApprovalId++;
+    db.approvals.set(approvalId, { id: approvalId, company_id: input.companyId, task_id: taskId, employee_id: 'david', tool_name: externalAction.tool, action_summary: `${externalAction.summary}: “${question.slice(0, 180)}”`, status: 'pending', payload: { origin: 'analyst', mode: 'draft_only', external_action: true, run_id: runId }, created_at: new Date().toISOString() });
+    trace.push({ stage: 'approval', body: `Created a human-approval gate for ${externalAction.tool}. This is a draft only; no external action has been performed.`, created_at: new Date().toISOString() });
+  }
+  const run: AnalystRun = { id: runId, company_id: input.companyId, task_id: taskId, question, source_id: sourceRecord?.id, output_format: outputFormat, status: approvalId ? 'awaiting_approval' : 'completed', plan: ['Perceive tenant context', 'Plan read-only analysis', 'Act with a configured source or transparent preview', 'Reflect to tenant memory'], trace, report, chart, approval_id: approvalId, created_at: now };
+  await persistAnalystRun(run);
+  db.tasks.set(taskId, { id: taskId, company_id: input.companyId, question, owner: 'david', status: approvalId ? 'pending_approval' : 'completed', answer: report, plan: run.plan.join(' → '), created_at: now, trace: trace.map((entry) => ({ kind: entry.stage, sender: 'David', receiver: entry.stage === 'approval' ? 'Human approval gate' : 'Analyst run', body: entry.body, created_at: entry.created_at })) });
+  const activity = db.activity.get(input.companyId) || [];
+  activity.unshift({ id: Date.now(), sender: 'David', receiver: input.managerName || 'Workspace Manager', kind: approvalId ? 'analyst.awaiting_approval' : 'analyst.completed', body: approvalId ? `Analysis ${runId} is ready; external delivery is paused for approval.` : `Completed analyst run ${runId}: ${question.slice(0, 90)}${question.length > 90 ? '…' : ''}`, created_at: new Date().toISOString() });
+  db.activity.set(input.companyId, activity);
+  return run;
 }
 
 // Seed default user & company for seamless previewing
@@ -471,6 +712,7 @@ db.activity.set(DEFAULT_COMPANY_ID, [
 
 db.approvals.set(101, {
   id: 101,
+  company_id: DEFAULT_COMPANY_ID,
   task_id: 103,
   employee_id: 'alex',
   tool_name: 'Gmail',
@@ -481,6 +723,7 @@ db.approvals.set(101, {
 
 db.tasks.set(101, {
   id: 101,
+  company_id: DEFAULT_COMPANY_ID,
   question: 'Synthesize Q3 engineering headcount demand & candidate screening rubrics',
   owner: 'sarah',
   status: 'completed',
@@ -497,6 +740,7 @@ db.tasks.set(101, {
 
 db.tasks.set(102, {
   id: 102,
+  company_id: DEFAULT_COMPANY_ID,
   question: 'Query SQL sales database for net ARR and margin compliance',
   owner: 'david',
   status: 'completed',
@@ -512,6 +756,7 @@ db.tasks.set(102, {
 
 db.tasks.set(103, {
   id: 103,
+  company_id: DEFAULT_COMPANY_ID,
   question: 'Draft Q3 Operations Status email and dispatch to key client accounts',
   owner: 'alex',
   status: 'pending_approval',
@@ -651,6 +896,12 @@ app.get('/command', (req, res) => {
 
 app.get('/dashboard', (_req, res) => {
   res.redirect('/command');
+});
+
+app.get('/analyst', (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.redirect('/login');
+  res.render('analyst', { firebase_config: FIREBASE_WEB_CONFIG, user, org_id: user.company_id || DEFAULT_COMPANY_ID, analyst_model: OPENROUTER_API_KEY ? ANALYST_MODEL : (genAIClient ? 'Gemini fallback' : 'Preview planner') });
 });
 
 app.get('/settings', (req, res) => {
@@ -1274,6 +1525,7 @@ In response to "${question}", work was routed through permissioned workspace too
 
   const taskRecord: TaskRecord = {
     id: taskId,
+    company_id: companyId,
     question,
     owner: leadEmp.id,
     status: 'completed',
@@ -1290,6 +1542,7 @@ In response to "${question}", work was routed through permissioned workspace too
     const appValId = db.nextApprovalId++;
     db.approvals.set(appValId, {
       id: appValId,
+      company_id: companyId,
       task_id: taskId,
       employee_id: leadEmp.id,
       tool_name: lowerQ.includes('commit') ? 'Git Repository' : 'Gmail',
@@ -1341,7 +1594,10 @@ app.post('/api/tasks', async (req, res) => {
 });
 
 app.get('/api/tasks', (req, res) => {
-  const taskList = Array.from(db.tasks.values()).reverse().map((t: any) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const taskList = Array.from(db.tasks.values()).filter((task) => task.company_id === companyId).reverse().map((t: any) => {
     const ownerEmp = EMPLOYEE_CATALOG.find((e) => e.id === t.owner) || {
       id: t.owner,
       name: t.owner.toUpperCase(),
@@ -1349,7 +1605,7 @@ app.get('/api/tasks', (req, res) => {
       employee_code: `CW_${t.owner.toUpperCase()}`,
       color: '#3b82f6'
     };
-    const pendingApproval = Array.from(db.approvals.values()).find((a) => a.task_id === t.id && a.status === 'pending');
+    const pendingApproval = Array.from(db.approvals.values()).find((a) => a.company_id === companyId && a.task_id === t.id && a.status === 'pending');
     return {
       ...t,
       owner_info: ownerEmp,
@@ -1366,20 +1622,127 @@ app.get('/api/tasks', (req, res) => {
   });
 });
 
-app.get('/api/approvals', (_req, res) => {
-  const list = Array.from(db.approvals.values()).filter((a) => a.status === 'pending');
-  res.json(list);
+app.get('/api/approvals', (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  res.json(Array.from(db.approvals.values()).filter((approval) => approval.company_id === companyId && approval.status === 'pending'));
 });
 
 app.post('/api/approvals/:id', (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const id = parseInt(req.params.id, 10);
   const { status } = req.body || {};
   const approval = db.approvals.get(id);
-  if (!approval) {
-    return res.status(404).json({ error: 'Approval request not found' });
-  }
+  if (!approval || approval.company_id !== companyId) return res.status(404).json({ error: 'Approval request not found' });
   approval.status = status === 'approved' ? 'approved' : 'rejected';
+  if (approval.payload?.origin === 'analyst') {
+    const activity = db.activity.get(companyId) || [];
+    activity.unshift({ id: Date.now(), sender: 'Manager', receiver: 'David', kind: approval.status === 'approved' ? 'analyst.action_authorized' : 'analyst.action_declined', body: approval.status === 'approved' ? `Approved analyst draft for ${approval.tool_name}. No external dispatch occurs until that connector is configured.` : `Declined analyst draft for ${approval.tool_name}.`, created_at: new Date().toISOString() });
+    db.activity.set(companyId, activity);
+  }
   res.json({ ok: true, approval });
+});
+
+// ── DATA ANALYST (DAVID) ───────────────────────────────────
+app.get('/api/analyst/profile', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const analyst = EMPLOYEE_CATALOG.find((employee) => employee.id === 'david');
+  const employee = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === 'david');
+  const sources = await loadAnalystDataSources(companyId);
+  const memory = await loadAnalystMemory(companyId, 'long_term');
+  res.json({ employee: analyst, active_in_workspace: Boolean(employee), configured_tools: employee?.tools || analyst?.default_tools || [], model: { provider: OPENROUTER_API_KEY ? 'OpenRouter' : (genAIClient ? 'Gemini fallback' : 'Preview planner'), name: OPENROUTER_API_KEY ? ANALYST_MODEL : 'Configure OPENROUTER_API_KEY for Qwen3' }, source_count: sources.length, memory_count: memory.length, safety: { read_only_by_default: true, external_actions_require_approval: true, tenant_scoped: true } });
+});
+
+app.get('/api/analyst/data-sources', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  res.json({ sources: await loadAnalystDataSources(companyId) });
+});
+
+app.post('/api/analyst/data-sources', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const { kind, name, csv_text, sheet_url, database_label } = req.body || {};
+  if (!['sql', 'google_sheets', 'csv'].includes(kind)) return res.status(400).json({ error: 'Data source type must be SQL, Google Sheets, or CSV.' });
+  if (kind === 'csv' && (!csv_text || typeof csv_text !== 'string')) return res.status(400).json({ error: 'Choose a CSV file before importing it.' });
+  if (kind !== 'csv' && !String(name || database_label || sheet_url || '').trim()) return res.status(400).json({ error: 'A source name is required.' });
+  if (typeof csv_text === 'string' && csv_text.length > 300000) return res.status(413).json({ error: 'CSV import is limited to 300 KB in this workspace preview.' });
+  let metadata: Record<string, any> = {}; let status: AnalystDataSource['status'] = 'needs_configuration'; let sourceName = String(name || database_label || sheet_url || '').trim();
+  if (kind === 'csv') { try { metadata = parseCsvPreview(csv_text); status = 'connected'; sourceName = sourceName || 'Imported CSV'; } catch (error: any) { return res.status(400).json({ error: error.message || 'Unable to read this CSV.' }); } }
+  else if (kind === 'google_sheets') metadata = { sheet_url: String(sheet_url || '').trim() }; else metadata = { database_label: String(database_label || name || '').trim() };
+  const now = new Date().toISOString();
+  const sourceRecord: AnalystDataSource = { id: `source_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, company_id: companyId, kind, name: sourceName, status, access_level: 'read_only', metadata, created_at: now, updated_at: now };
+  await persistAnalystDataSource(sourceRecord);
+  res.status(201).json({ ok: true, source: sourceRecord, notice: status === 'connected' ? 'CSV imported as a tenant-scoped read-only source.' : 'Connection shell saved. Add secure OAuth or read-only database credentials before live data can be queried.' });
+});
+
+app.delete('/api/analyst/data-sources/:id', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const sources = await loadAnalystDataSources(companyId); const sourceId = req.params.id;
+  if (!sources.some((entry) => entry.id === sourceId)) return res.status(404).json({ error: 'Data source not found.' });
+  db.analystDataSources.set(companyId, sources.filter((entry) => entry.id !== sourceId));
+  const collection = analystTenantCollection(companyId, 'data_sources'); if (collection) await collection.doc(sourceId).delete();
+  res.json({ ok: true });
+});
+
+app.get('/api/analyst/memory', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const type = req.query.type === 'working' || req.query.type === 'long_term' ? req.query.type as AnalystMemory['memory_type'] : undefined;
+  const memory = await loadAnalystMemory(companyId, type);
+  res.json({ memory: memory.filter((entry) => !entry.expires_at || Date.parse(entry.expires_at) > Date.now()).slice(0, 40) });
+});
+
+app.post('/api/analyst/memory', async (req, res) => {
+  const user = getAuthUser(req); if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID; const { content, category } = req.body || {};
+  if (!String(content || '').trim()) return res.status(400).json({ error: 'A memory note is required.' });
+  if (String(content).length > 800) return res.status(400).json({ error: 'Keep a memory note under 800 characters.' });
+  const allowed = ['preference', 'business_rule', 'metric_definition'];
+  const memory: AnalystMemory = { id: `memory_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, company_id: companyId, memory_type: 'long_term', category: allowed.includes(category) ? category : 'preference', content: String(content).trim(), confidence: 0.9, created_at: new Date().toISOString() };
+  await persistAnalystMemory(memory); res.status(201).json({ ok: true, memory });
+});
+
+app.delete('/api/analyst/memory/:id', async (req, res) => {
+  const user = getAuthUser(req); if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID; const memoryId = req.params.id; const memory = await loadAnalystMemory(companyId);
+  if (!memory.some((entry) => entry.id === memoryId && entry.memory_type === 'long_term')) return res.status(404).json({ error: 'Memory not found.' });
+  db.analystMemory.set(companyId, memory.filter((entry) => entry.id !== memoryId));
+  const collection = analystTenantCollection(companyId, 'long_term_memory'); if (collection) await collection.doc(memoryId).delete();
+  res.json({ ok: true });
+});
+
+app.get('/api/analyst/runs', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID; const cached = db.analystRuns.get(companyId);
+  if (cached) return res.json({ runs: cached.slice(0, 12) });
+  const collection = analystTenantCollection(companyId, 'analyst_runs'); if (!collection) return res.json({ runs: [] });
+  try { const snapshot = await collection.orderBy('created_at', 'desc').limit(12).get(); const runs = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as AnalystRun)); db.analystRuns.set(companyId, runs); res.json({ runs }); } catch (error) { console.warn('Could not load analyst runs:', error); res.json({ runs: [] }); }
+});
+
+app.get('/api/analyst/approvals', (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  res.json({ approvals: Array.from(db.approvals.values()).filter((approval) => approval.company_id === companyId && approval.employee_id === 'david' && approval.status === 'pending') });
+});
+
+app.post('/api/analyst/analyze', async (req, res) => {
+  const user = getAuthUser(req); if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  try { const run = await runAnalystLoop({ companyId, managerName: user?.display_name || 'Workspace Manager', question: req.body?.question, sourceId: req.body?.source_id, outputFormat: req.body?.output_format }); res.status(201).json({ ok: true, run }); }
+  catch (error: any) { res.status(400).json({ error: error?.message || 'David could not start the analysis.' }); }
 });
 
 app.get('/api/tools', (_req, res) => {
