@@ -451,3 +451,85 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 @media (max-width: 960px) { .room-app-shell { grid-template-columns: 1fr; }.room-rail { position: fixed; left: 0; top: 0; width: 252px; transform: translateX(-103%); transition: transform 220ms var(--ease-out); box-shadow: 20px 0 50px rgba(0,0,0,.36); }.room-rail.is-open { transform: none; }.menu-button { display: grid; place-items: center; margin-right: 10px; }.app-topbar { justify-content: flex-start; }.top-actions { margin-left: auto; }.room-layout { grid-template-columns: 1fr; }.room-context { grid-template-columns: repeat(3, 1fr); }.room-feed { height: 540px; } }
 @media (max-width: 680px) { .room-wrap { width: min(100% - 24px, 620px); padding-top: 20px; }.workspace-name small, .settings-link { display: none; }.top-actions { gap: 8px; }.logout-button { padding: 7px 8px; font-size: 10px; }.room-trial-banner { align-items: start; flex-direction: column; gap: 9px; }.room-intro { display: block; margin-bottom: 17px; }.room-intro h1 { font-size: 35px; }.room-intro > p { margin-top: 14px; }.room-header { align-items: start; padding: 15px; }.room-header-actions { flex-direction: column-reverse; align-items: end; gap: 7px; }.room-heading p:not(.panel-kicker) { max-width: 200px; }.room-feed { height: 470px; min-height: 420px; padding-inline: 13px; }.room-composer { margin: 0 9px 9px; }.room-composer-bottom { align-items: stretch; flex-direction: column; }.assignment-control { justify-content: space-between; }.assignment-control select { max-width: 230px; }.composer-actions { justify-content: space-between; }.room-context { grid-template-columns: 1fr; }.context-card { padding: 14px; }.room-message { grid-template-columns: 29px minmax(0, 1fr); gap: 8px; }.message-avatar { width: 27px; height: 27px; }.message-meta time { margin-left: 0; }.composer-hint { display: none; } }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; } }
+
+
+/* Workforce clarity pass — designed for readable outcomes, not activity noise. */
+.room-message { grid-template-columns: 42px minmax(0, 1fr); gap: 13px; padding: 18px 8px; }
+.message-avatar { width: 36px; height: 36px; border-radius: 12px; font-size: 10px; }
+.message-meta { gap: 9px; min-height: 23px; }
+.message-meta b { font-size: 14px; letter-spacing: -.01em; }
+.message-meta > span, .message-meta time { font-size: 11px; }
+.message-body p { margin-top: 7px; color: #dce7fb; font-size: 15px; line-height: 1.72; }
+.message-task { padding: 4px 7px; font-size: 10px; }
+.room-message.result { margin: 10px 0; padding: 19px 16px; border: 1px solid rgba(126,232,255,.32); border-radius: 16px; background: linear-gradient(135deg, rgba(126,232,255,.115), rgba(174,182,255,.08)); box-shadow: inset 0 1px 0 rgba(255,255,255,.10), 0 12px 32px rgba(0,0,0,.12); }
+.room-message.result .message-avatar { color: #061622; border-color: rgba(217,254,255,.75); background: linear-gradient(135deg, var(--aqua), #c9d5ff); }
+.room-message.result .message-body p { color: #f4f8ff; font-size: 16px; line-height: 1.78; }
+.final-answer-label { display: inline-flex; margin-top: 8px; padding: 5px 8px; border: 1px solid rgba(185,255,176,.25); border-radius: 999px; color: var(--moss); background: rgba(185,255,176,.08); font: 10px "DM Mono", monospace; letter-spacing: .06em; text-transform: uppercase; }
+.room-message.failure { margin: 8px 0; padding: 15px 14px; border: 1px solid rgba(255,142,168,.33); border-radius: 14px; background: rgba(255,142,168,.075); }
+.room-message.failure .message-avatar { color: #330b15; border-color: rgba(255,142,168,.5); background: var(--danger); }
+.room-message.failure .message-body p { color: #ffd5e0; }
+.room-message.complete .message-body p { color: #d9f9d6; }
+.task-summary { min-height: 80px; align-items: center; }
+.task-summary b { font-size: 14px; line-height: 1.35; }
+.task-summary small { margin-top: 5px; font-size: 12px; line-height: 1.45; }
+.task-summary-status { font-size: 10px; }
+.task-summary-status.blocked { color: #ffc1d0; border-color: rgba(255,142,168,.35); background: rgba(255,142,168,.10); }
+.room-notice { font-size: 13px; line-height: 1.5; }
+.composer-kicker, .secure-tag { font-size: 10px; }
+.room-composer textarea { font-size: 15px; line-height: 1.6; }
+.room-composer textarea::placeholder { color: #aebbd8; }
+@media (max-width: 640px) {
+  .room-message { grid-template-columns: 36px minmax(0, 1fr); gap: 10px; padding: 15px 2px; }
+  .message-avatar { width: 32px; height: 32px; }
+  .message-meta b { font-size: 13px; }
+  .message-body p { font-size: 14px; line-height: 1.68; }
+  .room-message.result { padding: 16px 12px; }
+  .room-message.result .message-body p { font-size: 15px; }
+  .task-summary { min-height: 74px; }
+}
+
+/* Manager readability pass: execution outcomes and final answers are the primary product surface. */
+.command-main .composer-kicker,
+.command-main .panel-kicker,
+.command-main .signal-strip span,
+.command-main .task-status-pill,
+.command-main .pending-label,
+.command-main .complete-tag { font-size: 10px; }
+.command-main .composer-foot,
+.command-main .thread-head p,
+.command-main .thread-context,
+.command-main .conversation-person small,
+.command-main .office-card-name small,
+.command-main .task-owner-name small,
+.command-main .task-time,
+.command-main .disclaimer { font-size: 11px; }
+.command-main .input-shell textarea { font-size: 16px; line-height: 1.58; }
+.command-main .run-button { min-width: 156px; font-size: 14px; }
+.command-main .conversation-person b { font-size: 13px; }
+.command-main .thread-head h3 { font-size: 17px; }
+.command-main .chat-message { max-width: 88%; padding: 13px 14px; font-size: 14px; line-height: 1.62; }
+.command-main .chat-message time { margin-top: 7px; font-size: 10px; }
+.command-main .chat-typing { font-size: 12px; }
+.command-main .approval-tool,
+.command-main .office-meta,
+.command-main .trace-step-top,
+.command-main .trace-badge { font-size: 10px; }
+.command-main .approval-summary { font-size: 14px; line-height: 1.58; }
+.command-main .tool-explainer,
+.command-main .tool-card-desc,
+.command-main .office-task-desc,
+.command-main .knowledge-item span,
+.command-main .event { font-size: 13px; line-height: 1.58; }
+.command-main .task-question { font-size: 16px; line-height: 1.5; }
+.command-main .task-plan-box { font: 11px/1.65 "DM Mono", ui-monospace, monospace; }
+.command-main .task-answer-box { max-height: 260px; padding: 15px; color: var(--chalk); font-size: 14px; line-height: 1.68; }
+.command-main .trace-step { padding: 11px; font-size: 12px; line-height: 1.58; }
+.command-main .result-body { max-width: 900px; color: var(--chalk); font-size: 16px; line-height: 1.78; }
+.command-main .final-result,
+.command-main .execution-outcome { border-width: 1px; }
+@media (max-width: 680px) {
+  .command-main .input-shell textarea { font-size: 16px; }
+  .command-main .chat-message { max-width: 94%; font-size: 15px; }
+  .command-main .result-body { font-size: 15px; }
+  .command-main .task-answer-box { font-size: 14px; }
+}

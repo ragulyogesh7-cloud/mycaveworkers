@@ -21,3 +21,27 @@
 @media (max-width: 960px) { .settings-app-shell { grid-template-columns: 1fr; }.settings-rail { position: fixed; left: 0; top: 0; width: 252px; transform: translateX(-103%); transition: transform 220ms var(--ease-out); box-shadow: 20px 0 50px rgba(0,0,0,.36); z-index: 15; }.settings-rail.is-open { transform: none; }.menu-button { display: grid; place-items: center; margin-right: 10px; }.settings-topbar { justify-content: flex-start; }.settings-topbar .top-actions { margin-left: auto; }.settings-layout { grid-template-columns: 1fr; }.settings-nav { position: static; display: flex; overflow-x: auto; padding: 7px; }.settings-nav button { width: auto; flex: 0 0 auto; white-space: nowrap; }.settings-nav p { display: none; } }
 @media (max-width: 690px) { .settings-wrap { width: min(100% - 24px, 640px); padding-top: 23px; }.settings-hero { display: block; margin-bottom: 20px; }.settings-hero h1 { font-size: 36px; }.settings-plan-chip { width: 100%; min-width: 0; margin-top: 18px; }.settings-topbar .settings-link, .settings-topbar .workspace-name small { display: none; }.settings-panel { padding: 18px 14px; }.settings-panel-header { display: block; }.section-status, .panel-action-link { display: inline-block; margin-top: 12px; }.security-overview, .integration-intro-grid, .billing-summary, .plans-grid { grid-template-columns: 1fr; }.form-actions { align-items: start; flex-direction: column; }.form-actions .btn { width: 100%; }.employee-settings-top { align-items: start; }.employee-card-actions { align-items: end; flex-direction: column; gap: 6px; }.permission-chips, .employee-empty { margin-left: 0; }.catalog-card { grid-template-columns: 28px minmax(0,1fr); }.catalog-card > button { grid-column: 2; justify-self: start; margin-top: 2px; }.form-grid.two, .tool-grant-fields { grid-template-columns: 1fr; }.tool-grant-fields .btn { grid-column: auto; }.connection-card-top, .connection-tools-header { align-items: start; flex-direction: column; }.connection-actions { justify-content: start; }.connection-source { max-width: 250px; }.discovered-tool { align-items: start; flex-direction: column; gap: 6px; }.discovered-tool small { max-width: 250px; }.settings-nav button { padding: 9px 10px; } }
 @media (prefers-reduced-motion: reduce) { .settings-panel.active { animation: none; } }
+
+/* Approval-gated outbound email is intentionally prominent but compact. */
+.gmail-send-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.8rem;
+  padding: 0.95rem 1rem;
+  border: 1px solid color-mix(in srgb, var(--aqua, #7ee8ff) 34%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--aqua, #7ee8ff) 8%, transparent);
+  color: var(--chalk, #eef4ff);
+  cursor: pointer;
+}
+.gmail-send-option input { width: 1.1rem; height: 1.1rem; margin: 0.15rem 0 0; accent-color: var(--aqua, #7ee8ff); }
+.gmail-send-option span { display: grid; gap: 0.28rem; }
+.gmail-send-option b { font-size: 0.95rem; }
+.gmail-send-option small { color: var(--muted, #a8b7d4); font-size: 0.82rem; line-height: 1.45; }
+.connection-governance { margin: 0.6rem 0 0; max-width: 44rem; font-size: 0.86rem; line-height: 1.45; }
+.connection-governance.enabled { color: var(--moss, #b9ffb0); }
+.connection-governance.disabled { color: #f6cf8d; }
+@media (max-width: 680px) {
+  .gmail-send-option { padding: 0.85rem; }
+  .gmail-send-option b { font-size: 0.92rem; }
+}

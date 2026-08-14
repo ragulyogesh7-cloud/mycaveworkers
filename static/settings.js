@@ -81,7 +81,10 @@ function renderConnections(connectionSets) {
     const typeLabel = { google_gmail: 'Google Gmail', google_sheets: 'Google Sheets', streamable_http: 'Custom MCP', git_repository: 'Git repository', custom_skill: 'Custom skill' }[connection.connection_type] || connection.connection_type;
     const source = connection.server_url || connection.config?.repo_path || connection.config?.notes || 'Employee capability';
     const needsOauth = (connection.connection_type === 'google_gmail' || connection.connection_type === 'google_sheets') && connection.status !== 'connected';
-    return `<article class="connection-card"><div class="connection-card-top"><div><p class="connection-owner"><span style="--employee-color:${safe(employee.color || '#7ee8ff')}">${safe(employee.name?.[0] || 'AI')}</span>${safe(employee.name)}’s connection</p><h4>${safe(connection.name)} <em class="connection-status ${safe(connection.status || 'unknown')}">${safe(connection.status || 'unknown')}</em></h4><p class="connection-source">${safe(typeLabel)} · ${safe(source)}</p></div><div class="connection-actions">${needsOauth ? `<a class="btn btn-primary compact-button" href="/api/employees/${encodeURIComponent(employee.id)}/mcp-connections/${encodeURIComponent(connection.id)}/google/start?service=${encodeURIComponent(connection.connection_type)}">Connect Google</a>` : ''}<button class="text-mini" type="button" data-action="test-mcp" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Test safely</button><button class="text-mini danger" type="button" data-action="remove-mcp" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Remove</button></div></div>${connection.connection_type === 'streamable_http' ? `<div class="connection-tools-header"><span>Tool controls</span><button class="btn btn-light compact-button" type="button" data-action="discover-tools" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">${connection.discovered_tools?.length ? 'Refresh tools' : 'Discover tools'}</button></div>${renderToolGrants(employee.id, connection)}` : ''}${connection.connection_type === 'git_repository' ? `<div class="connection-tools-header"><span>Repository changes require approval.</span><button class="btn btn-light compact-button" type="button" data-action="request-git-commit" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Request commit</button></div>` : ''}</article>`;
+    const sarahGmailGovernance = employee.id === 'sarah' && connection.connection_type === 'google_gmail'
+      ? `<p class="connection-governance ${connection.config?.gmail_send_enabled ? 'enabled' : 'disabled'}">${connection.config?.gmail_send_enabled ? 'Send after manager approval is enabled. Reconnect Google if the send permission has not yet been granted.' : 'Read access only. Enable “Allow Sarah to send after approval” when adding a new Gmail connection to permit approval-gated delivery.'}</p>`
+      : '';
+    return `<article class="connection-card"><div class="connection-card-top"><div><p class="connection-owner"><span style="--employee-color:${safe(employee.color || '#7ee8ff')}">${safe(employee.name?.[0] || 'AI')}</span>${safe(employee.name)}’s connection</p><h4>${safe(connection.name)} <em class="connection-status ${safe(connection.status || 'unknown')}">${safe(connection.status || 'unknown')}</em></h4><p class="connection-source">${safe(typeLabel)} · ${safe(source)}</p>${sarahGmailGovernance}</div><div class="connection-actions">${needsOauth ? `<a class="btn btn-primary compact-button" href="/api/employees/${encodeURIComponent(employee.id)}/mcp-connections/${encodeURIComponent(connection.id)}/google/start?service=${encodeURIComponent(connection.connection_type)}">Connect Google</a>` : ''}<button class="text-mini" type="button" data-action="test-mcp" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Test safely</button><button class="text-mini danger" type="button" data-action="remove-mcp" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Remove</button></div></div>${connection.connection_type === 'streamable_http' ? `<div class="connection-tools-header"><span>Tool controls</span><button class="btn btn-light compact-button" type="button" data-action="discover-tools" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">${connection.discovered_tools?.length ? 'Refresh tools' : 'Discover tools'}</button></div>${renderToolGrants(employee.id, connection)}` : ''}${connection.connection_type === 'git_repository' ? `<div class="connection-tools-header"><span>Repository changes require approval.</span><button class="btn btn-light compact-button" type="button" data-action="request-git-commit" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Request commit</button></div>` : ''}</article>`;
   }).join('') : '<p class="empty-state-sm">No employee-scoped connections yet. Add only the tools your team needs.</p>';
 }
 
@@ -129,9 +132,16 @@ async function loadData() {
 
 function updateCustomMcpFields() {
   const type = $('#custom-mcp-type').value;
+  const employeeId = $('#custom-mcp-employee').value;
   const label = $('#custom-mcp-target-label');
   const target = $('#custom-mcp-target');
   const name = $('#custom-mcp-name');
+  const gmailSendOption = $('#gmail-send-option');
+  const gmailSend = $('#custom-mcp-gmail-send');
+  const canEnableSarahSend = type === 'google_gmail' && employeeId === 'sarah';
+  gmailSendOption.hidden = !canEnableSarahSend;
+  gmailSend.disabled = !canEnableSarahSend;
+  if (!canEnableSarahSend) gmailSend.checked = false;
   label.firstChild.textContent = 'MCP Server URL';
   target.disabled = false;
   target.value = target.value === 'Google OAuth required after saving' ? '' : target.value;
@@ -178,6 +188,7 @@ async function addCustomMcpConnection(event) {
   try {
     const config = { notes };
     if (connectionType === 'git_repository') config.repo_path = target;
+    if (connectionType === 'google_gmail' && employeeId === 'sarah') config.gmail_send_enabled = $('#custom-mcp-gmail-send').checked;
     await requestJson(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, connection_type: connectionType, server_url: connectionType === 'streamable_http' ? target : null, auth_token: authToken || undefined, config, access_level: accessLevel }) });
     $('#custom-mcp-form').reset();
     updateCustomMcpFields();
@@ -316,6 +327,7 @@ function bindEvents() {
   $('#marketplace-form')?.addEventListener('submit', attachMarketplaceServer);
   $('#tool-grant-form')?.addEventListener('submit', submitToolGrant);
   $('#custom-mcp-type')?.addEventListener('change', updateCustomMcpFields);
+  $('#custom-mcp-employee')?.addEventListener('change', updateCustomMcpFields);
   $('#menuButton')?.addEventListener('click', () => document.querySelector('.settings-rail')?.classList.toggle('is-open'));
   document.addEventListener('click', (event) => {
     const target = event.target.closest('[data-action], [data-plan]');

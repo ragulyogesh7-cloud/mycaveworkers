@@ -143,6 +143,38 @@ async function generateAnalystNarrative(prompt: string, tenantId: string): Promi
   return openRouterFailure || { text: '', provider: 'preview', latency_ms: Date.now() - startedAt, error_code: OPENROUTER_KEY_READY ? 'provider_unavailable' : 'model_not_configured' };
 }
 
+async function generateWorkforceNarrative(prompt: string, tenantId: string): Promise<AnalystNarrativeResult> {
+  const startedAt = Date.now();
+  if (OPENROUTER_KEY_READY) {
+    try {
+      const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+        method: 'POST', signal: AbortSignal.timeout(OPENROUTER_TIMEOUT_MS),
+        headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json', 'HTTP-Referer': PUBLIC_APP_URL, 'X-OpenRouter-Title': 'Caveworkers Workforce Manager' },
+        body: JSON.stringify({
+          model: ANALYST_MODEL, temperature: 0.2, max_tokens: Math.min(1400, ANALYST_MAX_TOKENS + 350), stream: false,
+          user: crypto.createHash('sha256').update(tenantId).digest('hex').slice(0, 32),
+          messages: [
+            { role: 'system', content: 'You are Sarah, Caveworkers’ workforce manager. You own the manager response for every task, delegate rather than pretending to be every specialist, and return the useful final answer before process commentary. Never invent evidence, connector access, or external completion. Be concrete about blockers and name the next action.' },
+            { role: 'user', content: prompt }
+          ]
+        })
+      });
+      if (response.ok) {
+        const payload: any = await response.json();
+        const text = extractAnalystText(payload?.choices?.[0]?.message?.content);
+        if (text) return { text, provider: 'openrouter', model: payload?.model || ANALYST_MODEL, latency_ms: Date.now() - startedAt, usage: payload?.usage ? { prompt_tokens: payload.usage.prompt_tokens, completion_tokens: payload.usage.completion_tokens, total_tokens: payload.usage.total_tokens, cost: payload.usage.cost } : undefined };
+      } else reportOperationalFailure('workforce.openrouter_request', new Error(`OpenRouter returned HTTP ${response.status}.`), { tenant_hash: anonymizeIdentifier(tenantId), status_code: response.status });
+    } catch (error) { reportOperationalFailure('workforce.openrouter_request', error, { tenant_hash: anonymizeIdentifier(tenantId) }); }
+  }
+  if (genAIClient) {
+    try {
+      const response = await genAIClient.models.generateContent({ model: 'gemini-3.6-flash', contents: `You are Sarah, Caveworkers’ workforce manager. ${prompt}` });
+      if (response.text?.trim()) return { text: response.text.trim(), provider: 'gemini', model: 'gemini-3.6-flash', latency_ms: Date.now() - startedAt };
+    } catch (error) { reportOperationalFailure('workforce.gemini_fallback', error, { tenant_hash: anonymizeIdentifier(tenantId) }); }
+  }
+  return { text: '', provider: 'preview', latency_ms: Date.now() - startedAt, error_code: OPENROUTER_KEY_READY ? 'provider_unavailable' : 'model_not_configured' };
+}
+
 app.use((req, res, next) => {
   const requestOrigin = req.get('origin');
   if (requestOrigin) {
@@ -395,6 +427,13 @@ interface TaskRecord {
   queued_at?: string;
   started_at?: string;
   completed_at?: string;
+  execution?: {
+    action_type: string;
+    status: 'queued' | 'not_required' | 'awaiting_approval' | 'blocked' | 'processing' | 'succeeded' | 'failed' | 'cancelled';
+    summary: string;
+    updated_at: string;
+    result?: Record<string, string>;
+  };
 }
 
 interface WorkforceLiveToolEvidence {
@@ -426,6 +465,8 @@ interface ApprovalRecord {
   status: 'pending' | 'approved' | 'rejected';
   payload?: any;
   created_at: string;
+  decided_at?: string;
+  executed_at?: string;
 }
 
 interface AnalystDataSource {
@@ -733,6 +774,7 @@ function workroomSnapshot(task: TaskRecord) {
     collaboration_summary: task.collaboration_summary,
     live_tool_evidence: task.live_tool_evidence || [],
     web_research: task.web_research || [],
+    execution: task.execution,
     queued_at: task.queued_at,
     started_at: task.started_at,
     completed_at: task.completed_at,
@@ -787,21 +829,22 @@ async function enqueueWorkforceTask(companyId: string, question: string, preferr
   await hydrateTenantTasks(companyId);
   const taskId = db.nextTaskId++;
   const now = new Date().toISOString();
-  const { lead, collaborators } = selectCollaborativeTeam(question || 'Operations review', companyId, preferredEmployeeId);
-  const trace = [{ kind: 'queued', sender: 'Caveworkers worker', receiver: 'Company workroom', body: `Task queued for ${lead.name}. The employee group will begin automatically.`, created_at: now }];
+  const { manager, lead, collaborators } = selectCollaborativeTeam(question || 'Operations review', companyId, preferredEmployeeId);
+  const trace = [{ kind: 'queued', sender: 'Sarah', receiver: 'Company workroom', body: `I received this request and assigned ${lead.name} as delivery lead. I will return the final result and any execution blocker here.`, created_at: now }];
   const task: TaskRecord = {
     id: taskId,
     company_id: companyId,
     question: question.slice(0, 6000),
-    owner: lead.id,
+    owner: manager.id,
     status: 'queued',
-    answer: 'Your employee group is preparing the task…',
-    plan: `Queued → ${lead.name} lead → ${collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'role assessment'} → evidence → manager brief`,
+    answer: 'Sarah has accepted your request and is assigning the delivery team…',
+    plan: `Sarah intake → ${lead.name} delivery lead → ${collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'role assessment'} → evidence → Sarah’s manager response`,
     created_at: now,
     queued_at: now,
     trace,
-    participants: ['Manager', lead.name, ...collaborators.map((employee) => employee.name)],
-    collaboration_summary: `${lead.name} will lead a monitored collaboration with ${collaborators.length || 'no'} additional specialist${collaborators.length === 1 ? '' : 's'}.`,
+    participants: ['Manager', manager.name, lead.name, ...collaborators.map((employee) => employee.name).filter((name, index, list) => list.indexOf(name) === index)],
+    collaboration_summary: `${manager.name} will manage ${lead.name}${collaborators.length ? ` and ${collaborators.length} supporting specialist${collaborators.length === 1 ? '' : 's'}` : ''}.`,
+    execution: { action_type: 'none', status: 'queued', summary: 'Sarah has accepted the request and is coordinating the delivery team.', updated_at: now },
     live_tool_evidence: [],
     web_research: [],
   };
@@ -811,7 +854,9 @@ async function enqueueWorkforceTask(companyId: string, question: string, preferr
   await persistWorkforceJob(job);
   await persistActivityLog(companyId, { id: Date.now(), sender: 'Manager', receiver: 'Caveworkers worker', kind: 'task.queued', body: `Task #${taskId} entered the always-on employee queue.`, created_at: now });
   emitWorkroomEvent(companyId, taskId, { type: 'task_update', task: workroomSnapshot(task) });
-  return { ...workroomSnapshot(task), queued: true, worker_instance: WORKER_INSTANCE_ID };
+  // Wake the process-local worker immediately; the interval remains a recovery poll.
+  if (ALWAYS_ON_WORKER_ENABLED) void processNextWorkforceJob();
+  return { ...workroomSnapshot(task), queued: true, worker_enabled: ALWAYS_ON_WORKER_ENABLED, worker_instance: WORKER_INSTANCE_ID };
 }
 
 async function claimNextWorkforceJob(): Promise<WorkforceQueueJob | null> {
@@ -864,10 +909,10 @@ async function processNextWorkforceJob() {
     if (!task || task.company_id !== job.company_id) {
       job.status = 'failed'; job.error = 'Tenant task record was not found.'; job.updated_at = new Date().toISOString(); await persistWorkforceJob(job); return;
     }
-    const { lead, collaborators } = selectCollaborativeTeam(job.question, job.company_id, job.preferred_employee_id);
-    const workerEmployees = [...new Set([lead.id, ...collaborators.map((employee) => employee.id)])];
+    const { manager, lead, collaborators } = selectCollaborativeTeam(job.question, job.company_id, job.preferred_employee_id);
+    const workerEmployees = [...new Set([manager.id, lead.id, ...collaborators.map((employee) => employee.id)])];
     workerEmployees.forEach((employeeId) => setEmployeePresence(job.company_id, employeeId, 'working', task.id));
-    await updateQueuedTask(task, 'processing', `${lead.name} accepted the task. The employee group is now working in the company room.`);
+    await updateQueuedTask(task, 'processing', `${manager.name} is managing this task. ${lead.name} and the assigned specialists are now working in the company room.`);
     try {
       const completed = await handleTaskRoutingAsync(job.question, job.company_id, job.preferred_employee_id, task.id);
       Object.assign(task, completed);
@@ -879,9 +924,12 @@ async function processNextWorkforceJob() {
       emitWorkroomEvent(job.company_id, task.id, { type: 'task_update', task: workroomSnapshot(task) });
     } catch (error: any) {
       reportOperationalFailure('worker.task_execution', error, { tenant_hash: anonymizeIdentifier(job.company_id), task_id: task.id, worker_instance: WORKER_INSTANCE_ID });
-      task.answer = 'The employee group could not complete this task. Review the workroom trace and retry when the source is available.';
-      await updateQueuedTask(task, 'failed', String(error?.message || 'Worker execution failed').slice(0, 300));
-      job.status = 'failed'; job.error = String(error?.message || 'Worker execution failed').slice(0, 300); job.updated_at = new Date().toISOString(); await persistWorkforceJob(job);
+      const failureDetail = String(error?.message || 'Worker execution failed').slice(0, 300);
+      task.answer = `### Sarah’s manager update (Task #${task.id})\n\nI could not complete the requested work because the execution service returned a recoverable failure. I have **not** represented a draft, tool intent, or partial planning as completed work.\n\n**What I completed**\n- Recorded the task, assigned delivery ownership, and preserved the workroom trace.\n- Stopped any external action; no email, write, payment, or account change was performed.\n\n**Next action**\nRetry this task after the configured model, connector, or source is available. If the problem persists, review the connection state in Settings and share the task trace with support.`;
+      task.execution = { action_type: task.execution?.action_type || 'none', status: 'failed', summary: 'Sarah could not complete the execution run. No external action was performed.', updated_at: new Date().toISOString() };
+      task.trace = [...(task.trace || []), { kind: 'manager_result', sender: 'Sarah', receiver: 'Manager', body: 'I could not complete this run. I preserved the trace, performed no external action, and provided the next step in the final response.', created_at: new Date().toISOString() }];
+      await updateQueuedTask(task, 'failed', failureDetail);
+      job.status = 'failed'; job.error = failureDetail; job.updated_at = new Date().toISOString(); await persistWorkforceJob(job);
     } finally {
       workerEmployees.forEach((employeeId) => setEmployeePresence(job.company_id, employeeId, 'idle'));
     }
@@ -969,7 +1017,12 @@ function decryptConnectorCredentials(value?: string): Record<string, any> | null
 }
 
 function sanitizeConnectorConfig(config: Record<string, any> = {}) {
-  return { notes: typeof config.notes === 'string' ? config.notes.slice(0, 800) : '', repo_path: typeof config.repo_path === 'string' ? config.repo_path.slice(0, 400) : undefined };
+  return {
+    notes: typeof config.notes === 'string' ? config.notes.slice(0, 800) : '',
+    repo_path: typeof config.repo_path === 'string' ? config.repo_path.slice(0, 400) : undefined,
+    // Gmail write access is an explicit opt-in. It is still approval-gated per message.
+    gmail_send_enabled: config.gmail_send_enabled === true
+  };
 }
 
 async function persistMcpConnection(connection: TenantConnector) {
@@ -1045,10 +1098,13 @@ function googleOAuthClient() {
   return new google.auth.OAuth2(GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI);
 }
 
-function googleScopesFor(connectionType: TenantConnector['connection_type']) {
-  return connectionType === 'google_gmail'
-    ? ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/gmail.readonly']
-    : ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/spreadsheets.readonly'];
+function googleScopesFor(connection: TenantConnector) {
+  if (connection.connection_type === 'google_gmail') {
+    const scopes = ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/gmail.readonly'];
+    if (connection.config?.gmail_send_enabled === true) scopes.push('https://www.googleapis.com/auth/gmail.send');
+    return scopes;
+  }
+  return ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/spreadsheets.readonly'];
 }
 
 function parseSpreadsheetId(value: string) {
@@ -1141,10 +1197,10 @@ async function executeEmployeeReadTools(companyId: string, employee: any, questi
   return results;
 }
 
-async function getGoogleConnection(companyId: string, connectionId: number, type: 'google_gmail' | 'google_sheets') {
-  const connections = await loadMcpConnections(companyId, 'david');
+async function getGoogleConnection(companyId: string, employeeId: string, connectionId: number, type: 'google_gmail' | 'google_sheets') {
+  const connections = await loadMcpConnections(companyId, employeeId);
   const connection = connections.find((entry) => entry.id === connectionId && entry.connection_type === type && entry.status === 'connected');
-  if (!connection || !connection.auth_token_encrypted) throw new Error('The requested Google connector is not connected for David.');
+  if (!connection || !connection.auth_token_encrypted) throw new Error(`The requested Google connector is not connected for ${employeeId}.`);
   const credentials = decryptConnectorCredentials(connection.auth_token_encrypted);
   if (!credentials) throw new Error('The Google connector credentials cannot be decrypted. Rotate the connector and reconnect it.');
   const oauth2 = googleOAuthClient();
@@ -1153,7 +1209,7 @@ async function getGoogleConnection(companyId: string, connectionId: number, type
 }
 
 async function readGoogleSheetValues(companyId: string, connectionId: number, sheetReference: string, range?: string) {
-  const { oauth2 } = await getGoogleConnection(companyId, connectionId, 'google_sheets');
+  const { oauth2 } = await getGoogleConnection(companyId, 'david', connectionId, 'google_sheets');
   const sheets = google.sheets({ version: 'v4', auth: oauth2 });
   const spreadsheetId = parseSpreadsheetId(sheetReference);
   if (!spreadsheetId || spreadsheetId.length < 10) throw new Error('A valid Google Sheets URL or spreadsheet ID is required.');
@@ -1166,7 +1222,7 @@ async function readGoogleSheetValues(companyId: string, connectionId: number, sh
 }
 
 async function searchGmail(companyId: string, connectionId: number, query: string, maxResults = 10) {
-  const { oauth2 } = await getGoogleConnection(companyId, connectionId, 'google_gmail');
+  const { oauth2 } = await getGoogleConnection(companyId, 'david', connectionId, 'google_gmail');
   const gmail = google.gmail({ version: 'v1', auth: oauth2 });
   const listed = await gmail.users.messages.list({ userId: 'me', q: String(query || '').slice(0, 500), maxResults: Math.min(Math.max(Number(maxResults) || 10, 1), 10) });
   const messages = await Promise.all((listed.data.messages || []).slice(0, 10).map(async (message) => {
@@ -1175,6 +1231,84 @@ async function searchGmail(companyId: string, connectionId: number, query: strin
     return { id: message.id, thread_id: message.threadId, snippet: detail.data.snippet || '', headers };
   }));
   return { query: String(query || '').slice(0, 500), messages };
+}
+
+const EMAIL_ADDRESS_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+
+function emailDraftFromRequest(question: string, companyName: string) {
+  const recipients = Array.from(new Set((question.match(EMAIL_ADDRESS_PATTERN) || []).map((email) => email.toLowerCase()))).slice(0, 10);
+  const safeLine = (value: string, limit: number) => value.replace(/[\r\n]+/g, ' ').trim().slice(0, limit);
+  const subjectMatch = question.match(/(?:subject|re)\s*[:\-]\s*([^\n.]{3,160})/i);
+  const bodyMatch = question.match(/(?:body|message|saying|say)\s*[:\-]?\s*([\s\S]{3,2200})/i);
+  const subject = safeLine(subjectMatch?.[1] || `Update from ${companyName || 'your Caveworkers workspace'}`, 160);
+  const body = String(bodyMatch?.[1] || `Hello,\n\n${question}\n\nRegards,\nSarah\n${companyName || 'Caveworkers'}`).replace(/\r\n/g, '\n').slice(0, 3000);
+  return { recipients, subject, body };
+}
+
+function hasApprovalGatedGmailSend(connection: TenantConnector) {
+  const grant = (connection.tool_grants || []).find((entry) => entry.tool_name === 'gmail.send');
+  return connection.connection_type === 'google_gmail'
+    && connection.status === 'connected'
+    && connection.config?.gmail_send_enabled === true
+    && (connection.auth_scopes || []).includes('https://www.googleapis.com/auth/gmail.send')
+    && grant?.access_level === 'requires_approval';
+}
+
+async function prepareSarahEmailAction(companyId: string, question: string, taskId: number) {
+  const company = db.companies.get(companyId);
+  const draft = emailDraftFromRequest(question, company?.name || 'your workspace');
+  if (!draft.recipients.length) return { status: 'blocked' as const, summary: 'Sarah prepared the work but cannot draft an executable email because no recipient address was included. Add a recipient such as name@company.com and try again.' };
+  const connections = await loadMcpConnections(companyId, 'sarah');
+  const gmailConnection = connections.find(hasApprovalGatedGmailSend);
+  if (!gmailConnection) {
+    const hasConfiguredGmail = connections.some((connection) => connection.connection_type === 'google_gmail' && connection.config?.gmail_send_enabled === true);
+    return { status: 'blocked' as const, summary: hasConfiguredGmail ? 'Sarah’s Gmail connection needs to be reconnected with the Gmail send permission before an email can be sent.' : 'Sarah has no approval-gated Gmail send connection. In Settings, connect Gmail to Sarah, enable “Allow Sarah to send after approval,” then complete Google OAuth.' };
+  }
+  return {
+    status: 'awaiting_approval' as const,
+    summary: `Sarah drafted an email to ${draft.recipients.join(', ')}. It will not be sent until you approve it.`,
+    payload: { action_type: 'gmail.send', connection_id: gmailConnection.id, employee_id: 'sarah', to: draft.recipients, subject: draft.subject, body: draft.body, execution_status: 'pending', idempotency_key: crypto.randomUUID() }
+  };
+}
+
+function gmailRawMessage(to: string[], subject: string, body: string) {
+  const safeHeader = (value: string, limit: number) => String(value || '').replace(/[\r\n]+/g, ' ').trim().slice(0, limit);
+  const safeBody = String(body || '').replace(/\r\n/g, '\n').slice(0, 3000);
+  return Buffer.from(`To: ${safeHeader(to.join(', '), 1200)}\r\nSubject: ${safeHeader(subject, 160)}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n${safeBody}`, 'utf8').toString('base64url');
+}
+
+async function dispatchApprovedSarahEmail(approval: ApprovalRecord) {
+  const payload = approval.payload || {};
+  if (payload.action_type !== 'gmail.send') return null;
+  if (payload.execution_status === 'succeeded') return payload.execution_result || null;
+  if (payload.execution_status === 'processing') throw new Error('This email is already being sent. Check the task result before retrying.');
+  const recipients = Array.isArray(payload.to) ? payload.to.filter((email: unknown) => typeof email === 'string' && EMAIL_ADDRESS_PATTERN.test(email)) : [];
+  EMAIL_ADDRESS_PATTERN.lastIndex = 0;
+  if (!recipients.length || recipients.length > 10) throw new Error('The approved email has no valid recipients. Create a new draft with up to 10 valid email addresses.');
+  approval.payload = { ...payload, execution_status: 'processing' };
+  await persistApprovalRecord(approval);
+  const { oauth2 } = await getGoogleConnection(approval.company_id, 'sarah', Number(payload.connection_id), 'google_gmail');
+  const gmail = google.gmail({ version: 'v1', auth: oauth2 });
+  const sent = await gmail.users.messages.send({ userId: 'me', requestBody: { raw: gmailRawMessage(recipients, String(payload.subject || ''), String(payload.body || '')) } });
+  const result = { message_id: String(sent.data.id || ''), thread_id: String(sent.data.threadId || ''), recipients: recipients.join(', '), subject: String(payload.subject || '').slice(0, 160) };
+  approval.payload = { ...approval.payload, execution_status: 'succeeded', execution_result: result };
+  approval.executed_at = new Date().toISOString();
+  await persistApprovalRecord(approval);
+  return result;
+}
+
+async function recordWorkforceApprovalOutcome(approval: ApprovalRecord, status: TaskRecord['execution']['status'], summary: string, result?: Record<string, string>) {
+  await hydrateTenantTasks(approval.company_id);
+  const task = db.tasks.get(approval.task_id);
+  if (!task || task.company_id !== approval.company_id) return;
+  task.execution = { action_type: String(approval.payload?.action_type || 'external.action'), status, summary: summary.slice(0, 1200), updated_at: new Date().toISOString(), result };
+  task.status = status === 'succeeded' || status === 'cancelled' ? 'completed' : status === 'failed' ? 'failed' : status === 'blocked' ? 'blocked' : 'pending_approval';
+  task.trace = [...(task.trace || []), { kind: status === 'succeeded' ? 'action_completed' : status === 'cancelled' ? 'approval_declined' : status === 'failed' || status === 'blocked' ? 'action_failed' : 'action_update', sender: 'Sarah', receiver: 'Manager', body: summary.slice(0, 1200), created_at: new Date().toISOString() }];
+  task.completed_at = new Date().toISOString();
+  db.tasks.set(task.id, task);
+  await persistTaskRecord(task);
+  await persistActivityLog(approval.company_id, { id: Date.now(), sender: 'Sarah', receiver: 'Manager', kind: `task.execution.${status}`, body: `Task #${task.id}: ${summary.slice(0, 900)}`, created_at: new Date().toISOString() });
+  emitWorkroomEvent(approval.company_id, task.id, { type: 'task_update', task: workroomSnapshot(task) });
 }
 
 async function persistAnalystDataSource(sourceRecord: AnalystDataSource) {
@@ -2282,18 +2416,23 @@ function selectCollaborativeTeam(question: string, companyId: string, preferredE
   const scored = WORKFORCE_DOMAINS.map((domain) => ({ ...domain, score: domain.keywords.reduce((total, keyword) => total + (lower.includes(keyword) ? 1 : 0), 0) }))
     .filter((domain) => workforce.some((employee) => employee.id === domain.employeeId));
   const winner = scored.sort((a, b) => b.score - a.score)[0];
+  // Sarah is the manager of the Caveworkers organization. She is accountable for
+  // intake, delegation, approval visibility, and the user-facing final response.
+  const manager = workforce.find((employee) => employee.id === 'sarah') || EMPLOYEE_CATALOG.find((employee) => employee.id === 'sarah') || workforce[0];
   const preferredLead = workforce.find((employee) => employee.id === preferredEmployeeId);
-  const lead = preferredLead || workforce.find((employee) => employee.id === (winner?.score ? winner.employeeId : 'alex')) || workforce[0];
+  const lead = preferredEmployeeId === '__whole_team__'
+    ? (workforce.find((employee) => employee.id === (winner?.score ? winner.employeeId : 'alex')) || workforce.find((employee) => employee.id !== manager.id) || manager)
+    : (preferredLead || workforce.find((employee) => employee.id === (winner?.score ? winner.employeeId : 'alex')) || manager);
   if (preferredEmployeeId === '__whole_team__') {
-    return { lead, collaborators: workforce.filter((employee) => employee.id !== lead.id), workforce };
+    return { manager, lead, collaborators: workforce.filter((employee) => employee.id !== lead.id && employee.id !== manager.id), workforce };
   }
   const leadPeers = (lead.collaborates_with || []).map((id: string) => workforce.find((employee) => employee.id === id)).filter(Boolean) as any[];
-  const explicitMatches = scored.filter((domain) => domain.score > 0 && domain.employeeId !== lead.id).map((domain) => workforce.find((employee) => employee.id === domain.employeeId)).filter(Boolean) as any[];
+  const explicitMatches = scored.filter((domain) => domain.score > 0 && domain.employeeId !== lead.id && domain.employeeId !== manager.id).map((domain) => workforce.find((employee) => employee.id === domain.employeeId)).filter(Boolean) as any[];
   const collaborators: any[] = [];
   for (const employee of [...explicitMatches, ...leadPeers]) {
-    if (employee.id !== lead.id && !collaborators.some((entry) => entry.id === employee.id) && collaborators.length < 3) collaborators.push(employee);
+    if (employee.id !== lead.id && employee.id !== manager.id && !collaborators.some((entry) => entry.id === employee.id) && collaborators.length < 3) collaborators.push(employee);
   }
-  return { lead, collaborators, workforce };
+  return { manager, lead, collaborators, workforce };
 }
 
 interface WorkforceTaskContext { employee: any; tools: string[]; memory: string[]; connectors: string[]; live_tool_evidence: WorkforceLiveToolEvidence[]; }
@@ -2319,9 +2458,10 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   const taskId = existingTaskId || db.nextTaskId++;
   const existingTask = existingTaskId ? db.tasks.get(existingTaskId) : undefined;
   const now = new Date().toISOString();
-  const { lead, collaborators, workforce } = selectCollaborativeTeam(question || 'Operations review', companyId, preferredEmployeeId);
+  const { manager, lead, collaborators, workforce } = selectCollaborativeTeam(question || 'Operations review', companyId, preferredEmployeeId);
   const lowerQ = (question || '').toLowerCase();
-  const specialistContexts = await Promise.all([lead, ...collaborators].map((employee) => loadWorkforceTaskContext(companyId, employee)));
+  const executionTeam = [lead, ...collaborators].filter((employee, index, list) => list.findIndex((entry) => entry.id === employee.id) === index);
+  const specialistContexts = await Promise.all(executionTeam.map((employee) => loadWorkforceTaskContext(companyId, employee)));
   await Promise.all(specialistContexts.map(async (context) => {
     context.live_tool_evidence = await executeEmployeeReadTools(companyId, context.employee, question);
   }));
@@ -2332,53 +2472,56 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   const knowText = relevantDocs.length ? relevantDocs.map((document) => `[${document.title}] ${document.content}`).join('\n').slice(0, 2400) : 'No matching workspace knowledge was found.';
   const webText = webResearch.length ? webResearch.map((source) => `[${source.title}] ${source.url}\n${source.snippet}\n${source.content_preview || ''}`).join('\n\n').slice(0, 4200) : 'No web research provider is enabled or no public sources matched.';
   const trace: any[] = [
-    { kind: 'received', sender: 'Manager', receiver: 'Caveworkers group', body: `New task: “${question}”`, created_at: now },
-    { kind: 'team_context', sender: 'Caveworkers coordinator', receiver: lead.name, body: `${lead.name} is leading with ${collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'no additional specialist'} assigned for this task.`, created_at: new Date(Date.now() + 250).toISOString() },
+    { kind: 'received', sender: 'Manager', receiver: 'Sarah', body: `New task: “${question}”`, created_at: now },
+    { kind: 'team_context', sender: 'Sarah', receiver: lead.name, body: `I own this request. ${lead.name} is the delivery lead${collaborators.length ? `, supported by ${collaborators.map((employee) => employee.name).join(', ')}` : ''}. I will report the result and any approval or connector blocker back to you.`, created_at: new Date(Date.now() + 250).toISOString() },
     { kind: 'knowledge', sender: 'Workspace knowledge', receiver: lead.name, body: relevantDocs.length ? `Shared ${relevantDocs.length} relevant workspace reference${relevantDocs.length === 1 ? '' : 's'} with the team.` : 'No matching reference was found; the team will state assumptions clearly.', created_at: new Date(Date.now() + 500).toISOString() },
     ...(webResearch.length ? [{ kind: 'web_research', sender: 'Caveworkers research desk', receiver: 'Company workroom', body: `Collected ${webResearch.length} public source${webResearch.length === 1 ? '' : 's'} for the team. Sources remain linked in the task evidence panel.`, created_at: new Date(Date.now() + 650).toISOString() }] : [])
   ];
   collaborators.forEach((employee, index) => {
-    trace.push({ kind: 'group_message', sender: lead.name, receiver: employee.name, body: `@${employee.name} Please assess the ${employee.department.toLowerCase()} portion of this request and return constraints, evidence needed, and a safe next step.`, created_at: new Date(Date.now() + 900 + index * 600).toISOString() });
-    trace.push({ kind: 'group_message', sender: employee.name, receiver: lead.name, body: collaborationFinding(employee, question, contextByEmployeeId.get(employee.id)), created_at: new Date(Date.now() + 1200 + index * 600).toISOString() });
+    trace.push({ kind: 'group_message', sender: 'Sarah', receiver: employee.name, body: `@${employee.name}, work with ${lead.name} on the ${employee.department.toLowerCase()} portion of this request. Return usable findings, constraints, evidence needed, and a safe next step.`, created_at: new Date(Date.now() + 900 + index * 600).toISOString() });
+    trace.push({ kind: 'group_message', sender: employee.name, receiver: 'Sarah', body: collaborationFinding(employee, question, contextByEmployeeId.get(employee.id)), created_at: new Date(Date.now() + 1200 + index * 600).toISOString() });
   });
   specialistContexts.flatMap((context) => context.live_tool_evidence).forEach((evidence, index) => {
     trace.push({ kind: 'tool_execution', sender: evidence.employee_name, receiver: 'Caveworkers group', body: `${evidence.status === 'executed' ? 'Read tool executed' : 'Read tool failed'}: ${evidence.connector_name} / ${evidence.tool_name}. ${evidence.summary.slice(0, 500)}`, created_at: new Date(Date.now() + 650 + index * 120).toISOString() });
   });
   const teamBrief = `Public research evidence:\n${webText}\n\n` + specialistContexts.map((context) => `${context.employee.name}: ${context.employee.role} — ${context.employee.persona}\nGranted tools: ${context.tools.join(', ') || 'none'}\nConnected tenant tools: ${context.connectors.join(', ') || 'none'}\nRole memory: ${context.memory.join(' | ') || 'none'}\nLive MCP evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} [${entry.status}] ${entry.summary.slice(0, 900)}`).join(' | ') || 'none'}`).join('\n\n');
-  let answer = '';
-  if (genAIClient) {
-    try {
-      const response = await genAIClient.models.generateContent({
-        model: 'gemini-3.6-flash',
-        contents: `You are ${lead.name}, ${lead.role} (${lead.employee_code}) at Caveworkers.\nTask: "${question}"\nActive specialist team:\n${teamBrief}\nWorkspace knowledge:\n${knowText}\n\nWrite an evidence-aware executive response. Explain the contribution of each collaborating specialist, distinguish assumptions from evidence, and state that external writes require manager approval.`
-      });
-      answer = response.text || '';
-    } catch (error) {
-      console.warn('Collaborative task model response note:', error);
-    }
-  }
+  const deliveryTeam = [lead, ...collaborators].filter((employee, index, list) => list.findIndex((entry) => entry.id === employee.id) === index);
+  const narrative = await generateWorkforceNarrative(`Manager: ${manager.name} (${manager.role})\nDelivery lead: ${lead.name} (${lead.role})\nTask: "${question}"\n\nActive specialist evidence:\n${teamBrief}\n\nWorkspace knowledge:\n${knowText}\n\nWrite the direct final response to the manager. Start with the requested answer or a precise blocker. Then give a short "Work completed" list and a clear "Next action". Name the delivery lead and contributors. Do not claim that an email, write, payment, publication, access change, or other external action happened unless the execution evidence explicitly confirms it.`, companyId);
+  let answer = narrative.text;
   if (!answer) {
-    answer = `### ${lead.name}'s collaborative brief (Task #${taskId})\n\n**Lead:** ${lead.name} — ${lead.role}\n**Contributors:** ${collaborators.length ? collaborators.map((employee) => `${employee.name} (${employee.role})`).join(', ') : 'No additional specialist required'}\n\n**Decision view**\n${lead.persona}\n\n**Team handoffs**\n${collaborators.length ? collaborators.map((employee) => `- **${employee.name}:** ${collaborationFinding(employee, question, contextByEmployeeId.get(employee.id))}`).join('\n') : '- The lead assessed the request within the employee’s defined role and tool permissions.'}\n\n**Safe next step**\nReview the group conversation and evidence requirements. Any email, record change, publication, payment, access change, or external MCP write remains a draft until a workspace manager approves it.`;
+    answer = `### Sarah’s manager update (Task #${taskId})\n\n**Your request:** ${question}\n\n**Delivery lead:** ${lead.name} — ${lead.role}\n\n**Work completed**\n${deliveryTeam.map((employee) => `- **${employee.name}:** ${employee.id === lead.id ? `assessed the primary ${employee.department.toLowerCase()} workstream and prepared the delivery response.` : collaborationFinding(employee, question, contextByEmployeeId.get(employee.id))}`).join('\n')}\n\n**Current result**\nThe request has been routed and recorded, but a production model response is unavailable for this task. I have not represented a simulated draft as completed work.\n\n**Next action**\nConfigure a valid OpenRouter or Gemini production model key, then rerun this task. Any external action will remain approval-gated and will report a verifiable outcome.`;
   }
-  const requiresApproval = ['email', 'send', 'commit', 'hire', 'publish', 'recruit', 'payment', 'invoice', 'access', 'delete', 'post', 'write'].some((term) => lowerQ.includes(term));
+  const isEmailAction = ['email', 'send email', 'gmail', 'mail '].some((term) => lowerQ.includes(term));
+  const requiresApproval = isEmailAction || ['send', 'commit', 'hire', 'publish', 'recruit', 'payment', 'invoice', 'access', 'delete', 'post', 'write'].some((term) => lowerQ.includes(term));
+  let execution: TaskRecord['execution'] = { action_type: isEmailAction ? 'gmail.send' : requiresApproval ? 'external.action' : 'none', status: 'not_required', summary: 'No external action was requested.', updated_at: new Date().toISOString() };
   if (requiresApproval) {
+    const emailAction = isEmailAction ? await prepareSarahEmailAction(companyId, question, taskId) : null;
+    execution = emailAction ? { action_type: 'gmail.send', status: emailAction.status, summary: emailAction.summary, updated_at: new Date().toISOString() } : { action_type: 'external.action', status: 'awaiting_approval', summary: 'The requested external action is prepared and awaiting your approval. No external action has been performed.', updated_at: new Date().toISOString() };
     const approvalId = db.nextApprovalId++;
-    await persistApprovalRecord({ id: approvalId, company_id: companyId, task_id: taskId, employee_id: lead.id, tool_name: lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action', action_summary: `${lead.name} requests manager sign-off for: "${question}"`, status: 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', collaborators: collaborators.map((employee) => employee.id) } });
-    trace.push({ kind: 'approval_required', sender: lead.name, receiver: 'Manager approval queue', body: 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
+    await persistApprovalRecord({ id: approvalId, company_id: companyId, task_id: taskId, employee_id: manager.id, tool_name: isEmailAction ? 'Gmail send' : lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action', action_summary: emailAction?.summary || `${manager.name} requests manager sign-off for: "${question}"`, status: emailAction?.status === 'blocked' ? 'rejected' : 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', action_type: isEmailAction ? 'gmail.send' : 'external.action', manager_id: manager.id, delivery_lead_id: lead.id, collaborators: collaborators.map((employee) => employee.id), ...(emailAction?.payload || {}) } });
+    trace.push({ kind: emailAction?.status === 'blocked' ? 'blocked' : 'approval_required', sender: manager.name, receiver: 'Manager approval queue', body: emailAction?.summary || 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
   }
-  trace.push({ kind: 'group_message', sender: lead.name, receiver: 'Caveworkers group', body: `I consolidated the team’s inputs into the manager brief. The task ledger now contains the full conversation and approval state.`, created_at: new Date(Date.now() + 3400).toISOString() });
-  trace.push({ kind: 'completed', sender: lead.name, receiver: 'Task ledger', body: 'Collaborative task recorded with tenant-scoped participants and audit trace.', created_at: new Date(Date.now() + 3600).toISOString() });
+  trace.push({ kind: 'group_message', sender: manager.name, receiver: 'Manager', body: `I reviewed ${lead.name}’s delivery. ${execution.summary}`, created_at: new Date(Date.now() + 3400).toISOString() });
+  trace.push({ kind: 'completed', sender: manager.name, receiver: 'Task ledger', body: requiresApproval ? `Work product completed; execution state: ${execution.status}.` : 'Work product completed with a tenant-scoped audit trace.', created_at: new Date(Date.now() + 3600).toISOString() });
   const liveToolEvidence = specialistContexts.flatMap((context) => context.live_tool_evidence);
-  const taskRecord: TaskRecord = { id: taskId, company_id: companyId, question, owner: lead.id, status: requiresApproval ? 'pending_approval' : 'completed', answer, plan: `1. Intake → 2. Assign ${lead.name} → 3. Group specialist handoffs${collaborators.length ? ` (${collaborators.map((employee) => employee.name).join(', ')})` : ''} → 4. Permissioned read tools → 5. Consolidate → 6. Human approval if required`, created_at: now, trace, participants: ['Manager', lead.name, ...collaborators.map((employee) => employee.name)], collaboration_summary: `${lead.name} led a permissioned collaboration with ${collaborators.length || 'no'} additional specialist${collaborators.length === 1 ? '' : 's'}.`, live_tool_evidence: liveToolEvidence, web_research: webResearch, queued_at: existingTask?.queued_at, started_at: existingTask?.started_at || now, completed_at: new Date().toISOString() };
+  const taskRecord: TaskRecord = { id: taskId, company_id: companyId, question, owner: manager.id, status: execution.status === 'awaiting_approval' ? 'pending_approval' : execution.status === 'blocked' ? 'blocked' : 'completed', answer, plan: `1. Sarah intake → 2. Delegate ${lead.name} → 3. Specialist delivery${collaborators.length ? ` (${collaborators.map((employee) => employee.name).join(', ')})` : ''} → 4. Permissioned evidence → 5. Sarah manager response → 6. Approval-gated external execution when requested`, created_at: now, trace, participants: ['Manager', manager.name, ...deliveryTeam.map((employee) => employee.name).filter((name, index, list) => list.indexOf(name) === index)], collaboration_summary: `${manager.name} managed ${lead.name}${collaborators.length ? ` with ${collaborators.length} supporting specialist${collaborators.length === 1 ? '' : 's'}` : ''}.`, live_tool_evidence: liveToolEvidence, web_research: webResearch, queued_at: existingTask?.queued_at, started_at: existingTask?.started_at || now, completed_at: new Date().toISOString(), execution };
   db.tasks.set(taskId, taskRecord);
   await persistTaskRecord(taskRecord);
-  await persistActivityLog(companyId, { id: Date.now(), sender: lead.name, receiver: collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'Task ledger', kind: 'task.collaborative', body: `Task #${taskId} completed with a visible group-chat audit trail.`, created_at: now });
-  return { id: taskId, company_id: companyId, question, status: taskRecord.status, owner: lead.id, participants: taskRecord.participants, plan: taskRecord.plan, answer, trace, live_tool_evidence: liveToolEvidence, web_research: webResearch, collaboration_summary: taskRecord.collaboration_summary, workforce_size: workforce.length };
+  await persistActivityLog(companyId, { id: Date.now(), sender: manager.name, receiver: lead.name, kind: 'task.managed', body: `Task #${taskId} was managed by Sarah with execution state ${execution.status}.`, created_at: now });
+  return { id: taskId, company_id: companyId, question, status: taskRecord.status, owner: manager.id, participants: taskRecord.participants, plan: taskRecord.plan, answer, execution, trace, live_tool_evidence: liveToolEvidence, web_research: webResearch, collaboration_summary: taskRecord.collaboration_summary, workforce_size: workforce.length };
 }
+
+// This is deliberately absent outside the test runtime. It lets regression tests
+// exercise the actual worker completion path without creating an HTTP backdoor.
+export const workforceTestHooks = process.env.NODE_ENV === 'test'
+  ? { handleTaskRoutingAsync, selectCollaborativeTeam }
+  : undefined;
+
 app.post('/api/task', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  if (!ALWAYS_ON_WORKER_ENABLED && process.env.NODE_ENV !== 'test') return res.status(503).json({ error: 'The workforce worker is disabled. Enable ALWAYS_ON_WORKER_ENABLED before assigning tasks.', code: 'worker_disabled', retryable: false });
   const { request: question, preferred_employee_id: preferredEmployeeId } = req.body || {};
   const normalizedQuestion = String(question || 'Operations review').trim().slice(0, 6000);
   if (!normalizedQuestion) return res.status(400).json({ error: 'A task request is required.' });
@@ -2390,6 +2533,7 @@ app.post('/api/tasks', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  if (!ALWAYS_ON_WORKER_ENABLED && process.env.NODE_ENV !== 'test') return res.status(503).json({ error: 'The workforce worker is disabled. Enable ALWAYS_ON_WORKER_ENABLED before assigning tasks.', code: 'worker_disabled', retryable: false });
   const { request: question, preferred_employee_id: preferredEmployeeId } = req.body || {};
   const normalizedQuestion = String(question || 'Operations review').trim().slice(0, 6000);
   if (!normalizedQuestion) return res.status(400).json({ error: 'A task request is required.' });
@@ -2438,18 +2582,56 @@ app.get('/api/approvals', async (req, res) => {
 
 app.post('/api/approvals/:id', async (req, res) => {
   const user = getAuthUser(req);
-  if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
   const id = parseInt(req.params.id, 10);
-  const { status } = req.body || {};
+  const requestedStatus = req.body?.status;
+  if (requestedStatus !== 'approved' && requestedStatus !== 'rejected') return res.status(400).json({ error: 'Choose approved or rejected.' });
   await loadAnalystApprovals(companyId);
   const approval = db.approvals.get(id);
   if (!approval || approval.company_id !== companyId) return res.status(404).json({ error: 'Approval request not found' });
-  approval.status = status === 'approved' ? 'approved' : 'rejected';
-  if (approval.payload?.origin === 'analyst') await persistAnalystApproval(approval);
+  if (approval.status !== 'pending') return res.status(409).json({ error: 'This approval has already been decided.', approval });
+  approval.status = requestedStatus;
+  approval.decided_at = new Date().toISOString();
+
   if (approval.payload?.origin === 'analyst') {
+    await persistAnalystApproval(approval);
     await persistActivityLog(companyId, { id: Date.now(), sender: 'Manager', receiver: 'David', kind: approval.status === 'approved' ? 'analyst.action_authorized' : 'analyst.action_declined', body: approval.status === 'approved' ? `Approved analyst draft for ${approval.tool_name}. No external dispatch occurs until that connector is configured.` : `Declined analyst draft for ${approval.tool_name}.`, created_at: new Date().toISOString() });
+    return res.json({ ok: true, approval, execution: { status: approval.status === 'approved' ? 'authorized' : 'cancelled' } });
   }
+
+  if (approval.payload?.origin === 'workforce') {
+    if (approval.status === 'rejected') {
+      approval.payload = { ...(approval.payload || {}), execution_status: 'cancelled' };
+      await persistApprovalRecord(approval);
+      const summary = 'You declined this external action. Sarah kept the work product and did not perform any external change.';
+      await recordWorkforceApprovalOutcome(approval, 'cancelled', summary);
+      return res.json({ ok: true, approval, execution: { status: 'cancelled', summary } });
+    }
+    if (approval.payload?.action_type === 'gmail.send') {
+      try {
+        const result = await dispatchApprovedSarahEmail(approval);
+        const summary = result?.message_id ? `Sarah sent the approved email to ${result.recipients}. Gmail message ID: ${result.message_id}.` : 'Sarah could not confirm an email delivery result.';
+        await persistApprovalRecord(approval);
+        await recordWorkforceApprovalOutcome(approval, result?.message_id ? 'succeeded' : 'failed', summary, result || undefined);
+        return res.json({ ok: true, approval, execution: { status: result?.message_id ? 'succeeded' : 'failed', summary, result } });
+      } catch (error: any) {
+        approval.payload = { ...(approval.payload || {}), execution_status: 'failed', execution_error: String(error?.message || 'Gmail dispatch failed.').slice(0, 500) };
+        await persistApprovalRecord(approval);
+        const summary = `Sarah could not send the approved email. ${String(error?.message || 'Gmail dispatch failed.').slice(0, 500)} No delivery has been confirmed.`;
+        reportOperationalFailure('workforce.gmail_dispatch', error, { tenant_hash: anonymizeIdentifier(companyId), approval_id: approval.id, task_id: approval.task_id });
+        await recordWorkforceApprovalOutcome(approval, 'failed', summary);
+        return res.status(502).json({ error: summary, approval, execution: { status: 'failed', summary } });
+      }
+    }
+    approval.payload = { ...(approval.payload || {}), execution_status: 'blocked' };
+    await persistApprovalRecord(approval);
+    const summary = `You approved ${approval.tool_name}, but Caveworkers has no configured execution adapter for this action. Sarah did not perform an external change.`;
+    await recordWorkforceApprovalOutcome(approval, 'blocked', summary);
+    return res.status(409).json({ error: summary, approval, execution: { status: 'blocked', summary } });
+  }
+
+  await persistApprovalRecord(approval);
   res.json({ ok: true, approval });
 });
 
@@ -2614,6 +2796,7 @@ app.post('/api/employees/:id/mcp-connections', async (req, res) => {
   if (!allowedTypes.includes(connectionType)) return res.status(400).json({ error: 'Unsupported connector type.' });
   const name = String(req.body?.name || marketplace?.name || 'Custom Connector').trim().slice(0, 120);
   if (!name) return res.status(400).json({ error: 'A connector name is required.' });
+  const gmailSendEnabled = connectionType === 'google_gmail' && empId === 'sarah' && req.body?.config?.gmail_send_enabled === true;
   let serverUrl: string | undefined;
   if (connectionType === 'streamable_http') {
     try { serverUrl = validateRemoteMcpUrl(req.body?.server_url); } catch (error: any) { return res.status(400).json({ error: error.message }); }
@@ -2628,11 +2811,15 @@ app.post('/api/employees/:id/mcp-connections', async (req, res) => {
     id: Date.now(), company_id: companyId, employee_id: empId, name, connection_type: connectionType,
     server_url: serverUrl, access_level: ['read_only', 'requires_approval', 'read_write'].includes(req.body?.access_level) ? req.body.access_level : 'requires_approval',
     status: marketplace ? 'connected' : 'needs_configuration',
-    config: sanitizeConnectorConfig({ notes: req.body?.config?.notes, repo_path: req.body?.config?.repo_path, marketplace_id: req.body?.marketplace_id }),
+    config: sanitizeConnectorConfig({ notes: req.body?.config?.notes, repo_path: req.body?.config?.repo_path, gmail_send_enabled: gmailSendEnabled, marketplace_id: req.body?.marketplace_id }),
     discovered_tools: marketplace?.tools || [], tool_grants: marketplace?.tools?.map((tool) => ({ tool_name: tool.name, access_level: req.body?.access_level === 'read_write' && tool.risk === 'read' ? 'read_write' : tool.risk === 'write' ? 'requires_approval' : 'read_only' })) || [], created_at: now, updated_at: now
   };
   await persistMcpConnection(connection);
-  res.status(201).json({ ok: true, connection: connectorPublicView(connection), tools_discovered: false, notice: connectionType === 'google_gmail' || connectionType === 'google_sheets' ? 'Connector saved. Start Google OAuth to grant David read-only access.' : 'Connector saved. Discover tools and grant them per-tool before David can use this server.' });
+    const employeeName = employee.name || empId;
+    const googleNotice = connectionType === 'google_gmail'
+      ? `Connector saved for ${employeeName}. Start Google OAuth${connection.config.gmail_send_enabled ? ' to grant read access and Sarah’s approval-gated Gmail send permission' : ' to grant read-only Gmail access'}.`
+      : connectionType === 'google_sheets' ? `Connector saved for ${employeeName}. Start Google OAuth to grant read-only Sheets access.` : '';
+    res.status(201).json({ ok: true, connection: connectorPublicView(connection), tools_discovered: false, notice: googleNotice || 'Connector saved. Discover tools and grant them per-tool before this employee can use the server.' });
 });
 
 app.get('/api/employees/:id/mcp-connections/:connectionId/google/start', async (req, res) => {
@@ -2650,7 +2837,7 @@ app.get('/api/employees/:id/mcp-connections/:connectionId/google/start', async (
     const state = oauthStateSign({ uid: user?.uid, company_id: companyId, employee_id: req.params.id, connection_id: connectionId, connection_type: type, iat: Date.now() });
     res.cookie('cw_google_oauth_state', state, { httpOnly: true, sameSite: 'lax', secure: IS_PRODUCTION, maxAge: 10 * 60 * 1000 });
     const oauth2 = googleOAuthClient();
-    return res.redirect(oauth2.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: googleScopesFor(type), state }));
+    return res.redirect(oauth2.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: googleScopesFor(connection), state }));
   } catch (error: any) {
     return res.status(503).json({ error: error.message || 'Google OAuth is not configured.' });
   }
@@ -2681,6 +2868,7 @@ app.get('/api/google/oauth/callback', async (req, res) => {
     connection.updated_at = new Date().toISOString();
     const defaultTool = payload.connection_type === 'google_gmail' ? 'gmail.search' : 'sheets.read';
     if (!connection.tool_grants.some((grant) => grant.tool_name === defaultTool)) connection.tool_grants.push({ tool_name: defaultTool, access_level: 'read_only' });
+    if (payload.connection_type === 'google_gmail' && connection.config?.gmail_send_enabled && !connection.tool_grants.some((grant) => grant.tool_name === 'gmail.send')) connection.tool_grants.push({ tool_name: 'gmail.send', access_level: 'requires_approval' });
     try {
       oauth2.setCredentials(credentials);
       const identity = await google.oauth2({ version: 'v2', auth: oauth2 }).userinfo.get();
@@ -2728,7 +2916,8 @@ app.post('/api/employees/:id/mcp-connections/:connectionId/tools/:toolName', asy
   const connection = (await loadMcpConnections(companyId, req.params.id)).find((entry) => entry.id === Number(req.params.connectionId));
   if (!connection) return res.status(404).json({ error: 'MCP connection not found.' });
   const toolName = decodeURIComponent(req.params.toolName);
-  if (!connection.discovered_tools.some((tool) => tool.name === toolName) && !['gmail.search', 'sheets.read'].includes(toolName)) return res.status(400).json({ error: 'Discover this tool before granting it.' });
+  if (!connection.discovered_tools.some((tool) => tool.name === toolName) && !['gmail.search', 'gmail.send', 'sheets.read'].includes(toolName)) return res.status(400).json({ error: 'Discover this tool before granting it.' });
+  if (toolName === 'gmail.send' && (connection.connection_type !== 'google_gmail' || connection.config?.gmail_send_enabled !== true)) return res.status(400).json({ error: 'Enable Gmail send during connection setup, then reconnect Google before granting this action.' });
   const accessLevel = ['read_only', 'requires_approval', 'read_write'].includes(req.body?.access_level) ? req.body.access_level : 'requires_approval';
   connection.tool_grants = connection.tool_grants.filter((grant) => grant.tool_name !== toolName);
   connection.tool_grants.push({ tool_name: toolName, access_level: accessLevel });

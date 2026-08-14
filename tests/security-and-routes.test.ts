@@ -10,7 +10,7 @@ process.env.ALWAYS_ON_WORKER_ENABLED = 'false';
 process.env.RAZORPAY_KEY_SECRET = 'payment_test_secret';
 process.env.RAZORPAY_WEBHOOK_SECRET = 'webhook_test_secret';
 
-const { app, db, pendingPaymentOrders } = await import('../server.js');
+const { app, db, pendingPaymentOrders, workforceTestHooks } = await import('../server.js');
 
 const now = new Date().toISOString();
 
@@ -124,8 +124,34 @@ describe('Caveworkers security invariants', () => {
     expect(response.body.participants).toEqual(expect.arrayContaining(['Manager', 'Alex', 'Emma', 'David']));
     expect(response.body.participants).not.toContain('Iris');
     const queued = Array.from(db.tasks.values()).find((task: any) => task.id === response.body.id) as any;
-    expect(queued).toMatchObject({ company_id: 'company-a', status: 'queued' });
-    expect(queued.participants).toEqual(expect.arrayContaining(['Alex', 'Emma', 'David']));
+    expect(queued).toMatchObject({ company_id: 'company-a', status: 'queued', owner: 'sarah' });
+    expect(queued.participants).toEqual(expect.arrayContaining(['Sarah', 'Alex', 'Emma', 'David']));
+  });
+
+  it('has Sarah own the completed result and delivers a visible manager response', async () => {
+    db.orgEmployees.set('company-a', [
+      { id: 'alex', name: 'Alex', role: 'Operations Lead', department: 'Operations', status: 'active', tools: [], permissions: [] },
+      { id: 'david', name: 'David', role: 'Data Analyst', department: 'Analytics', status: 'active', tools: [], permissions: [] }
+    ]);
+
+    const result = await workforceTestHooks!.handleTaskRoutingAsync('Prepare an operations handoff for this week', 'company-a', 'alex');
+    expect(result).toMatchObject({ company_id: 'company-a', owner: 'sarah', status: 'completed' });
+    expect(result.answer.length).toBeGreaterThan(80);
+    expect(result.participants).toEqual(expect.arrayContaining(['Manager', 'Sarah', 'Alex']));
+    expect(result.trace).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sender: 'Sarah', receiver: 'Manager', kind: 'group_message' })
+    ]));
+    expect(db.tasks.get(result.id)).toMatchObject({ company_id: 'company-a', owner: 'sarah', status: 'completed' });
+  });
+
+  it('truthfully blocks Sarah email delivery until a tenant Gmail send capability is connected', async () => {
+    const result = await workforceTestHooks!.handleTaskRoutingAsync('Send an email to ops@example.com confirming the weekly handoff', 'company-a', 'alex');
+    expect(result).toMatchObject({ company_id: 'company-a', owner: 'sarah', status: 'blocked' });
+    expect(result.execution).toMatchObject({ action_type: 'gmail.send', status: 'blocked' });
+    expect(result.execution.summary).toMatch(/Gmail|connect/i);
+    const approval = Array.from(db.approvals.values()).find((entry: any) => entry.task_id === result.id) as any;
+    expect(approval).toMatchObject({ company_id: 'company-a', employee_id: 'sarah', status: 'rejected' });
+    expect(approval.payload.action_type).toBe('gmail.send');
   });
 
   it('returns only the authenticated tenant’s tasks and approvals', async () => {

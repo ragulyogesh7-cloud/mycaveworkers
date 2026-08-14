@@ -36,6 +36,7 @@ async function responseJson(url, options) {
   if (!response.ok) {
     const error = new Error(data.error || 'The request could not be completed.');
     error.upgradeRequired = Boolean(data.upgrade_required);
+    error.payload = data;
     throw error;
   }
   return data;
@@ -171,7 +172,9 @@ function messageKey(message) {
 
 function messageTone(kind) {
   if (kind === 'approval_required') return 'approval';
-  if (kind === 'completed') return 'complete';
+  if (['blocked', 'action_failed', 'worker_failed'].includes(kind)) return 'failure';
+  if (['completed', 'action_completed'].includes(kind)) return 'complete';
+  if (kind === 'manager_response' || kind === 'manager_result') return 'result';
   if (kind === 'received') return 'manager';
   if (kind === 'task_update') return 'system';
   return 'employee';
@@ -199,7 +202,7 @@ function renderRoomFeed(shouldFollow = roomAtLatest()) {
     article.style.setProperty('--message-delay', `${Math.min(index, 10) * 35}ms`);
     const taskReference = message.task_id ? `<button class="message-task" data-task-id="${safe(message.task_id)}" type="button">Task #${safe(message.task_id)}</button>` : '';
     const approvalAction = message.approval_id ? `<button class="message-approval" data-approval-id="${safe(message.approval_id)}" data-approval-status="approved" type="button">Approve</button>` : '';
-    article.innerHTML = `<span class="message-avatar">${safe(messageInitial(message))}</span><div class="message-body"><div class="message-meta"><b>${safe(message.sender || 'Caveworkers')}</b>${message.receiver ? `<span>to ${safe(message.receiver)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}</div><p>${safe(message.body || '')}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
+    article.innerHTML = `<span class="message-avatar">${safe(messageInitial(message))}</span><div class="message-body"><div class="message-meta"><b>${safe(message.sender || 'Caveworkers')}</b>${message.receiver ? `<span>to ${safe(message.receiver)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}</div>${tone === 'result' ? '<span class="final-answer-label">Sarah’s final answer</span>' : ''}<p>${safe(message.body || '')}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
     fragment.append(article);
   });
   container.replaceChildren(fragment);
@@ -209,9 +212,15 @@ function renderRoomFeed(shouldFollow = roomAtLatest()) {
 
 function rebuildWorkroomMessages() {
   const source = [];
-  workroomTasks.forEach((task) => (task.trace || []).forEach((step) => {
-    if (step?.body) source.push({ ...step, task_id: task.id });
-  }));
+  workroomTasks.forEach((task) => {
+    (task.trace || []).forEach((step) => { if (step?.body) source.push({ ...step, task_id: task.id }); });
+    if (task.answer && !['queued', 'processing'].includes(task.status)) {
+      source.push({ kind: 'manager_response', sender: 'Sarah', receiver: 'Manager', body: task.answer, task_id: task.id, created_at: task.completed_at || task.created_at });
+    }
+    if (task.execution && !['queued', 'not_required'].includes(task.execution.status)) {
+      source.push({ kind: task.execution.status === 'succeeded' ? 'action_completed' : ['failed', 'blocked'].includes(task.execution.status) ? 'action_failed' : 'action_update', sender: 'Sarah', receiver: 'Manager', body: `Execution status — ${task.execution.status.replace(/_/g, ' ')}: ${task.execution.summary}`, task_id: task.id, created_at: task.execution.updated_at || task.completed_at || task.created_at });
+    }
+  });
   const seen = new Set();
   workroomMessages = source.filter((message) => {
     const key = messageKey(message);
@@ -304,11 +313,13 @@ async function loadApprovals() {
 
 async function resolveApproval(id, status) {
   try {
-    await responseJson(`/api/approvals/${encodeURIComponent(id)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
-    setRoomNotice(status === 'approved' ? 'Approval recorded. Your employee can continue the approved action.' : 'Approval request rejected. The team has been notified.', 'success');
+    const result = await responseJson(`/api/approvals/${encodeURIComponent(id)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
+    const summary = result.execution?.summary;
+    setRoomNotice(summary || (status === 'approved' ? 'Approval recorded. Sarah is now reporting the execution outcome in the room.' : 'Approval request rejected. Sarah has kept the work product and stopped the external action.'), 'success');
     await Promise.all([loadApprovals(), loadTaskSummaries(), loadWorkroomSnapshot()]);
   } catch (error) {
-    setRoomNotice(error.message || 'The approval could not be updated.', 'error');
+    setRoomNotice(error.payload?.execution?.summary || error.message || 'The approval could not be updated.', 'error');
+    await Promise.all([loadApprovals(), loadTaskSummaries(), loadWorkroomSnapshot()]);
   }
 }
 
@@ -316,6 +327,8 @@ function taskStatusLabel(status) {
   if (status === 'pending_approval') return 'Needs review';
   if (status === 'completed') return 'Complete';
   if (status === 'failed') return 'Needs retry';
+  if (status === 'blocked') return 'Blocked';
+  if (status === 'queued') return 'Queued';
   return 'In progress';
 }
 
@@ -327,7 +340,7 @@ async function loadTaskSummaries() {
     const data = await responseJson('/api/tasks');
     taskSummaries = data.tasks || [];
     if (badge) badge.textContent = String(data.total_count || taskSummaries.length);
-    container.innerHTML = taskSummaries.length ? taskSummaries.slice(0, 5).map((task) => `<button class="task-summary" data-task-id="${safe(task.id)}" type="button"><span class="task-summary-icon">${safe(task.owner_info?.name?.[0] || 'AI')}</span><span><b>${safe(task.question || 'Untitled task')}</b><small>${safe(task.owner_info?.name || 'Caveworkers')} · ${relativeTime(task.created_at)}</small></span><em class="task-summary-status ${safe(task.status)}">${safe(taskStatusLabel(task.status))}</em></button>`).join('') : '<p class="empty-state-sm">No tasks yet. Assign the first one in the company room.</p>';
+    container.innerHTML = taskSummaries.length ? taskSummaries.slice(0, 5).map((task) => `<button class="task-summary" data-task-id="${safe(task.id)}" type="button"><span class="task-summary-icon">${safe(task.owner_info?.name?.[0] || 'AI')}</span><span><b>${safe(task.question || 'Untitled task')}</b><small>${safe(task.status === 'blocked' ? task.execution?.summary || 'Sarah needs a connector or action detail.' : `${task.owner_info?.name || 'Sarah'} · ${relativeTime(task.created_at)}`)}</small></span><em class="task-summary-status ${safe(task.status)}">${safe(taskStatusLabel(task.status))}</em></button>`).join('') : '<p class="empty-state-sm">No tasks yet. Assign the first one in the company room.</p>';
   } catch (error) {
     console.error('Unable to load tasks:', error);
     container.innerHTML = '<p class="empty-state-sm">Recent tasks are unavailable right now.</p>';

@@ -80,6 +80,7 @@
                   <label>Connection name<input id="custom-mcp-name" maxlength="100" placeholder="e.g. Sales Gmail"></label>
                   <label id="custom-mcp-target-label">MCP Server URL<input id="custom-mcp-target" maxlength="500" placeholder="https://mcp.example.com"></label>
                   <div class="form-grid two"><label>Access level<select id="custom-mcp-access"><option value="read_only">Read only</option><option value="requires_approval">Requires approval</option></select></label><label>Bearer token <span class="field-note">Optional</span><input id="custom-mcp-token" type="password" autocomplete="new-password" placeholder="Stored encrypted"></label></div>
+                  <label class="gmail-send-option" id="gmail-send-option" hidden><input id="custom-mcp-gmail-send" type="checkbox"> <span><b>Allow Sarah to send after approval</b><small>Only for Sarah’s Gmail. Every email remains blocked until a manager approves the exact draft.</small></span></label>
                   <label>Notes <span class="field-note">Optional</span><textarea id="custom-mcp-notes" rows="2" maxlength="1000" placeholder="Describe the safe use of this connection."></textarea></label>
                   <button class="btn btn-primary" type="submit">Save connection</button>
                 </form>
