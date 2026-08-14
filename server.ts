@@ -350,6 +350,17 @@ interface TaskRecord {
   trace: any[];
   participants?: string[];
   collaboration_summary?: string;
+  live_tool_evidence?: WorkforceLiveToolEvidence[];
+}
+
+interface WorkforceLiveToolEvidence {
+  employee_id: string;
+  employee_name: string;
+  connector_name: string;
+  tool_name: string;
+  status: 'executed' | 'skipped' | 'failed';
+  summary: string;
+  created_at: string;
 }
 
 interface EmployeeMemory {
@@ -756,6 +767,52 @@ async function discoverMcpTools(connection: TenantConnector) {
   const listed = await mcpRpc(connection, 'tools/list', {}, initialized.sessionId);
   const tools = Array.isArray(listed.data?.result?.tools) ? listed.data.result.tools : [];
   return tools.slice(0, 100).map((tool: any) => ({ name: String(tool.name || '').slice(0, 120), description: String(tool.description || '').slice(0, 500), inputSchema: tool.inputSchema, risk: isLikelyWriteTool(String(tool.name || '')) ? 'write' : 'read' })).filter((tool: any) => tool.name);
+}
+
+function buildReadToolArguments(tool: any, question: string): Record<string, any> | null {
+  const properties = tool?.inputSchema?.properties && typeof tool.inputSchema.properties === 'object' ? tool.inputSchema.properties : {};
+  const args: Record<string, any> = {};
+  Object.keys(properties).forEach((key) => {
+    if (/query|search|term|text|question|prompt|input|keyword/i.test(key)) args[key] = question.slice(0, 500);
+    else if (/limit|max_results|maxResults|count|page_size/i.test(key)) args[key] = 10;
+  });
+  const required = Array.isArray(tool?.inputSchema?.required) ? tool.inputSchema.required : [];
+  return required.every((key: string) => Object.prototype.hasOwnProperty.call(args, key)) ? args : null;
+}
+
+function summarizeMcpToolResult(value: any) {
+  const result = value?.result || value;
+  const content = Array.isArray(result?.content) ? result.content.map((entry: any) => typeof entry?.text === 'string' ? entry.text : JSON.stringify(entry)).join('\\n') : JSON.stringify(result);
+  return String(content || 'The tool returned no readable content.').slice(0, 1800);
+}
+
+async function executeEmployeeReadTools(companyId: string, employee: any, question: string): Promise<WorkforceLiveToolEvidence[]> {
+  if (!['emma', 'olivia'].includes(employee.id)) return [];
+  const connections = (await loadMcpConnections(companyId, employee.id)).filter((connection) => connection.status === 'connected' && connection.connection_type === 'streamable_http');
+  const candidates: Array<{ connection: TenantConnector; tool: any; args: Record<string, any> }> = [];
+  for (const connection of connections.slice(0, 5)) {
+    for (const tool of (connection.discovered_tools || []).slice(0, 25)) {
+      if (tool.risk === 'write' || isLikelyWriteTool(tool.name)) continue;
+      const grant = (connection.tool_grants || []).find((entry) => entry.tool_name === tool.name);
+      if (!grant || grant.access_level === 'requires_approval') continue;
+      const args = buildReadToolArguments(tool, question);
+      if (!args) continue;
+      candidates.push({ connection, tool, args });
+      if (candidates.length >= 2) break;
+    }
+    if (candidates.length >= 2) break;
+  }
+  const results = await Promise.all(candidates.map(async ({ connection, tool, args }) => {
+    const createdAt = new Date().toISOString();
+    try {
+      const initialized = await mcpRpc(connection, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'Caveworkers', version: '1.0.0' } });
+      const called = await mcpRpc(connection, 'tools/call', { name: tool.name, arguments: args }, initialized.sessionId);
+      return { employee_id: employee.id, employee_name: employee.name, connector_name: connection.name, tool_name: tool.name, status: 'executed' as const, summary: summarizeMcpToolResult(called.data), created_at: createdAt };
+    } catch (error: any) {
+      return { employee_id: employee.id, employee_name: employee.name, connector_name: connection.name, tool_name: tool.name, status: 'failed' as const, summary: String(error?.message || 'The read tool failed.').slice(0, 500), created_at: createdAt };
+    }
+  }));
+  return results;
 }
 
 async function getGoogleConnection(companyId: string, connectionId: number, type: 'google_gmail' | 'google_sheets') {
@@ -1868,13 +1925,13 @@ function selectCollaborativeTeam(question: string, companyId: string, preferredE
   return { lead, collaborators, workforce };
 }
 
-interface WorkforceTaskContext { employee: any; tools: string[]; memory: string[]; connectors: string[]; }
+interface WorkforceTaskContext { employee: any; tools: string[]; memory: string[]; connectors: string[]; live_tool_evidence: WorkforceLiveToolEvidence[]; }
 
 async function loadWorkforceTaskContext(companyId: string, employee: any): Promise<WorkforceTaskContext> {
   const instance = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === employee.id);
   const [memory, connectors] = await Promise.all([loadEmployeeMemory(companyId, employee.id), loadMcpConnections(companyId, employee.id)]);
   const tools = instance?.tools?.length ? instance.tools : employee.default_tools || [];
-  return { employee, tools: tools.slice(0, 8), memory: memory.slice(0, 4).map((entry) => entry.content), connectors: connectors.filter((connector) => connector.status === 'connected').slice(0, 5).map((connector) => connector.name) };
+  return { employee, tools: tools.slice(0, 8), memory: memory.slice(0, 4).map((entry) => entry.content), connectors: connectors.filter((connector) => connector.status === 'connected').slice(0, 5).map((connector) => connector.name), live_tool_evidence: [] };
 }
 
 function collaborationFinding(employee: any, question: string, context?: WorkforceTaskContext) {
@@ -1882,7 +1939,8 @@ function collaborationFinding(employee: any, question: string, context?: Workfor
   const toolNote = context?.tools?.length ? ` Available permissioned tools: ${context.tools.join(', ')}.` : '';
   const connectorNote = context?.connectors?.length ? ` Connected tenant tools considered: ${context.connectors.join(', ')}.` : '';
   const memoryNote = context?.memory?.length ? ` Applied role memory: ${context.memory[0].slice(0, 180)}.` : '';
-  return `${employee.name} reviewed the ${employee.department.toLowerCase()} implications of “${topic}” and returned a permissioned recommendation for the lead’s decision brief.${toolNote}${connectorNote}${memoryNote}`;
+  const evidenceNote = context?.live_tool_evidence?.length ? ` Live MCP evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} (${entry.status}) — ${entry.summary.slice(0, 260)}`).join(' | ')}` : '';
+  return `${employee.name} reviewed the ${employee.department.toLowerCase()} implications of “${topic}” and returned a permissioned recommendation for the lead’s decision brief.${toolNote}${connectorNote}${memoryNote}${evidenceNote}`;
 }
 
 async function handleTaskRoutingAsync(question: string, companyId: string, preferredEmployeeId?: string) {
@@ -1892,6 +1950,9 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   const { lead, collaborators, workforce } = selectCollaborativeTeam(question || 'Operations review', companyId, preferredEmployeeId);
   const lowerQ = (question || '').toLowerCase();
   const specialistContexts = await Promise.all([lead, ...collaborators].map((employee) => loadWorkforceTaskContext(companyId, employee)));
+  await Promise.all(specialistContexts.map(async (context) => {
+    context.live_tool_evidence = await executeEmployeeReadTools(companyId, context.employee, question);
+  }));
   const contextByEmployeeId = new Map(specialistContexts.map((context) => [context.employee.id, context]));
   const knowList = db.knowledge.get(companyId) || [];
   const relevantDocs = knowList.filter((document) => lowerQ.includes(document.title.toLowerCase()) || document.content.toLowerCase().split(' ').some((word) => word.length > 4 && lowerQ.includes(word)));
@@ -1905,7 +1966,10 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
     trace.push({ kind: 'group_message', sender: lead.name, receiver: employee.name, body: `@${employee.name} Please assess the ${employee.department.toLowerCase()} portion of this request and return constraints, evidence needed, and a safe next step.`, created_at: new Date(Date.now() + 900 + index * 600).toISOString() });
     trace.push({ kind: 'group_message', sender: employee.name, receiver: lead.name, body: collaborationFinding(employee, question, contextByEmployeeId.get(employee.id)), created_at: new Date(Date.now() + 1200 + index * 600).toISOString() });
   });
-  const teamBrief = specialistContexts.map((context) => `${context.employee.name}: ${context.employee.role} — ${context.employee.persona}\nGranted tools: ${context.tools.join(', ') || 'none'}\nConnected tenant tools: ${context.connectors.join(', ') || 'none'}\nRole memory: ${context.memory.join(' | ') || 'none'}`).join('\n\n');
+  specialistContexts.flatMap((context) => context.live_tool_evidence).forEach((evidence, index) => {
+    trace.push({ kind: 'tool_execution', sender: evidence.employee_name, receiver: 'Caveworkers group', body: `${evidence.status === 'executed' ? 'Read tool executed' : 'Read tool failed'}: ${evidence.connector_name} / ${evidence.tool_name}. ${evidence.summary.slice(0, 500)}`, created_at: new Date(Date.now() + 650 + index * 120).toISOString() });
+  });
+  const teamBrief = specialistContexts.map((context) => `${context.employee.name}: ${context.employee.role} — ${context.employee.persona}\nGranted tools: ${context.tools.join(', ') || 'none'}\nConnected tenant tools: ${context.connectors.join(', ') || 'none'}\nRole memory: ${context.memory.join(' | ') || 'none'}\nLive MCP evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} [${entry.status}] ${entry.summary.slice(0, 900)}`).join(' | ') || 'none'}`).join('\n\n');
   let answer = '';
   if (genAIClient) {
     try {
@@ -1929,13 +1993,14 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   }
   trace.push({ kind: 'group_message', sender: lead.name, receiver: 'Caveworkers group', body: `I consolidated the team’s inputs into the manager brief. The task ledger now contains the full conversation and approval state.`, created_at: new Date(Date.now() + 3400).toISOString() });
   trace.push({ kind: 'completed', sender: lead.name, receiver: 'Task ledger', body: 'Collaborative task recorded with tenant-scoped participants and audit trace.', created_at: new Date(Date.now() + 3600).toISOString() });
-  const taskRecord: TaskRecord = { id: taskId, company_id: companyId, question, owner: lead.id, status: requiresApproval ? 'pending_approval' : 'completed', answer, plan: `1. Intake → 2. Assign ${lead.name} → 3. Group specialist handoffs${collaborators.length ? ` (${collaborators.map((employee) => employee.name).join(', ')})` : ''} → 4. Consolidate → 5. Human approval if required`, created_at: now, trace, participants: ['Manager', lead.name, ...collaborators.map((employee) => employee.name)], collaboration_summary: `${lead.name} led a permissioned collaboration with ${collaborators.length || 'no'} additional specialist${collaborators.length === 1 ? '' : 's'}.` };
+  const liveToolEvidence = specialistContexts.flatMap((context) => context.live_tool_evidence);
+  const taskRecord: TaskRecord = { id: taskId, company_id: companyId, question, owner: lead.id, status: requiresApproval ? 'pending_approval' : 'completed', answer, plan: `1. Intake → 2. Assign ${lead.name} → 3. Group specialist handoffs${collaborators.length ? ` (${collaborators.map((employee) => employee.name).join(', ')})` : ''} → 4. Permissioned read tools → 5. Consolidate → 6. Human approval if required`, created_at: now, trace, participants: ['Manager', lead.name, ...collaborators.map((employee) => employee.name)], collaboration_summary: `${lead.name} led a permissioned collaboration with ${collaborators.length || 'no'} additional specialist${collaborators.length === 1 ? '' : 's'}.`, live_tool_evidence: liveToolEvidence };
   db.tasks.set(taskId, taskRecord);
   await persistTaskRecord(taskRecord);
   const logs = db.activity.get(companyId) || [];
   logs.unshift({ id: Date.now(), sender: lead.name, receiver: collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'Task ledger', kind: 'task.collaborative', body: `Task #${taskId} completed with a visible group-chat audit trail.`, created_at: now });
   db.activity.set(companyId, logs);
-  return { id: taskId, owner: lead.id, participants: taskRecord.participants, status: taskRecord.status, plan: taskRecord.plan, answer, trace, collaboration_summary: taskRecord.collaboration_summary, workforce_size: workforce.length };
+  return { id: taskId, owner: lead.id, participants: taskRecord.participants, status: taskRecord.status, plan: taskRecord.plan, answer, trace, live_tool_evidence: liveToolEvidence, collaboration_summary: taskRecord.collaboration_summary, workforce_size: workforce.length };
 }
 app.post('/api/task', async (req, res) => {
   const user = getAuthUser(req);
@@ -2160,6 +2225,10 @@ app.post('/api/employees/:id/mcp-connections', async (req, res) => {
   if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user?.company_id || DEFAULT_COMPANY_ID;
   const empId = req.params.id;
+  const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === empId);
+  if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+  const activeEmployees = activeWorkforce(companyId);
+  if (!activeEmployees.some((entry) => entry.id === empId)) return res.status(403).json({ error: 'This employee is not active in the workspace.' });
   const marketplace = ({
     postgres: { name: 'PostgreSQL Server', tools: [{ name: 'sql.query', description: 'Read-only SQL query', risk: 'read' as const }] },
     github: { name: 'GitHub Integration', tools: [{ name: 'github.repo.read', description: 'Read repository context', risk: 'read' as const }, { name: 'github.create_pr', description: 'Create a pull request', risk: 'write' as const }] },

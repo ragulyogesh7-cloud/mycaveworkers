@@ -277,6 +277,10 @@
       event.target.classList.add("active");
     }
 
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
+    }
+
     async function loadData() {
       const [empRes, billRes, catRes, compRes, connectorRes, marketRes] = await Promise.all([
         fetch("/api/employees"),
@@ -294,7 +298,7 @@
       const connectors = await connectorRes.json();
       const marketplace = (await marketRes.json()).servers || [];
 
-      document.getElementById("mcp-connectors").innerHTML = connectors.map(c => `<option value="${c.name}">${c.server} · ${c.description}</option>`).join("");
+      document.getElementById("mcp-connectors").innerHTML = connectors.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.server)} · ${escapeHtml(c.description)}</option>`).join("");
 
       // Populate employee selects (grant + custom + marketplace)
       const select = document.getElementById("grant-emp-id");
@@ -454,20 +458,24 @@
     function renderToolGrants(employeeId, connection) {
       const grants = connection.tool_grants || [];
       if (!connection.discovered_tools || connection.discovered_tools.length === 0) {
-        return '<div style="margin-top: 6px; font-size: 11px; color: rgba(255,255,255,.4);">No tools discovered yet. Click "Discover tools".</div>';
+        return '<div style="margin-top: 6px; font-size: 11px; color: rgba(255,255,255,.4);">No tools discovered yet. Click &quot;Discover tools&quot;.</div>';
       }
+      const safeEmployeeId = encodeURIComponent(employeeId);
       return `<div style="margin-top: 8px; padding: 8px; background: rgba(0,0,0,.25); border-radius: 8px;">
         <div style="font-size: 11px; color: rgba(255,255,255,.5); margin-bottom: 6px;">Discovered MCP tools (${connection.discovered_tools.length})</div>
         ${connection.discovered_tools.map(t => {
-          const grant = grants.find(g => g.tool_name.toLowerCase() === (t.name || '').toLowerCase());
+          const toolName = String(t.name || '');
+          const encodedTool = encodeURIComponent(toolName);
+          const grant = grants.find(g => String(g.tool_name || '').toLowerCase() === toolName.toLowerCase());
           const level = grant ? grant.access_level : '—';
+          const grantButtonArgs = `decodeURIComponent('${safeEmployeeId}'), ${Number(connection.id)}, decodeURIComponent('${encodedTool}')`;
           return `<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:4px 0; border-bottom:1px solid rgba(255,255,255,.06);">
-            <span style="font-size:12px;">🔧 <strong>${t.name}</strong></span>
+            <span style="font-size:12px;">&#128296; <strong>${escapeHtml(toolName)}</strong></span>
             <div style="display:flex; align-items:center; gap:6px;">
-              <span class="badge-access">${level}</span>
-              <button class="btn btn-light" style="padding:3px 7px; font-size:11px;" onclick="grantTool('${employeeId}', ${connection.id}, '${(t.name||'').replace(/'/g,"\\'")}', 'read_only')">Grant RO</button>
-              <button class="btn btn-light" style="padding:3px 7px; font-size:11px;" onclick="grantTool('${employeeId}', ${connection.id}, '${(t.name||'').replace(/'/g,"\\'")}', 'requires_approval')">Grant HITL</button>
-              ${grant ? `<button class="btn-danger" onclick="revokeToolGrant('${employeeId}', ${connection.id}, '${(t.name||'').replace(/'/g,"\\'")}')">Revoke</button>` : ''}
+              <span class="badge-access">${escapeHtml(level)}</span>
+              <button class="btn btn-light" style="padding:3px 7px; font-size:11px;" onclick="grantTool(${grantButtonArgs}, 'read_only')">Grant RO</button>
+              <button class="btn btn-light" style="padding:3px 7px; font-size:11px;" onclick="grantTool(${grantButtonArgs}, 'requires_approval')">Grant HITL</button>
+              ${grant ? `<button class="btn-danger" onclick="revokeToolGrant(${grantButtonArgs})">Revoke</button>` : ''}
             </div>
           </div>`;
         }).join("")}
