@@ -2,7 +2,6 @@ import express from 'express';
 import path from 'path';
 import { readFileSync } from 'fs';
 import cookieParser from 'cookie-parser';
-import cors from 'cors';
 import dotenv from 'dotenv';
 import ejs from 'ejs';
 import crypto from 'crypto';
@@ -18,9 +17,19 @@ const app = express();
 const PORT = 3000;
 const HOST = '0.0.0.0';
 const IS_PRODUCTION = process.env.CAVEWORKERS_ENV === 'production';
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((origin) => origin.trim()).filter(Boolean);
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((origin) => origin.trim().replace(/\/$/, '')).filter(Boolean);
 if (IS_PRODUCTION && ALLOWED_ORIGINS.length === 0) {
-  throw new Error('ALLOWED_ORIGINS must be configured in production.');
+  console.warn('ALLOWED_ORIGINS is empty in production; only same-origin requests will be accepted.');
+}
+function getRequestOrigin(req: express.Request): string {
+  const forwardedProto = req.get('x-forwarded-proto')?.split(',')[0]?.trim();
+  const protocol = forwardedProto || req.protocol;
+  const host = req.get('host');
+  return host ? `${protocol}://${host}`.replace(/\/$/, '') : '';
+}
+function isAllowedRequestOrigin(req: express.Request, origin: string): boolean {
+  const normalizedOrigin = origin.trim().replace(/\/$/, '');
+  return normalizedOrigin === getRequestOrigin(req) || ALLOWED_ORIGINS.includes(normalizedOrigin);
 }
 
 let genAIClient: GoogleGenAI | null = null;
@@ -36,13 +45,21 @@ if (process.env.GEMINI_API_KEY) {
   }
 }
 
-app.use(cors({
-  origin: (origin, callback) => {
-    if (!origin || ALLOWED_ORIGINS.length === 0 || ALLOWED_ORIGINS.includes(origin)) return callback(null, true);
-    return callback(new Error('Origin not allowed by CORS'));
-  },
-  credentials: true
-}));
+app.use((req, res, next) => {
+  const requestOrigin = req.get('origin');
+  if (requestOrigin) {
+    if (!isAllowedRequestOrigin(req, requestOrigin)) {
+      return res.status(403).json({ error: 'Origin not allowed by CORS.' });
+    }
+    res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
 app.use(express.json({ verify: (req, _res, buffer) => { (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer); } }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
