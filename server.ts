@@ -13,10 +13,14 @@ import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { GoogleGenAI } from '@google/genai';
 import { google } from 'googleapis';
+import { Sentry, anonymizeIdentifier, reportOperationalFailure, sentryEnabled } from './instrument.js';
+import { isTrialExpired, verifyRazorpayPaymentSignature, verifyRazorpayWebhookSignature } from './security.js';
 
 dotenv.config();
 
 const app = express();
+const requestIds = new WeakMap<express.Request, string>();
+function getRequestId(req: express.Request): string { return requestIds.get(req) || 'unavailable'; }
 const PORT = Number(process.env.PORT || '3000') || 3000;
 const HOST = '0.0.0.0';
 const IS_PRODUCTION = process.env.CAVEWORKERS_ENV === 'production';
@@ -44,7 +48,7 @@ if (process.env.GEMINI_API_KEY) {
     });
     console.log('Gemini 3.6 Flash SDK initialized successfully');
   } catch (err) {
-    console.warn('Gemini SDK init warning:', err);
+    reportOperationalFailure('analyst.gemini_initialization', err);
   }
 }
 
@@ -116,15 +120,15 @@ async function generateAnalystNarrative(prompt: string, tenantId: string): Promi
         const payload: any = await response.json();
         const content = extractAnalystText(payload?.choices?.[0]?.message?.content);
         if (content) return { text: content, provider: 'openrouter', model: payload?.model || ANALYST_MODEL, latency_ms: Date.now() - startedAt, usage: payload?.usage ? { prompt_tokens: payload.usage.prompt_tokens, completion_tokens: payload.usage.completion_tokens, total_tokens: payload.usage.total_tokens, cost: payload.usage.cost } : undefined };
-        console.warn('OpenRouter analyst returned no text:', payload?.id || 'unknown response');
+        reportOperationalFailure('analyst.openrouter_response', new Error('OpenRouter returned no text.'), { tenant_hash: anonymizeIdentifier(tenantId), response_id: String(payload?.id || 'unknown').slice(0, 120) });
         openRouterFailure = { text: '', provider: 'openrouter', model: ANALYST_MODEL, latency_ms: Date.now() - startedAt, error_code: 'empty_response' };
       } else {
-        console.warn('OpenRouter analyst request failed:', response.status, response.statusText);
+        reportOperationalFailure('analyst.openrouter_request', new Error(`OpenRouter returned HTTP ${response.status}.`), { tenant_hash: anonymizeIdentifier(tenantId), status_code: response.status });
         openRouterFailure = { text: '', provider: 'openrouter', model: ANALYST_MODEL, latency_ms: Date.now() - startedAt, error_code: `http_${response.status}` };
       }
     } catch (error: any) {
       const errorCode = error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'timeout' : 'network_error';
-      console.warn('OpenRouter analyst request failed:', errorCode);
+      reportOperationalFailure('analyst.openrouter_request', error, { tenant_hash: anonymizeIdentifier(tenantId), error_code: errorCode });
       openRouterFailure = { text: '', provider: 'openrouter', model: ANALYST_MODEL, latency_ms: Date.now() - startedAt, error_code: errorCode };
     }
   }
@@ -133,7 +137,7 @@ async function generateAnalystNarrative(prompt: string, tenantId: string): Promi
       const response = await genAIClient.models.generateContent({ model: 'gemini-3.6-flash', contents: prompt });
       if (response.text?.trim()) return { text: response.text.trim(), provider: 'gemini', model: 'gemini-3.6-flash', latency_ms: Date.now() - startedAt };
     } catch (error) {
-      console.warn('Gemini analyst fallback failed:', error instanceof Error ? error.name : 'unknown_error');
+      reportOperationalFailure('analyst.gemini_fallback', error, { tenant_hash: anonymizeIdentifier(tenantId) });
     }
   }
   return openRouterFailure || { text: '', provider: 'preview', latency_ms: Date.now() - startedAt, error_code: OPENROUTER_KEY_READY ? 'provider_unavailable' : 'model_not_configured' };
@@ -149,9 +153,16 @@ app.use((req, res, next) => {
     res.setHeader('Access-Control-Allow-Credentials', 'true');
     res.setHeader('Vary', 'Origin');
   }
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token, X-Request-Id');
   res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
   if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+app.use((req, res, next) => {
+  const incoming = String(req.get('x-request-id') || '').trim();
+  const requestId = /^[A-Za-z0-9_-]{8,128}$/.test(incoming) ? incoming : crypto.randomUUID();
+  requestIds.set(req, requestId);
+  res.setHeader('X-Request-Id', requestId);
   next();
 });
 app.use(express.json({ verify: (req, _res, buffer) => { (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer); } }));
@@ -201,7 +212,7 @@ if (!getApps().length) {
       console.warn('Firebase Admin SDK is not configured; Google sign-in will fail closed until Firebase credentials are provided.');
     }
   } catch (e) {
-    console.error('Firebase Admin SDK initialization failed:', e);
+    reportOperationalFailure('firebase.initialization', e);
   }
 }
 
@@ -227,7 +238,7 @@ try {
     key_secret: RAZORPAY_KEY_SECRET
   });
 } catch (err) {
-  console.warn('Razorpay client init warning:', err);
+  reportOperationalFailure('payments.razorpay_initialization', err);
 }
 
 const SUBSCRIPTION_PLANS: Record<string, any> = {
@@ -492,10 +503,12 @@ const db = {
   analystMemory: new Map<string, AnalystMemory[]>(),
   analystRuns: new Map<string, AnalystRun[]>(),
   analystApprovalsLoaded: new Set<string>(),
+  approvalTenantsLoaded: new Set<string>(),
   employeeMemory: new Map<string, EmployeeMemory[]>(),
   taskTenantsLoaded: new Set<string>(),
   workforceQueue: new Map<string, WorkforceQueueJob>(),
   employeePresence: new Map<string, { employee_id: string; status: 'idle' | 'working' | 'offline'; task_id?: number; last_seen_at: string }>(),
+  activityLoaded: new Set<string>(),
   nextTaskId: 1,
   nextApprovalId: 101,
 };
@@ -635,13 +648,60 @@ async function hydrateTenantTasks(companyId: string) {
       }
     });
   } catch (error) {
-    console.warn('Could not hydrate tenant tasks:', error);
+    reportOperationalFailure('task.hydration', error, { tenant_hash: anonymizeIdentifier(companyId) });
   }
 }
 
 async function persistTaskRecord(task: TaskRecord) {
   const collection = analystTenantCollection(task.company_id, 'tasks');
   if (collection) await collection.doc(String(task.id)).set(stripUndefined(task), { merge: true });
+}
+
+async function hydrateTenantActivity(companyId: string) {
+  if (db.activityLoaded.has(companyId)) return;
+  db.activityLoaded.add(companyId);
+  const collection = analystTenantCollection(companyId, 'activity');
+  if (!collection) return;
+  try {
+    const snapshot = await collection.orderBy('created_at', 'desc').limit(100).get();
+    if (snapshot.docs.length) {
+      db.activity.set(companyId, snapshot.docs.map((doc) => ({ id: Number(doc.data()?.id || doc.id), company_id: companyId, ...(doc.data() || {}) })).filter((entry) => Number.isFinite(entry.id)));
+    }
+  } catch (error) {
+    reportOperationalFailure('activity.hydration', error, { tenant_hash: anonymizeIdentifier(companyId) });
+  }
+}
+
+async function persistActivityLog(companyId: string, entry: Record<string, any>) {
+  const logs = db.activity.get(companyId) || [];
+  const record: Record<string, any> = { ...entry, company_id: companyId };
+  db.activity.set(companyId, [record, ...logs.filter((item) => item.id !== record.id)].slice(0, 100));
+  db.activityLoaded.add(companyId);
+  const collection = analystTenantCollection(companyId, 'activity');
+  if (collection) await collection.doc(String(record.id)).set(stripUndefined(record), { merge: true });
+}
+
+async function hydrateTenantApprovals(companyId: string) {
+  if (db.approvalTenantsLoaded.has(companyId)) return;
+  db.approvalTenantsLoaded.add(companyId);
+  const collection = analystTenantCollection(companyId, 'approvals');
+  if (!collection) return;
+  try {
+    const snapshot = await collection.limit(100).get();
+    snapshot.docs.forEach((doc) => {
+      const approval = { id: Number(doc.data()?.id || doc.id), ...(doc.data() || {}) } as ApprovalRecord;
+      if (approval.company_id === companyId && Number.isFinite(approval.id)) db.approvals.set(approval.id, approval);
+    });
+  } catch (error) {
+    reportOperationalFailure('approval.hydration', error, { tenant_hash: anonymizeIdentifier(companyId) });
+  }
+}
+
+async function persistApprovalRecord(approval: ApprovalRecord) {
+  db.approvals.set(approval.id, approval);
+  db.approvalTenantsLoaded.add(approval.company_id);
+  const collection = analystTenantCollection(approval.company_id, 'approvals');
+  if (collection) await collection.doc(String(approval.id)).set(stripUndefined(approval), { merge: true });
 }
 
 
@@ -706,16 +766,20 @@ async function loadQueuedJobs() {
   if (!collection) return;
   try {
     const snapshot = await collection.where('status', 'in', ['queued', 'processing']).limit(50).get();
+    const companyIds = new Set<string>();
     snapshot.docs.forEach((doc) => {
       const job = { id: doc.id, ...(doc.data() || {}) } as WorkforceQueueJob;
       if (job.status === 'processing' && job.claimed_by !== WORKER_INSTANCE_ID) {
         const staleAt = Date.now() - 5 * 60 * 1000;
         if (new Date(job.updated_at || 0).getTime() < staleAt) job.status = 'queued'; else return;
       }
+      if (!job.company_id || !Number.isFinite(Number(job.task_id))) return;
       db.workforceQueue.set(job.id, job);
+      companyIds.add(job.company_id);
     });
+    await Promise.all(Array.from(companyIds).map((companyId) => hydrateTenantTasks(companyId)));
   } catch (error) {
-    console.warn('Could not hydrate workforce queue:', error);
+    reportOperationalFailure('worker.queue_hydration', error);
   }
 }
 
@@ -745,9 +809,7 @@ async function enqueueWorkforceTask(companyId: string, question: string, preferr
   await persistTaskRecord(task);
   const job: WorkforceQueueJob = { id: `${companyId}:${taskId}`, task_id: taskId, company_id: companyId, question: task.question, preferred_employee_id: preferredEmployeeId, status: 'queued', attempts: 0, created_at: now, updated_at: now };
   await persistWorkforceJob(job);
-  const logs = db.activity.get(companyId) || [];
-  logs.unshift({ id: Date.now(), sender: 'Manager', receiver: 'Caveworkers worker', kind: 'task.queued', body: `Task #${taskId} entered the always-on employee queue.`, created_at: now });
-  db.activity.set(companyId, logs.slice(0, 100));
+  await persistActivityLog(companyId, { id: Date.now(), sender: 'Manager', receiver: 'Caveworkers worker', kind: 'task.queued', body: `Task #${taskId} entered the always-on employee queue.`, created_at: now });
   emitWorkroomEvent(companyId, taskId, { type: 'task_update', task: workroomSnapshot(task) });
   return { ...workroomSnapshot(task), queued: true, worker_instance: WORKER_INSTANCE_ID };
 }
@@ -769,7 +831,7 @@ async function claimNextWorkforceJob(): Promise<WorkforceQueueJob | null> {
           return next;
         });
         if (claimed) { db.workforceQueue.set(candidate.id, claimed); return claimed; }
-      } catch (error) { console.warn('Could not claim workforce job:', error); }
+      } catch (error) { reportOperationalFailure('worker.job_claim', error, { job_hash: anonymizeIdentifier(candidate.id) }); }
     } else {
       candidate.status = 'processing';
       candidate.claimed_by = WORKER_INSTANCE_ID;
@@ -816,12 +878,15 @@ async function processNextWorkforceJob() {
       job.status = 'completed'; job.updated_at = new Date().toISOString(); await persistWorkforceJob(job);
       emitWorkroomEvent(job.company_id, task.id, { type: 'task_update', task: workroomSnapshot(task) });
     } catch (error: any) {
+      reportOperationalFailure('worker.task_execution', error, { tenant_hash: anonymizeIdentifier(job.company_id), task_id: task.id, worker_instance: WORKER_INSTANCE_ID });
       task.answer = 'The employee group could not complete this task. Review the workroom trace and retry when the source is available.';
       await updateQueuedTask(task, 'failed', String(error?.message || 'Worker execution failed').slice(0, 300));
       job.status = 'failed'; job.error = String(error?.message || 'Worker execution failed').slice(0, 300); job.updated_at = new Date().toISOString(); await persistWorkforceJob(job);
     } finally {
       workerEmployees.forEach((employeeId) => setEmployeePresence(job.company_id, employeeId, 'idle'));
     }
+  } catch (error) {
+    reportOperationalFailure('worker.poll', error, { worker_instance: WORKER_INSTANCE_ID });
   } finally {
     workerBusy = false;
   }
@@ -830,6 +895,7 @@ async function processNextWorkforceJob() {
 async function startAlwaysOnWorker() {
   if (!ALWAYS_ON_WORKER_ENABLED) { console.log('Always-on workforce worker disabled by configuration.'); return; }
   console.log(`Always-on workforce worker enabled (${WORKER_INSTANCE_ID}); poll ${WORKER_POLL_MS}ms.`);
+  await loadQueuedJobs();
   await processNextWorkforceJob();
   const timer = setInterval(() => { void processNextWorkforceJob(); }, WORKER_POLL_MS);
   (timer as any).unref?.();
@@ -846,7 +912,7 @@ async function performWebResearch(question: string): Promise<WebResearchEvidence
       const response = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(question.slice(0, 500))}&count=5`, { signal: AbortSignal.timeout(12000), headers: { Accept: 'application/json', 'X-Subscription-Token': BRAVE_SEARCH_API_KEY } });
       if (response.ok) { const payload: any = await response.json(); results = Array.isArray(payload?.web?.results) ? payload.web.results.map((entry: any) => ({ title: entry.title, url: entry.url, snippet: entry.description })) : []; }
     }
-  } catch (error) { console.warn('Web research provider failure:', error instanceof Error ? error.name : 'unknown_error'); }
+  } catch (error) { reportOperationalFailure('research.provider', error); }
   const evidence: WebResearchEvidence[] = [];
   for (const result of results.slice(0, 5)) {
     const url = String(result.url || '').trim();
@@ -928,7 +994,7 @@ async function loadMcpConnections(companyId: string, employeeId: string): Promis
       db.mcpConnections.set(key, entries);
       return entries;
     } catch (error) {
-      console.warn('Could not load tenant connectors:', error);
+      reportOperationalFailure('connector.load', error, { tenant_hash: anonymizeIdentifier(companyId), employee_id: employeeId });
     }
   }
   db.mcpConnections.set(key, []);
@@ -1068,6 +1134,7 @@ async function executeEmployeeReadTools(companyId: string, employee: any, questi
       const called = await mcpRpc(connection, 'tools/call', { name: tool.name, arguments: args }, initialized.sessionId);
       return { employee_id: employee.id, employee_name: employee.name, connector_name: connection.name, tool_name: tool.name, status: 'executed' as const, summary: summarizeMcpToolResult(called.data), created_at: createdAt };
     } catch (error: any) {
+      reportOperationalFailure('connector.read_tool', error, { tenant_hash: anonymizeIdentifier(companyId), employee_id: employee.id, connector_type: connection.connection_type, tool_name: tool.name });
       return { employee_id: employee.id, employee_name: employee.name, connector_name: connection.name, tool_name: tool.name, status: 'failed' as const, summary: String(error?.message || 'The read tool failed.').slice(0, 500), created_at: createdAt };
     }
   }));
@@ -1174,28 +1241,13 @@ async function persistAnalystRun(run: AnalystRun) {
 }
 
 async function persistAnalystApproval(approval: ApprovalRecord) {
-  db.approvals.set(approval.id, approval);
+  await persistApprovalRecord(approval);
   db.analystApprovalsLoaded.add(approval.company_id);
-  const collection = analystTenantCollection(approval.company_id, 'approvals');
-  if (collection) await collection.doc(String(approval.id)).set(stripUndefined(approval), { merge: true });
 }
 
 async function loadAnalystApprovals(companyId: string): Promise<ApprovalRecord[]> {
-  if (!db.analystApprovalsLoaded.has(companyId)) {
-    const collection = analystTenantCollection(companyId, 'approvals');
-    if (collection) {
-      try {
-        const snapshot = await collection.limit(100).get();
-        snapshot.docs.forEach((doc) => {
-          const approval = { id: Number(doc.id), ...(doc.data() || {}) } as ApprovalRecord;
-          if (approval.employee_id === 'david') db.approvals.set(approval.id, approval);
-        });
-      } catch (error) {
-        console.warn('Could not load analyst approvals:', error);
-      }
-    }
-    db.analystApprovalsLoaded.add(companyId);
-  }
+  await hydrateTenantApprovals(companyId);
+  db.analystApprovalsLoaded.add(companyId);
   return Array.from(db.approvals.values()).filter((approval) => approval.company_id === companyId && approval.employee_id === 'david');
 }
 
@@ -1283,10 +1335,10 @@ async function runAnalystLoop(input: { companyId: string; managerName: string; q
   }
   const run: AnalystRun = { id: runId, company_id: input.companyId, task_id: taskId, question, source_id: sourceRecord?.id, output_format: outputFormat, status: approvalId ? 'awaiting_approval' : 'completed', plan: ['Perceive tenant context', 'Plan read-only analysis', 'Act with a configured source or transparent preview', 'Reflect to tenant memory'], trace, report, chart, approval_id: approvalId, model: { provider: narrative.provider, name: narrative.model, latency_ms: narrative.latency_ms, usage: narrative.usage, error_code: narrative.error_code }, created_at: now };
   await persistAnalystRun(run);
-  db.tasks.set(taskId, { id: taskId, company_id: input.companyId, question, owner: 'david', status: approvalId ? 'pending_approval' : 'completed', answer: report, plan: run.plan.join(' → '), created_at: now, trace: trace.map((entry) => ({ kind: entry.stage, sender: 'David', receiver: entry.stage === 'approval' ? 'Human approval gate' : 'Analyst run', body: entry.body, created_at: entry.created_at })) });
-  const activity = db.activity.get(input.companyId) || [];
-  activity.unshift({ id: Date.now(), sender: 'David', receiver: input.managerName || 'Workspace Manager', kind: approvalId ? 'analyst.awaiting_approval' : 'analyst.completed', body: approvalId ? `Analysis ${runId} is ready; external delivery is paused for approval.` : `Completed analyst run ${runId}: ${question.slice(0, 90)}${question.length > 90 ? '…' : ''}`, created_at: new Date().toISOString() });
-  db.activity.set(input.companyId, activity);
+  const analystTask: TaskRecord = { id: taskId, company_id: input.companyId, question, owner: 'david', status: approvalId ? 'pending_approval' : 'completed', answer: report, plan: run.plan.join(' → '), created_at: now, trace: trace.map((entry) => ({ kind: entry.stage, sender: 'David', receiver: entry.stage === 'approval' ? 'Human approval gate' : 'Analyst run', body: entry.body, created_at: entry.created_at })) };
+  db.tasks.set(taskId, analystTask);
+  await persistTaskRecord(analystTask);
+  await persistActivityLog(input.companyId, { id: Date.now(), sender: 'David', receiver: input.managerName || 'Workspace Manager', kind: approvalId ? 'analyst.awaiting_approval' : 'analyst.completed', body: approvalId ? `Analysis ${runId} is ready; external delivery is paused for approval.` : `Completed analyst run ${runId}: ${question.slice(0, 90)}${question.length > 90 ? '…' : ''}`, created_at: new Date().toISOString() });
   return run;
 }
 
@@ -1385,7 +1437,7 @@ db.knowledge.set(DEFAULT_COMPANY_ID, [
 ]);
 
 db.activity.set(DEFAULT_COMPANY_ID, [
-  { id: 1, sender: 'System', receiver: 'Workspace', kind: 'workspace.activated', body: 'Workspace activated on Growth plan with 3 AI employees.', created_at: new Date().toISOString() }
+  { id: 1, company_id: DEFAULT_COMPANY_ID, sender: 'System', receiver: 'Workspace', kind: 'workspace.activated', body: 'Workspace activated on Growth plan with 3 AI employees.', created_at: new Date().toISOString() }
 ]);
 
 db.approvals.set(101, {
@@ -1482,6 +1534,16 @@ app.use(async (req, res, next) => {
   next();
 });
 
+// Test-only authentication injection. This middleware is not registered in production builds or runtime.
+if (process.env.NODE_ENV === 'test' || process.env.VITEST === 'true') {
+  app.use('/api', (req, _res, next) => {
+    const uid = String(req.get('x-caveworkers-test-user') || '').trim();
+    const user = uid ? db.users.get(uid) : undefined;
+    if (user) authenticatedUsers.set(req, user);
+    next();
+  });
+}
+
 // Every unsafe API request must echo the same token issued in the readable CSRF cookie.
 app.use('/api', (req, res, next) => {
   const unsafe = /^(POST|PUT|PATCH|DELETE)$/i.test(req.method);
@@ -1529,7 +1591,7 @@ async function enforceWorkspaceAccess(req: express.Request, res: express.Respons
   }
   const company = user.company_id ? await loadCompanyFromFirebase(user.company_id) || db.companies.get(user.company_id) : null;
   if (!company) return false;
-  if (company.tier === 'free_trial' && company.trial_ends_at && Date.now() >= Date.parse(company.trial_ends_at)) {
+  if (isTrialExpired(company.tier, company.trial_ends_at)) {
     res.status(402).json({ error: 'Your free trial has ended. Upgrade to continue using workspace actions.', upgrade_required: true, trial_ends_at: company.trial_ends_at });
     return true;
   }
@@ -1641,11 +1703,12 @@ app.get('/api/health', (_req, res) => {
     status: 'healthy',
     timestamp: new Date().toISOString(),
     components: {
-      database: { status: 'up' },
-      payments: { status: RAZORPAY_KEY_ID ? 'configured' : 'unconfigured' },
+      database: { status: firestoreDb ? 'active' : 'unconfigured' },
+      payments: { status: RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET && RAZORPAY_WEBHOOK_SECRET ? 'configured' : 'unconfigured' },
       firebase: { status: firebaseAuth && firestoreDb ? 'active' : 'unconfigured' },
       analyst: { status: OPENROUTER_KEY_READY ? 'openrouter_configured' : genAIClient ? 'gemini_fallback' : 'preview_only', model: OPENROUTER_KEY_READY ? ANALYST_MODEL : undefined },
-      mcp_bus: { status: 'active' }
+      mcp_bus: { status: 'active' },
+      observability: { sentry: sentryEnabled ? 'configured' : 'unconfigured' }
     }
   });
 });
@@ -1897,8 +1960,7 @@ app.post('/api/onboarding/complete', async (req, res) => {
   await persistUser(user);
 
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const logs = db.activity.get(companyId) || [];
-  logs.unshift({
+  await persistActivityLog(companyId, {
     id: Date.now(),
     sender: 'System',
     receiver: 'Workspace',
@@ -1906,7 +1968,6 @@ app.post('/api/onboarding/complete', async (req, res) => {
     body: `Workspace "${user.company_name || 'Acme'}" setup complete on ${user.selected_tier || 'Growth'} plan.`,
     created_at: new Date().toISOString()
   });
-  db.activity.set(companyId, logs);
 
   res.json({ ok: true, redirect: '/command' });
 });
@@ -2184,8 +2245,7 @@ Respond as ${empName} directly to your manager in a helpful, concise, profession
   db.conversations.set(key, msgs);
 
   // Activity log
-  const logs = db.activity.get(companyId) || [];
-  logs.unshift({
+  await persistActivityLog(companyId, {
     id: Date.now(),
     sender: user.display_name || 'Manager',
     receiver: empName,
@@ -2193,7 +2253,6 @@ Respond as ${empName} directly to your manager in a helpful, concise, profession
     body: message,
     created_at: new Date().toISOString()
   });
-  db.activity.set(companyId, logs);
 
   res.json({ ok: true, employee_message: botMsg, messages: msgs });
 });
@@ -2301,7 +2360,7 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   const requiresApproval = ['email', 'send', 'commit', 'hire', 'publish', 'recruit', 'payment', 'invoice', 'access', 'delete', 'post', 'write'].some((term) => lowerQ.includes(term));
   if (requiresApproval) {
     const approvalId = db.nextApprovalId++;
-    db.approvals.set(approvalId, { id: approvalId, company_id: companyId, task_id: taskId, employee_id: lead.id, tool_name: lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action', action_summary: `${lead.name} requests manager sign-off for: "${question}"`, status: 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', collaborators: collaborators.map((employee) => employee.id) } });
+    await persistApprovalRecord({ id: approvalId, company_id: companyId, task_id: taskId, employee_id: lead.id, tool_name: lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action', action_summary: `${lead.name} requests manager sign-off for: "${question}"`, status: 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', collaborators: collaborators.map((employee) => employee.id) } });
     trace.push({ kind: 'approval_required', sender: lead.name, receiver: 'Manager approval queue', body: 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
   }
   trace.push({ kind: 'group_message', sender: lead.name, receiver: 'Caveworkers group', body: `I consolidated the team’s inputs into the manager brief. The task ledger now contains the full conversation and approval state.`, created_at: new Date(Date.now() + 3400).toISOString() });
@@ -2310,9 +2369,7 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   const taskRecord: TaskRecord = { id: taskId, company_id: companyId, question, owner: lead.id, status: requiresApproval ? 'pending_approval' : 'completed', answer, plan: `1. Intake → 2. Assign ${lead.name} → 3. Group specialist handoffs${collaborators.length ? ` (${collaborators.map((employee) => employee.name).join(', ')})` : ''} → 4. Permissioned read tools → 5. Consolidate → 6. Human approval if required`, created_at: now, trace, participants: ['Manager', lead.name, ...collaborators.map((employee) => employee.name)], collaboration_summary: `${lead.name} led a permissioned collaboration with ${collaborators.length || 'no'} additional specialist${collaborators.length === 1 ? '' : 's'}.`, live_tool_evidence: liveToolEvidence, web_research: webResearch, queued_at: existingTask?.queued_at, started_at: existingTask?.started_at || now, completed_at: new Date().toISOString() };
   db.tasks.set(taskId, taskRecord);
   await persistTaskRecord(taskRecord);
-  const logs = db.activity.get(companyId) || [];
-  logs.unshift({ id: Date.now(), sender: lead.name, receiver: collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'Task ledger', kind: 'task.collaborative', body: `Task #${taskId} completed with a visible group-chat audit trail.`, created_at: now });
-  db.activity.set(companyId, logs);
+  await persistActivityLog(companyId, { id: Date.now(), sender: lead.name, receiver: collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'Task ledger', kind: 'task.collaborative', body: `Task #${taskId} completed with a visible group-chat audit trail.`, created_at: now });
   return { id: taskId, company_id: companyId, question, status: taskRecord.status, owner: lead.id, participants: taskRecord.participants, plan: taskRecord.plan, answer, trace, live_tool_evidence: liveToolEvidence, web_research: webResearch, collaboration_summary: taskRecord.collaboration_summary, workforce_size: workforce.length };
 }
 app.post('/api/task', async (req, res) => {
@@ -2388,9 +2445,7 @@ app.post('/api/approvals/:id', async (req, res) => {
   approval.status = status === 'approved' ? 'approved' : 'rejected';
   if (approval.payload?.origin === 'analyst') await persistAnalystApproval(approval);
   if (approval.payload?.origin === 'analyst') {
-    const activity = db.activity.get(companyId) || [];
-    activity.unshift({ id: Date.now(), sender: 'Manager', receiver: 'David', kind: approval.status === 'approved' ? 'analyst.action_authorized' : 'analyst.action_declined', body: approval.status === 'approved' ? `Approved analyst draft for ${approval.tool_name}. No external dispatch occurs until that connector is configured.` : `Declined analyst draft for ${approval.tool_name}.`, created_at: new Date().toISOString() });
-    db.activity.set(companyId, activity);
+    await persistActivityLog(companyId, { id: Date.now(), sender: 'Manager', receiver: 'David', kind: approval.status === 'approved' ? 'analyst.action_authorized' : 'analyst.action_declined', body: approval.status === 'approved' ? `Approved analyst draft for ${approval.tool_name}. No external dispatch occurs until that connector is configured.` : `Declined analyst draft for ${approval.tool_name}.`, created_at: new Date().toISOString() });
   }
   res.json({ ok: true, approval });
 });
@@ -2699,7 +2754,7 @@ app.post('/api/employees/:id/mcp-connections/:connectionId/test', async (req, re
   if (!connection) return res.status(404).json({ error: 'MCP connection not found.' });
   if (connection.connection_type === 'streamable_http') {
     try { const tools = await discoverMcpTools(connection); connection.discovered_tools = tools; connection.status = 'connected'; connection.last_error = undefined; await persistMcpConnection(connection); return res.json({ ok: true, message: `Connection healthy. ${tools.length} tools discovered.` }); }
-    catch (error: any) { return res.status(502).json({ ok: false, error: String(error?.message || 'MCP health check failed').slice(0, 240) }); }
+    catch (error: any) { reportOperationalFailure('connector.health_check', error, { tenant_hash: anonymizeIdentifier(companyId), employee_id: req.params.id, connector_type: connection.connection_type, request_id: getRequestId(req) }); return res.status(502).json({ ok: false, error: String(error?.message || 'MCP health check failed').slice(0, 240), request_id: getRequestId(req) }); }
   }
   if (connection.connection_type === 'google_gmail' || connection.connection_type === 'google_sheets') return res.json({ ok: connection.status === 'connected', message: connection.status === 'connected' ? `Google ${connection.connection_type === 'google_gmail' ? 'Gmail' : 'Sheets'} connection is ready.` : 'Connect the Google account before testing.' });
   res.json({ ok: true, message: 'Connection configuration is saved.' });
@@ -2733,7 +2788,7 @@ app.post('/api/analyst/google-sheets/read', async (req, res) => {
   try {
     const result = await readGoogleSheetValues(companyId, Number(req.body?.connection_id), String(req.body?.sheet_url || ''), req.body?.range);
     res.json({ ok: true, result });
-  } catch (error: any) { res.status(502).json({ error: String(error?.message || 'Google Sheets read failed').slice(0, 240) }); }
+  } catch (error: any) { reportOperationalFailure('connector.google_sheets_read', error, { tenant_hash: anonymizeIdentifier(companyId), request_id: getRequestId(req) }); res.status(502).json({ error: String(error?.message || 'Google Sheets read failed').slice(0, 240), request_id: getRequestId(req) }); }
 });
 
 app.post('/api/analyst/gmail/search', async (req, res) => {
@@ -2743,7 +2798,7 @@ app.post('/api/analyst/gmail/search', async (req, res) => {
   try {
     const result = await searchGmail(companyId, Number(req.body?.connection_id), String(req.body?.query || ''), req.body?.max_results);
     res.json({ ok: true, result });
-  } catch (error: any) { res.status(502).json({ error: String(error?.message || 'Gmail search failed').slice(0, 240) }); }
+  } catch (error: any) { reportOperationalFailure('connector.gmail_search', error, { tenant_hash: anonymizeIdentifier(companyId), request_id: getRequestId(req) }); res.status(502).json({ error: String(error?.message || 'Gmail search failed').slice(0, 240), request_id: getRequestId(req) }); }
 });
 
 app.post('/api/analyst/mcp/call', async (req, res) => {
@@ -2767,7 +2822,7 @@ app.post('/api/analyst/mcp/call', async (req, res) => {
     const initialized = await mcpRpc(connection, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'Caveworkers', version: '1.0.0' } });
     const result = await mcpRpc(connection, 'tools/call', { name: toolName, arguments: args }, initialized.sessionId);
     res.json({ ok: true, result: result.data?.result || result.data });
-  } catch (error: any) { res.status(502).json({ error: String(error?.message || 'MCP tool call failed').slice(0, 240) }); }
+  } catch (error: any) { reportOperationalFailure('connector.mcp_tool_call', error, { tenant_hash: anonymizeIdentifier(companyId), employee_id: 'david', tool_name: toolName, request_id: getRequestId(req) }); res.status(502).json({ error: String(error?.message || 'MCP tool call failed').slice(0, 240), request_id: getRequestId(req) }); }
 });
 
 app.get('/api/knowledge', (req, res) => {
@@ -2793,11 +2848,12 @@ app.post('/api/knowledge', (req, res) => {
   res.json({ ok: true, doc: newDoc });
 });
 
-app.get('/api/activity', (req, res) => {
+app.get('/api/activity', async (req, res) => {
   const user = getAuthUser(req);
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const logs = db.activity.get(companyId) || db.activity.get(DEFAULT_COMPANY_ID) || [];
-  res.json({ messages: logs });
+  await hydrateTenantActivity(companyId);
+  const logs = db.activity.get(companyId) || [];
+  res.json({ messages: logs.filter((entry) => entry.company_id === companyId) });
 });
 
 app.post('/api/payments/create-order', async (req, res) => {
@@ -2818,8 +2874,8 @@ app.post('/api/payments/create-order', async (req, res) => {
     pendingPaymentOrders.set(order.id, { uid: user.uid, company_id: user.company_id || DEFAULT_COMPANY_ID, tier: tier || user.selected_tier || 'growth', amount: Number(order.amount), created_at: new Date().toISOString() });
     return res.json({ order_id: order.id, amount: order.amount, currency: order.currency, key_id: RAZORPAY_KEY_ID });
   } catch (err: any) {
-    console.error('Razorpay order creation failed:', err?.message || err);
-    return res.status(502).json({ error: 'Could not create a payment order. Please try again.' });
+    reportOperationalFailure('payments.order_create', err, { tenant_hash: anonymizeIdentifier(user.company_id || DEFAULT_COMPANY_ID), request_id: getRequestId(req), tier: String(tier || user.selected_tier || 'growth').slice(0, 32) });
+    return res.status(502).json({ error: 'Could not create a payment order. Please try again.', request_id: getRequestId(req) });
   }
 });
 
@@ -2827,8 +2883,7 @@ app.post('/api/payments/webhook', async (req, res) => {
   if (!RAZORPAY_WEBHOOK_SECRET) return res.status(503).json({ error: 'Payment webhooks are not configured.' });
   const rawBody = (req as express.Request & { rawBody?: Buffer }).rawBody || Buffer.from(JSON.stringify(req.body || {}));
   const providedSignature = req.get('x-razorpay-signature') || '';
-  const expectedSignature = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET).update(rawBody).digest('hex');
-  const valid = providedSignature.length === expectedSignature.length && crypto.timingSafeEqual(Buffer.from(providedSignature), Buffer.from(expectedSignature));
+  const valid = verifyRazorpayWebhookSignature(rawBody, providedSignature, RAZORPAY_WEBHOOK_SECRET);
   if (!valid) return res.status(401).json({ error: 'Invalid payment webhook signature.' });
 
   const event = req.body?.event;
@@ -2865,8 +2920,8 @@ app.post('/api/payments/webhook', async (req, res) => {
     pendingPaymentOrders.delete(orderId);
     return res.json({ received: true });
   } catch (error) {
-    console.error('Razorpay webhook processing failed:', error);
-    return res.status(500).json({ error: 'Webhook processing failed.' });
+    reportOperationalFailure('payments.webhook_processing', error, { request_id: getRequestId(req), event_type: String(event || 'unknown').slice(0, 80), order_hash: anonymizeIdentifier(orderId) });
+    return res.status(500).json({ error: 'Webhook processing failed.', request_id: getRequestId(req) });
   }
 });
 
@@ -2879,9 +2934,7 @@ app.post('/api/payments/verify', async (req, res) => {
   if (!pending || pending.uid !== user.uid) return res.status(403).json({ error: 'Payment order is invalid or does not belong to this account.' });
 
   try {
-    const body = razorpay_order_id + '|' + razorpay_payment_id;
-    const expectedSignature = crypto.createHmac('sha256', RAZORPAY_KEY_SECRET).update(body).digest('hex');
-    const valid = expectedSignature.length === razorpay_signature.length && crypto.timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(razorpay_signature));
+    const valid = verifyRazorpayPaymentSignature(razorpay_order_id, razorpay_payment_id, razorpay_signature, RAZORPAY_KEY_SECRET);
     if (!valid) return res.status(402).json({ error: 'Payment signature verification failed.', payment_required: true });
 
     const company = await loadCompanyFromFirebase(pending.company_id) || db.companies.get(pending.company_id);
@@ -2896,8 +2949,8 @@ app.post('/api/payments/verify', async (req, res) => {
     pendingPaymentOrders.delete(razorpay_order_id);
     return res.json({ status: 'verified', tier: pending.tier });
   } catch (error) {
-    console.error('Razorpay signature verification failed:', error);
-    return res.status(502).json({ error: 'Payment verification could not be completed. Please contact support if you were charged.' });
+    reportOperationalFailure('payments.signature_verification', error, { tenant_hash: anonymizeIdentifier(user.company_id || DEFAULT_COMPANY_ID), request_id: getRequestId(req), order_hash: anonymizeIdentifier(razorpay_order_id) });
+    return res.status(502).json({ error: 'Payment verification could not be completed. Please contact support if you were charged.', request_id: getRequestId(req) });
   }
 });
 
@@ -2968,7 +3021,29 @@ app.get('/api/office/status', (req, res) => {
   });
 });
 
-app.listen(PORT, HOST, () => {
-  console.log(`CaveWorkers backend running on http://${HOST}:${PORT}`);
-  void startAlwaysOnWorker();
+// Sentry must register after all routes and before Caveworkers' redacted fallback error response.
+if (sentryEnabled) Sentry.setupExpressErrorHandler(app);
+app.use((error: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) return next(error);
+  const status = Number(error?.status || error?.statusCode);
+  const safeStatus = Number.isInteger(status) && status >= 400 && status < 500 ? status : 500;
+  const message = safeStatus === 500 ? 'An unexpected server error occurred.' : String(error?.message || 'Request failed.').slice(0, 240);
+  console.error(JSON.stringify({ event: 'http_request_failure', request_id: getRequestId(req), method: req.method, path: req.path, status: safeStatus, error_name: error instanceof Error ? error.name : 'UnknownError' }));
+  res.status(safeStatus).json({ error: message, request_id: getRequestId(req) });
 });
+
+process.on('unhandledRejection', (reason) => {
+  reportOperationalFailure('process.unhandled_rejection', reason);
+});
+process.on('uncaughtExceptionMonitor', (error) => {
+  reportOperationalFailure('process.uncaught_exception', error);
+});
+
+export { app, db, pendingPaymentOrders };
+
+if (process.env.NODE_ENV !== 'test' && process.env.VITEST !== 'true') {
+  app.listen(PORT, HOST, () => {
+    console.log(`CaveWorkers backend running on http://${HOST}:${PORT}`);
+    void startAlwaysOnWorker().catch((error) => reportOperationalFailure('worker.startup', error));
+  });
+}

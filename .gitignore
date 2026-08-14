@@ -9,6 +9,10 @@
 *.pem
 *.key
 
+# Node build and dependency artifacts
+node_modules/
+dist/
+
 # Local data
 data/*.db
 data/*.db-wal
