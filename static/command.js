@@ -202,6 +202,11 @@ async function loadApprovals() {
     const approvals = await responseJson('/api/approvals');
     countBadge.textContent = approvals.length;
     statusText.textContent = approvals.length ? `${approvals.length} waiting for review` : 'Queue clear';
+    const reviewSignal = $('#signal-review');
+    if (reviewSignal) {
+      reviewSignal.textContent = approvals.length ? `${approvals.length} waiting` : 'Queue clear';
+      reviewSignal.className = approvals.length ? 'signal-warn' : 'signal-ok';
+    }
     container.innerHTML = approvals.length ? approvals.map((approval) => `<div class="approval-item"><div class="approval-top"><span class="approval-tool">${safe(approval.tool_name)}</span><span class="live-pill">REVIEW NEEDED</span></div><p class="approval-summary">${safe(approval.action_summary)}</p><div class="approval-actions"><button class="btn-sm btn-approve" data-approval-id="${approval.id}" data-approval-status="approved">Approve ✓</button><button class="btn-sm btn-reject" data-approval-id="${approval.id}" data-approval-status="rejected">Reject</button></div></div>`).join('') : '<p class="empty-state-sm">Nothing needs your approval. Caveworkers will always pause consequential actions.</p>';
   } catch (error) { console.error('Unable to load approvals:', error); statusText.textContent = 'Queue unavailable'; }
 }
@@ -391,9 +396,9 @@ function renderTrace(trace) { const container = $('#trace-steps'); container.inn
 
 $('#conversation-form')?.addEventListener('submit', sendConversation);
 $('#knowledge-form')?.addEventListener('submit', async (event) => { event.preventDefault(); const title = $('#knowledge-title').value.trim(); const content = $('#knowledge-content').value.trim(); if (!title || !content) return; try { await responseJson('/api/knowledge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, content, category: 'policy' }) }); $('#knowledge-title').value = ''; $('#knowledge-content').value = ''; await loadKnowledge(); } catch (error) { alert(error.message); } });
-$('#run')?.addEventListener('click', async () => { const request = $('#request').value.trim(); if (!request) return $('#request').focus(); const button = $('#run'); button.disabled = true; button.textContent = 'Routing task…'; try { const task = await responseJson('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request }) }); $('#results').hidden = false; $('#result-title').textContent = `Task #${task.id} · ${task.participants.join(' → ')}`; $('#result-answer').textContent = task.answer; renderTrace(task.trace); $('#results').scrollIntoView({ behavior: 'smooth', block: 'start' }); await Promise.all([loadApprovals(), loadActivity(), loadOfficeStatus(), loadRoiMetrics(), loadTaskDashboard()]); } catch (error) { $('#results').hidden = false; $('#result-title').textContent = error.upgradeRequired ? 'Trial ended' : 'Task could not run'; $('#result-answer').textContent = error.upgradeRequired ? `${error.message} Open Workspace Settings to choose a paid plan.` : error.message; } finally { button.disabled = false; button.innerHTML = 'Route task <span>↗</span>'; } });
+$('#run')?.addEventListener('click', async () => { const request = $('#request').value.trim(); if (!request) return $('#request').focus(); const button = $('#run'); button.disabled = true; button.textContent = 'Routing task…'; try { const task = await responseJson('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request }) }); $('#results').hidden = false; $('#result-title').textContent = `Task #${task.id} · ${task.participants.join(' → ')}`; $('#result-answer').textContent = task.answer; renderTrace(task.trace); $('#results').scrollIntoView({ behavior: 'smooth', block: 'start' }); await Promise.all([loadApprovals(), loadActivity(), loadTaskDashboard()]); } catch (error) { $('#results').hidden = false; $('#result-title').textContent = error.upgradeRequired ? 'Trial ended' : 'Task could not run'; $('#result-answer').textContent = error.upgradeRequired ? `${error.message} Open Workspace Settings to choose a paid plan.` : error.message; } finally { button.disabled = false; button.innerHTML = 'Route task <span>↗</span>'; } });
 document.addEventListener('click', (event) => { const person = event.target.closest('.conversation-person'); if (person) selectEmployee(person.dataset.employeeId); const approval = event.target.closest('[data-approval-id]'); if (approval) resolveApproval(approval.dataset.approvalId, approval.dataset.approvalStatus); });
-$('#refresh')?.addEventListener('click', () => Promise.all([loadBilling(), loadEmployees(), loadApprovals(), loadTools(), loadKnowledge(), loadActivity(), loadHealth(), loadOfficeStatus(), loadRoiMetrics(), loadTaskDashboard()]));
+$('#refresh')?.addEventListener('click', () => Promise.all([loadBilling(), loadEmployees(), loadApprovals(), loadTools(), loadKnowledge(), loadActivity(), loadHealth(), loadTaskDashboard()]));
 $('#menuButton')?.addEventListener('click', () => document.querySelector('.side-rail')?.classList.toggle('is-open'));
 $('#logout-btn')?.addEventListener('click', async (e) => {
   e.preventDefault();
@@ -408,7 +413,7 @@ $('#logout-btn')?.addEventListener('click', async (e) => {
   window.location.replace('/login');
 });
 
-(async () => { await Promise.all([loadBilling(), loadApprovals(), loadTools(), loadKnowledge(), loadActivity(), loadHealth(), loadOfficeStatus(), loadRoiMetrics(), loadTaskDashboard()]); await loadEmployees(); })();
+(async () => { await Promise.all([loadBilling(), loadApprovals(), loadTools(), loadKnowledge(), loadActivity(), loadHealth(), loadTaskDashboard()]); await loadEmployees(); })();
 
 
 // Liquid-glass interaction polish. This is progressive enhancement only; all core task flows above remain independent of motion.

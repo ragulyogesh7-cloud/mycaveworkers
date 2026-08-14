@@ -215,3 +215,101 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .trial-banner-action { flex: 0 0 auto; padding: 9px 11px; border: 1px solid rgba(126,232,255,.28); border-radius: 10px; color: var(--aqua); background: rgba(126,232,255,.07); font-size: 10px; font-weight: 700; text-decoration: none; transition: transform 160ms var(--ease-out), background 160ms var(--ease-out); }
 .trial-banner-action:hover { transform: translateY(-2px); background: rgba(126,232,255,.13); }
 @media (max-width: 620px) { .trial-banner { align-items: flex-start; flex-direction: column; } .trial-banner-action { width: 100%; text-align: center; } }
+
+
+/* Command center clarity pass: calmer hierarchy, larger type, fewer competing surfaces. */
+.command-wrap { width: min(100% - 64px, 1180px); padding-top: 46px; }
+.command-intro { align-items: center; gap: 42px; }
+.command-intro h1 { font-size: clamp(38px, 4.8vw, 64px); }
+.command-intro > p { max-width: 440px; font-size: 15px; line-height: 1.7; }
+.composer { margin-top: 30px; padding: 27px; }
+.composer h2 { margin-top: 15px; font-size: clamp(25px, 2.7vw, 34px); }
+.input-shell textarea { min-height: 92px; padding: 15px 16px; font-size: 16px; line-height: 1.55; }
+.run-button { min-width: 148px; font-size: 14px; }
+.composer-foot { margin-top: 14px; font-size: 12px; }
+.signal-strip { margin: 14px 0 22px; }
+.signal-strip div { padding: 15px 17px; }
+.signal-strip span { font-size: 9px; }
+.signal-strip b { font-size: 16px; }
+.content-grid { gap: 20px; margin-top: 20px; }
+.panel-block, .results-block { padding: 26px; border-radius: 20px; }
+.panel-head { margin-bottom: 12px; }
+.panel-kicker { margin-bottom: 8px; font-size: 10px; }
+.panel-head h2, .result-top h2 { font-size: 25px; }
+.section-help { margin: 0 0 17px; max-width: 680px; color: var(--muted); font-size: 14px; line-height: 1.6; }
+.panel-link, .thread-tools-link { font-size: 11px; }
+.pending-label, .live-pill, .complete-tag { font-size: 9px; }
+.conversation-workspace { grid-template-columns: 205px minmax(0, 1fr); min-height: 474px; }
+.conversation-roster { padding: 11px; }
+.conversation-person { gap: 10px; min-height: 50px; padding: 10px; }
+.conversation-person b { font-size: 14px; }
+.conversation-person small { max-width: 112px; font-size: 11px; }
+.avatar { width: 34px; height: 34px; flex-basis: 34px; font-size: 11px; }
+.thread-head { gap: 12px; padding: 16px; }
+.thread-avatar { width: 42px; height: 42px; flex-basis: 42px; }
+.thread-head h3 { font-size: 18px; }
+.thread-head p { font-size: 13px; }
+.thread-context { min-height: 42px; padding: 8px 16px; font-size: 11px; }
+.conversation-messages { min-height: 270px; max-height: 360px; gap: 12px; padding: 17px; }
+.chat-message { padding: 12px 14px; font-size: 14px; line-height: 1.55; }
+.conversation-form { gap: 10px; padding: 13px; }
+.conversation-form textarea { min-height: 50px; padding: 12px 13px; font-size: 15px; }
+.conversation-form button { min-width: 92px; font-size: 13px; }
+.approval-item { padding: 16px; }
+.approval-summary { margin: 11px 0 15px; font-size: 15px; line-height: 1.55; }
+.btn-sm { padding: 8px 11px; font-size: 11px; }
+.tool-explainer, .empty-state, .empty-state-sm { font-size: 14px; line-height: 1.6; }
+.task-dashboard-panel { margin-top: 20px; }
+.dashboard-controls { margin: 18px 0 20px; padding-bottom: 18px; }
+.search-input-box input { height: 44px; padding: 0 14px; font-size: 14px; }
+.dashboard-filter-tabs { gap: 8px; }
+.filter-tab { padding: 9px 12px; font-size: 12px; }
+.task-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 14px; }
+.task-card { padding: 17px; }
+.task-owner-avatar { width: 37px; height: 37px; font-size: 12px; }
+.task-owner-name b { font-size: 14px; }
+.task-owner-name small { font-size: 11px; }
+.task-question { margin-top: 5px; font-size: 16px; line-height: 1.5; }
+.task-plan-box { margin-top: 12px; padding: 11px 12px; font-size: 11px; line-height: 1.6; }
+.task-answer-box { margin-top: 12px; max-height: 190px; padding: 12px; font-size: 14px; line-height: 1.6; }
+.task-time { font-size: 9px; }
+.workspace-tools-panel, .activity-panel { margin-top: 20px; border: 1px solid var(--line); border-radius: 20px; background: rgba(255,255,255,.035); box-shadow: var(--shadow); overflow: hidden; }
+.workspace-tools-panel > summary, .activity-panel > summary { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 20px 24px; cursor: pointer; list-style: none; }
+.workspace-tools-panel > summary::-webkit-details-marker, .activity-panel > summary::-webkit-details-marker { display: none; }
+.workspace-tools-panel > summary::after, .activity-panel > summary::after { content: '+'; color: var(--aqua); font-size: 24px; font-weight: 300; line-height: 1; }
+.workspace-tools-panel[open] > summary::after, .activity-panel[open] > summary::after { content: '−'; }
+.workspace-tools-panel > summary span, .activity-panel > summary span { display: grid; gap: 4px; }
+.workspace-tools-panel > summary strong, .activity-panel > summary strong { color: var(--chalk); font-size: 18px; }
+.workspace-tools-panel > summary small, .activity-panel > summary small { color: var(--muted); font-size: 13px; }
+.workspace-tools-panel > summary b, .activity-panel > summary b { color: var(--aqua); font-size: 12px; font-weight: 600; }
+.workspace-tools-grid { margin: 0; padding: 0 20px 20px; }
+.workspace-tools-grid .panel-block { padding: 22px; }
+.activity-panel > .event-feed { padding: 0 24px 24px; }
+.event { padding: 13px; font-size: 13px; line-height: 1.6; }
+.result-body { font-size: 15px; line-height: 1.7; }
+.disclaimer { font-size: 12px; }
+
+@media (max-width: 1080px) {
+  .command-wrap { width: min(100% - 48px, 960px); }
+  .task-grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  .command-wrap { width: min(100% - 28px, 760px); padding-top: 30px; }
+  .command-intro h1 { font-size: 41px; }
+  .command-intro > p { font-size: 14px; }
+  .composer { margin-top: 26px; padding: 19px; }
+  .composer h2 { font-size: 24px; }
+  .composer-foot { font-size: 12px; }
+  .panel-block, .results-block { padding: 19px; }
+  .panel-head h2 { font-size: 22px; }
+  .section-help, .tool-explainer, .empty-state, .empty-state-sm { font-size: 13px; }
+  .conversation-workspace { min-height: 425px; }
+  .conversation-person { flex-basis: 148px; }
+  .conversation-messages { max-height: 300px; }
+  .workspace-tools-panel > summary, .activity-panel > summary { padding: 17px 19px; }
+  .workspace-tools-panel > summary strong, .activity-panel > summary strong { font-size: 16px; }
+  .workspace-tools-panel > summary small, .activity-panel > summary small { font-size: 12px; }
+  .workspace-tools-grid { padding: 0 12px 12px; }
+  .workspace-tools-grid .panel-block { padding: 18px; }
+  .activity-panel > .event-feed { padding: 0 19px 19px; }
+}
