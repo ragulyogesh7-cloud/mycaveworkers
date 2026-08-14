@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 import request from 'supertest';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isTrialExpired, verifyRazorpayPaymentSignature, verifyRazorpayWebhookSignature } from '../security.js';
 
 process.env.NODE_ENV = 'test';
@@ -9,6 +9,7 @@ process.env.VITEST = 'true';
 process.env.ALWAYS_ON_WORKER_ENABLED = 'false';
 process.env.RAZORPAY_KEY_SECRET = 'payment_test_secret';
 process.env.RAZORPAY_WEBHOOK_SECRET = 'webhook_test_secret';
+process.env.MCP_TOKEN_ENCRYPTION_KEY = 'mcp_test_encryption_key';
 
 const { app, db, pendingPaymentOrders, workforceTestHooks } = await import('../server.js');
 
@@ -28,9 +29,11 @@ function seedTenants() {
   db.analystRuns.clear();
   db.knowledge.clear();
   db.activity.clear();
+  db.mcpConnections.clear();
   db.workforceQueue.clear();
   db.employeePresence.clear();
   pendingPaymentOrders.clear();
+  workforceTestHooks?.resetRateLimits();
 
   db.users.set('user-a', {
     uid: 'user-a', email: 'a@example.com', display_name: 'Tenant A Manager', company_id: 'company-a', company_name: 'Tenant A', onboarded: true, selected_tier: 'growth'
@@ -51,6 +54,46 @@ function csrfRequest(userId: string, method: 'post' | 'put' | 'patch' | 'delete'
     .set('x-csrf-token', token)
     .set('Cookie', [`cw_csrf=${token}`]);
 }
+
+function registryResponse(server: any) {
+  return {
+    servers: [{ server, _meta: { 'io.modelcontextprotocol.registry/official': { status: 'active' } } }],
+    metadata: { count: 1 }
+  };
+}
+
+function registryServer(remoteUrl = 'https://mcp.example.com/tools') {
+  return {
+    name: 'io.example/workspace-tools',
+    description: 'Tenant-owned workspace tools for CRM and operations.',
+    version: '1.2.0',
+    repository: { source: 'github', url: 'https://github.com/example/workspace-tools' },
+    remotes: [{ type: 'streamable-http', url: remoteUrl, headers: [{ name: 'Authorization', isRequired: true, isSecret: true }] }]
+  };
+}
+
+function mockRegistryAndMcpTransport(tools: any[] = [
+  { name: 'contacts.search', description: 'Search contacts', inputSchema: { type: 'object', properties: {} } },
+  { name: 'email.send', description: 'Send email', inputSchema: { type: 'object', properties: {} } }
+]) {
+  process.env.MCP_REGISTRY_URL = 'https://registry.mock/v0.1';
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: any, init?: any) => {
+    const url = String(input);
+    if (url.includes('registry.mock')) {
+      return new Response(JSON.stringify(registryResponse(registryServer())), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    const body = JSON.parse(String(init?.body || '{}'));
+    const result = body.method === 'initialize'
+      ? { protocolVersion: '2025-11-25', capabilities: { tools: {} }, serverInfo: { name: 'workspace-tools', version: '1.2.0' } }
+      : { tools };
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: body.id, result }), { status: 200, headers: { 'content-type': 'application/json' } });
+  });
+}
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  delete process.env.MCP_REGISTRY_URL;
+});
 
 describe('Caveworkers security invariants', () => {
   beforeEach(() => seedTenants());
@@ -152,6 +195,99 @@ describe('Caveworkers security invariants', () => {
     const approval = Array.from(db.approvals.values()).find((entry: any) => entry.task_id === result.id) as any;
     expect(approval).toMatchObject({ company_id: 'company-a', employee_id: 'sarah', status: 'rejected' });
     expect(approval.payload.action_type).toBe('gmail.send');
+  });
+
+  it('returns normalized official Registry results with an MCP.Directory detail link', async () => {
+    const fetchMock = mockRegistryAndMcpTransport();
+    const response = await request(app)
+      .get('/api/mcp/registry/search?q=workspace')
+      .set('x-caveworkers-test-user', 'user-a')
+      .expect(200);
+
+    expect(response.body.count).toBe(1);
+    expect(response.body.servers[0]).toMatchObject({
+      name: 'io.example/workspace-tools',
+      version: '1.2.0',
+      directory_url: 'https://mcp.directory/servers?search=io.example%2Fworkspace-tools'
+    });
+    expect(response.body.servers[0].remotes).toEqual([
+      expect.objectContaining({ type: 'streamable-http', url: 'https://mcp.example.com/tools' })
+    ]);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects private Registry-advertised remotes before any MCP connection attempt', async () => {
+    process.env.MCP_REGISTRY_URL = 'https://registry.mock/v0.1';
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: any) => {
+      if (String(input).includes('registry.mock')) {
+        return new Response(JSON.stringify(registryResponse(registryServer('http://127.0.0.1:8080/internal'))), { status: 200, headers: { 'content-type': 'application/json' } });
+      }
+      throw new Error('The private remote must never be contacted.');
+    });
+
+    const response = await csrfRequest('user-a', 'post', '/api/mcp/registry/connect')
+      .send({ registry_name: 'io.example/workspace-tools', server_url: 'http://127.0.0.1:8080/internal', all_employees: true })
+      .expect(400);
+
+    expect(response.body.error).toMatch(/Private hosts|credentials|unsafe/i);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(db.mcpConnections.size).toBe(0);
+  });
+
+  it('connects only active employees in the authenticated tenant and applies encrypted, approval-gated grants', async () => {
+    db.orgEmployees.set('company-a', [
+      { id: 'alex', name: 'Alex', role: 'Operations Lead', department: 'Operations', status: 'active', tools: [], permissions: [] },
+      { id: 'david', name: 'David', role: 'Data Analyst', department: 'Analytics', status: 'active', tools: [], permissions: [] }
+    ]);
+    db.orgEmployees.set('company-b', [
+      { id: 'iris', name: 'Iris', role: 'Security Analyst', department: 'Security', status: 'active', tools: [], permissions: [] }
+    ]);
+    const fetchMock = mockRegistryAndMcpTransport();
+
+    const response = await csrfRequest('user-a', 'post', '/api/mcp/registry/connect')
+      .send({
+        registry_name: 'io.example/workspace-tools',
+        server_url: 'https://mcp.example.com/tools',
+        auth_token: 'tenant-secret-token',
+        auth_header_name: 'X-Workspace-Token',
+        auth_header_prefix: '',
+        all_employees: false,
+        employee_ids: ['alex', 'iris']
+      })
+      .expect(201);
+
+    expect(response.body.employees_connected).toBe(1);
+    expect(response.body.tools_discovered).toBe(2);
+    expect(response.body.connections[0]).not.toHaveProperty('auth_token_encrypted');
+    expect(response.body.connections[0].auth_configured).toBe(true);
+    expect(Array.from(db.mcpConnections.keys())).toEqual(['company-a:alex']);
+    expect(db.mcpConnections.has('company-b:iris')).toBe(false);
+    const connection = db.mcpConnections.get('company-a:alex')?.[0] as any;
+    expect(connection.auth_token_encrypted).toEqual(expect.any(String));
+    expect(connection.auth_token_encrypted).not.toContain('tenant-secret-token');
+    expect(connection.config).toMatchObject({ auth_header_name: 'X-Workspace-Token', auth_header_prefix: '' });
+    expect(connection.tool_grants).toEqual(expect.arrayContaining([
+      { tool_name: 'contacts.search', access_level: 'read_only' },
+      { tool_name: 'email.send', access_level: 'requires_approval' }
+    ]));
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect((db.activity.get('company-a') || []).some((entry: any) => entry.kind === 'mcp.registry_connected')).toBe(true);
+  });
+
+  it('rate-limits Registry search requests for the same client', async () => {
+    const fetchMock = mockRegistryAndMcpTransport();
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await request(app)
+        .get('/api/mcp/registry/search?q=workspace')
+        .set('x-caveworkers-test-user', 'user-a')
+        .expect(200);
+    }
+    const limited = await request(app)
+      .get('/api/mcp/registry/search?q=workspace')
+      .set('x-caveworkers-test-user', 'user-a')
+      .expect(429);
+    expect(limited.body.error).toMatch(/rate limited/i);
+    expect(fetchMock).toHaveBeenCalledTimes(20);
   });
 
   it('returns only the authenticated tenant’s tasks and approvals', async () => {

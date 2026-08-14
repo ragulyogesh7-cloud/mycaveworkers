@@ -45,3 +45,30 @@
   .gmail-send-option { padding: 0.85rem; }
   .gmail-send-option b { font-size: 0.92rem; }
 }
+
+
+/* MCP Registry discovery console */
+.registry-console{margin:22px 0 28px;padding:24px;border:1px solid rgba(126,232,255,.22);border-radius:24px;background:linear-gradient(145deg,rgba(21,33,66,.82),rgba(12,19,43,.86));box-shadow:0 18px 48px rgba(0,0,0,.22)}
+.registry-console .card-heading{align-items:flex-start;margin-bottom:20px}
+.registry-console .card-heading h3{margin:4px 0 6px;font-size:1.3rem;letter-spacing:-.02em}
+.registry-console .card-heading p:not(.panel-kicker){max-width:680px;color:var(--muted,#9eabc6);line-height:1.55}
+.registry-badge,.registry-result-kicker{display:inline-flex;align-items:center;gap:6px;color:#baff6c;font-size:.68rem;font-weight:800;letter-spacing:.12em;text-transform:uppercase}
+.registry-search-form{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:end;padding:16px;border-radius:18px;background:rgba(255,255,255,.045);border:1px solid rgba(255,255,255,.1)}
+.registry-search-form label,.registry-connect-form label{color:#cad3e8;font-size:.78rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase}
+.registry-search-form input,.registry-connect-form input,.registry-connect-form select{display:block;width:100%;margin-top:8px;border:1px solid rgba(157,177,219,.2);border-radius:12px;background:rgba(4,10,28,.58);color:#f5f7ff;padding:12px 14px;font:inherit;font-size:.94rem;text-transform:none;letter-spacing:0}
+.registry-results{display:grid;gap:10px;margin-top:14px}
+.registry-result-card{display:flex;justify-content:space-between;gap:20px;align-items:center;padding:16px 18px;border:1px solid rgba(255,255,255,.09);border-radius:16px;background:rgba(255,255,255,.035);transition:transform .2s ease,border-color .2s ease,background .2s ease}
+.registry-result-card:hover{transform:translateY(-2px);border-color:rgba(126,232,255,.38);background:rgba(126,232,255,.07)}
+.registry-result-card h4{margin:4px 0 5px;font-size:1rem;color:#fff}
+.registry-result-card p{margin:0;max-width:700px;color:#aab6d0;font-size:.88rem;line-height:1.45}
+.registry-result-card small{display:block;margin-top:8px;color:#72809e;font-size:.76rem}
+.registry-result-actions{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:flex-end}
+.mini-link{color:#8aeaff;font-size:.76rem;font-weight:800;letter-spacing:.04em;text-decoration:none;white-space:nowrap}.mini-link:hover{text-decoration:underline}
+.registry-connect-form{margin-top:14px;padding:20px;border:1px solid rgba(186,255,108,.2);border-radius:18px;background:rgba(186,255,108,.045)}
+.registry-connect-header{display:flex;justify-content:space-between;gap:20px;align-items:flex-start;margin-bottom:16px}.registry-connect-header h4{margin:4px 0 6px;font-size:1.08rem;color:#fff}.registry-connect-header p:not(.panel-kicker){margin:0;color:#aab6d0;line-height:1.45}
+.field-note{display:inline-block;margin-left:4px;color:#8d9ab5;font-size:.68rem;font-weight:500;letter-spacing:0;text-transform:none}
+.registry-team-toggle{display:flex!important;gap:12px;align-items:flex-start;margin-top:16px;padding:14px;border:1px solid rgba(126,232,255,.15);border-radius:14px;background:rgba(126,232,255,.045);cursor:pointer;text-transform:none!important;letter-spacing:0!important}.registry-team-toggle input{width:18px!important;height:18px;margin:1px 0 0!important;accent-color:#baff6c}.registry-team-toggle b,.registry-team-toggle small{display:block}.registry-team-toggle b{font-size:.88rem;color:#eff7ff}.registry-team-toggle small{margin-top:4px;color:#8d9ab5;font-size:.78rem;font-weight:500;line-height:1.45}
+.registry-employee-picker{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:12px}.registry-employee-choice{display:flex!important;gap:8px;align-items:flex-start;padding:10px;border:1px solid rgba(255,255,255,.08);border-radius:12px;background:rgba(255,255,255,.035);cursor:pointer;text-transform:none!important;letter-spacing:0!important}.registry-employee-choice input{width:16px!important;height:16px;margin:2px 0 0!important;accent-color:#8aeaff}.registry-employee-choice span{font-size:.82rem;color:#ecf3ff}.registry-employee-choice small{display:block;margin-top:3px;color:#8592ac;font-size:.7rem;font-weight:500}.registry-connect-form .form-actions{align-items:center}.registry-connect-form .form-actions p{max-width:600px;color:#8d9ab5;font-size:.78rem;line-height:1.45}
+@media (max-width:760px){.registry-search-form{grid-template-columns:1fr}.registry-result-card,.registry-connect-header{display:block}.registry-result-actions{justify-content:flex-start;margin-top:14px}.registry-employee-picker{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media (max-width:480px){.registry-console{padding:16px;border-radius:18px}.registry-employee-picker{grid-template-columns:1fr}}
+@media (prefers-reduced-motion:reduce){.registry-result-card{transition:none}.registry-result-card:hover{transform:none}}

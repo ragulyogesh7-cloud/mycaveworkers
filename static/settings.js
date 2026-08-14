@@ -1,6 +1,7 @@
 const $ = (selector) => document.querySelector(selector);
 let employees = [];
 let billingState = null;
+let selectedRegistryServer = null;
 
 function safe(value) {
   const node = document.createElement('span');
@@ -100,6 +101,82 @@ function renderBilling(billing) {
   if (!summary) return;
   const trialEnd = billing.trial_ends_at ? new Date(billing.trial_ends_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : null;
   summary.innerHTML = `<article><span>PLAN</span><b>${safe(billing.tier_name || 'Free Trial')}</b><small>${billing.tier_key === 'free_trial' && trialEnd ? `Trial ends ${safe(trialEnd)}` : 'Your active workspace plan'}</small></article><article><span>EMPLOYEES</span><b>${safe(billing.active_employees || 0)} / ${safe(billing.max_employees || 0)}</b><small>Active workforce capacity</small></article><article><span>AVAILABLE</span><b>${safe(billing.quota_remaining ?? 0)}</b><small>Employee slot${billing.quota_remaining === 1 ? '' : 's'} remaining</small></article>`;
+}
+
+function renderRegistryResults(servers = []) {
+  const container = $('#mcp-registry-results');
+  if (!container) return;
+  if (!servers.length) {
+    container.innerHTML = '<p class="empty-state-sm">No Registry servers matched that search. Try a provider or capability name.</p>';
+    return;
+  }
+  container.innerHTML = servers.map((server) => `<article class="registry-result-card"><div><p class="registry-result-kicker">${safe(server.official_status || 'PUBLIC REGISTRY')}</p><h4>${safe(server.name)}</h4><p>${safe(server.description)}</p><small>${safe(server.remotes?.length || 0)} advertised remote${server.remotes?.length === 1 ? '' : 's'} · v${safe(server.version || 'unknown')}</small></div><div class="registry-result-actions"><a class="mini-link" href="${safe(server.directory_url)}" target="_blank" rel="noopener noreferrer">MCP.Directory ↗</a><button class="btn btn-light compact-button" type="button" data-action="inspect-registry" data-registry-name="${safe(server.name)}">Inspect remote</button></div></article>`).join('');
+}
+
+function renderRegistryEmployeePicker() {
+  const picker = $('#mcp-registry-employee-picker');
+  if (!picker) return;
+  picker.innerHTML = employees.map((employee) => `<label class="registry-employee-choice"><input type="checkbox" value="${safe(employee.id)}" checked><span>${safe(employee.name)}<small>${safe(employee.role || employee.department || 'AI employee')}</small></span></label>`).join('');
+}
+
+async function inspectRegistryServer(name) {
+  try {
+    notify('Loading advertised MCP remotes…');
+    const data = await requestJson(`/api/mcp/registry/servers/${encodeURIComponent(name)}`);
+    selectedRegistryServer = data.server;
+    $('#mcp-registry-selected-name').textContent = selectedRegistryServer.name;
+    $('#mcp-registry-selected-description').textContent = selectedRegistryServer.description;
+    const directoryLink = $('#mcp-registry-directory-link');
+    directoryLink.href = selectedRegistryServer.directory_url;
+    directoryLink.hidden = false;
+    const remoteSelect = $('#mcp-registry-remote');
+    const remotes = (selectedRegistryServer.remotes || []).filter((remote) => remote.type === 'streamable-http');
+    remoteSelect.innerHTML = remotes.length ? remotes.map((remote) => `<option value="${safe(remote.url)}">${safe(remote.type)} · ${safe(remote.url)}</option>`).join('') : '<option value="">No compatible streamable HTTP remote advertised</option>';
+    const headerNotes = remotes.flatMap((remote) => remote.headers || []).filter((header) => header.isRequired).map((header) => header.name).slice(0, 4);
+    $('#mcp-registry-remote-notes').textContent = remotes.length ? `Remote selected from the Registry. Required advertised headers: ${headerNotes.length ? headerNotes.join(', ') : 'none listed'}. Caveworkers will still validate HTTPS and private-host protections.` : 'This Registry entry has no compatible streamable HTTP remote. Choose another server.';
+    renderRegistryEmployeePicker();
+    $('#mcp-registry-connect-form').hidden = false;
+    $('#mcp-registry-connect-form button[type="submit"]').disabled = !remotes.length;
+    notify('Review the advertised remote and connect it to the employees who should use it.', 'success');
+  } catch (error) { notify(error.message || 'The Registry server could not be inspected.', 'error'); }
+}
+
+async function searchRegistry(event) {
+  event.preventDefault();
+  const query = $('#mcp-registry-query').value.trim();
+  if (!query) { notify('Enter a provider, capability, or server name to search.', 'error'); return; }
+  const container = $('#mcp-registry-results');
+  container.innerHTML = '<p class="empty-state-sm">Searching the official MCP Registry…</p>';
+  try {
+    const result = await requestJson(`/api/mcp/registry/search?q=${encodeURIComponent(query)}&limit=12`);
+    renderRegistryResults(result.servers || []);
+    notify(`${result.count || result.servers?.length || 0} Registry result${(result.count || result.servers?.length || 0) === 1 ? '' : 's'} found.`, 'success');
+  } catch (error) { container.innerHTML = '<p class="empty-state-sm">Registry search is unavailable right now.</p>'; notify(error.message || 'The Registry search could not be completed.', 'error'); }
+}
+
+function toggleRegistryEmployeePicker() {
+  const all = $('#mcp-registry-all-employees');
+  const picker = $('#mcp-registry-employee-picker');
+  if (picker) picker.hidden = Boolean(all?.checked);
+}
+
+async function connectRegistryServer(event) {
+  event.preventDefault();
+  if (!selectedRegistryServer) { notify('Inspect a Registry server before connecting it.', 'error'); return; }
+  const serverUrl = $('#mcp-registry-remote').value;
+  const allEmployees = $('#mcp-registry-all-employees').checked;
+  const employeeIds = Array.from(document.querySelectorAll('#mcp-registry-employee-picker input:checked')).map((input) => input.value);
+  if (!serverUrl) { notify('Choose a compatible advertised remote.', 'error'); return; }
+  if (!allEmployees && !employeeIds.length) { notify('Select at least one active employee.', 'error'); return; }
+  try {
+    const result = await requestJson('/api/mcp/registry/connect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ registry_name: selectedRegistryServer.name, server_url: serverUrl, auth_token: $('#mcp-registry-token').value.trim() || undefined, auth_header_name: $('#mcp-registry-header-name').value.trim(), auth_header_prefix: $('#mcp-registry-header-prefix').value.trim(), all_employees: allEmployees, employee_ids: employeeIds }) });
+    notify(`${result.tools_discovered || 0} tools discovered and connected for ${result.employees_connected || 0} employee${result.employees_connected === 1 ? '' : 's'}.`, 'success');
+    $('#mcp-registry-connect-form').reset();
+    $('#mcp-registry-connect-form').hidden = true;
+    selectedRegistryServer = null;
+    await loadData();
+    activateTab('integrations', false);
+  } catch (error) { notify(error.message || 'The Registry server could not be connected.', 'error'); }
 }
 
 async function loadData() {
@@ -326,6 +403,9 @@ function bindEvents() {
   $('#custom-mcp-form')?.addEventListener('submit', addCustomMcpConnection);
   $('#marketplace-form')?.addEventListener('submit', attachMarketplaceServer);
   $('#tool-grant-form')?.addEventListener('submit', submitToolGrant);
+  $('#mcp-registry-search-form')?.addEventListener('submit', searchRegistry);
+  $('#mcp-registry-connect-form')?.addEventListener('submit', connectRegistryServer);
+  $('#mcp-registry-all-employees')?.addEventListener('change', toggleRegistryEmployeePicker);
   $('#custom-mcp-type')?.addEventListener('change', updateCustomMcpFields);
   $('#custom-mcp-employee')?.addEventListener('change', updateCustomMcpFields);
   $('#menuButton')?.addEventListener('click', () => document.querySelector('.settings-rail')?.classList.toggle('is-open'));
@@ -344,6 +424,7 @@ function bindEvents() {
     if (action === 'grant-mcp-tool') grantMcpTool(employeeId, connectionId, toolName, access);
     if (action === 'revoke-mcp-tool') revokeMcpTool(employeeId, connectionId, toolName);
     if (action === 'request-git-commit') requestGitCommit(employeeId, connectionId);
+    if (action === 'inspect-registry') inspectRegistryServer(target.dataset.registryName);
   });
   $('#logout-btn')?.addEventListener('click', async (event) => {
     event.preventDefault();

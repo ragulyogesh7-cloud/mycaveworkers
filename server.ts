@@ -15,6 +15,7 @@ import { GoogleGenAI } from '@google/genai';
 import { google } from 'googleapis';
 import { Sentry, anonymizeIdentifier, reportOperationalFailure, sentryEnabled } from './instrument.js';
 import { isTrialExpired, verifyRazorpayPaymentSignature, verifyRazorpayWebhookSignature } from './security.js';
+import { getMcpRegistryServer, searchMcpRegistry } from './mcp-registry.js';
 
 dotenv.config();
 
@@ -1017,11 +1018,19 @@ function decryptConnectorCredentials(value?: string): Record<string, any> | null
 }
 
 function sanitizeConnectorConfig(config: Record<string, any> = {}) {
+  const headerName = typeof config.auth_header_name === 'string' && /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,120}$/.test(config.auth_header_name) ? config.auth_header_name : undefined;
+  const headerPrefix = typeof config.auth_header_prefix === 'string' && /^[A-Za-z0-9._-]{0,24}$/.test(config.auth_header_prefix) ? config.auth_header_prefix : undefined;
   return {
     notes: typeof config.notes === 'string' ? config.notes.slice(0, 800) : '',
     repo_path: typeof config.repo_path === 'string' ? config.repo_path.slice(0, 400) : undefined,
     // Gmail write access is an explicit opt-in. It is still approval-gated per message.
-    gmail_send_enabled: config.gmail_send_enabled === true
+    gmail_send_enabled: config.gmail_send_enabled === true,
+    registry_server_name: typeof config.registry_server_name === 'string' ? config.registry_server_name.slice(0, 180) : undefined,
+    registry_directory_url: typeof config.registry_directory_url === 'string' ? config.registry_directory_url.slice(0, 500) : undefined,
+    registry_repository_url: typeof config.registry_repository_url === 'string' ? config.registry_repository_url.slice(0, 500) : undefined,
+    registry_remote_type: typeof config.registry_remote_type === 'string' ? config.registry_remote_type.slice(0, 80) : undefined,
+    auth_header_name: headerName,
+    auth_header_prefix: headerPrefix
   };
 }
 
@@ -1129,7 +1138,11 @@ function parseMcpResponse(text: string): any {
 async function mcpRpc(connection: TenantConnector, method: string, params: Record<string, any>, sessionId?: string) {
   const credentials = decryptConnectorCredentials(connection.auth_token_encrypted);
   const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2025-11-25' };
-  if (credentials?.access_token) headers.Authorization = `Bearer ${credentials.access_token}`;
+  if (credentials?.access_token) {
+    const headerName = typeof credentials.header_name === 'string' && /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,120}$/.test(credentials.header_name) ? credentials.header_name : 'Authorization';
+    const headerPrefix = typeof credentials.header_prefix === 'string' ? credentials.header_prefix : 'Bearer';
+    headers[headerName] = headerPrefix ? `${headerPrefix} ${credentials.access_token}` : credentials.access_token;
+  }
   if (sessionId) headers['Mcp-Session-Id'] = sessionId;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 15000);
@@ -1168,7 +1181,7 @@ function summarizeMcpToolResult(value: any) {
 }
 
 async function executeEmployeeReadTools(companyId: string, employee: any, question: string): Promise<WorkforceLiveToolEvidence[]> {
-  if (!['emma', 'olivia'].includes(employee.id)) return [];
+  if (!employee?.id || !employee?.name) return [];
   const connections = (await loadMcpConnections(companyId, employee.id)).filter((connection) => connection.status === 'connected' && connection.connection_type === 'streamable_http');
   const candidates: Array<{ connection: TenantConnector; tool: any; args: Record<string, any> }> = [];
   for (const connection of connections.slice(0, 5)) {
@@ -2514,7 +2527,7 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
 // This is deliberately absent outside the test runtime. It lets regression tests
 // exercise the actual worker completion path without creating an HTTP backdoor.
 export const workforceTestHooks = process.env.NODE_ENV === 'test'
-  ? { handleTaskRoutingAsync, selectCollaborativeTeam }
+  ? { handleTaskRoutingAsync, selectCollaborativeTeam, resetRateLimits: () => rateLimitBuckets.clear() }
   : undefined;
 
 app.post('/api/task', async (req, res) => {
@@ -2767,6 +2780,83 @@ app.get('/api/mcp/marketplace', (_req, res) => {
       { id: 'context7', name: 'Context7 Docs', description: 'Read-only documentation search', category: 'Knowledge', icon: '📚' }
     ]
   });
+});
+
+app.get('/api/mcp/registry/search', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  if (isRateLimited(rateLimitKey(req, 'mcp-registry-search'), 20, 60_000)) return res.status(429).json({ error: 'Registry search is temporarily rate limited.' });
+  try {
+    const result = await searchMcpRegistry(String(req.query.q || ''), String(req.query.cursor || ''), Number(req.query.limit || 12));
+    res.json(result);
+  } catch (error: any) {
+    reportOperationalFailure('mcp.registry_search', error, { tenant_hash: anonymizeIdentifier(user.company_id || DEFAULT_COMPANY_ID), request_id: getRequestId(req) });
+    res.status(502).json({ error: String(error?.message || 'MCP Registry search failed').slice(0, 240), request_id: getRequestId(req) });
+  }
+});
+
+app.get('/api/mcp/registry/servers/:name', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  if (isRateLimited(rateLimitKey(req, 'mcp-registry-detail'), 30, 60_000)) return res.status(429).json({ error: 'Registry lookups are temporarily rate limited.' });
+  try {
+    const server = await getMcpRegistryServer(decodeURIComponent(req.params.name));
+    if (!server) return res.status(404).json({ error: 'MCP server was not found in the official Registry.' });
+    res.json({ server });
+  } catch (error: any) {
+    reportOperationalFailure('mcp.registry_detail', error, { tenant_hash: anonymizeIdentifier(user.company_id || DEFAULT_COMPANY_ID), request_id: getRequestId(req) });
+    res.status(502).json({ error: String(error?.message || 'MCP Registry lookup failed').slice(0, 240), request_id: getRequestId(req) });
+  }
+});
+
+app.post('/api/mcp/registry/connect', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  if (isRateLimited(rateLimitKey(req, 'mcp-registry-connect'), 10, 60_000)) return res.status(429).json({ error: 'MCP connection attempts are temporarily rate limited.' });
+  const registryName = String(req.body?.registry_name || '').trim().slice(0, 180);
+  const serverUrl = String(req.body?.server_url || '').trim();
+  if (!registryName || !serverUrl) return res.status(400).json({ error: 'Choose a Registry server and one of its advertised remote URLs.' });
+  try {
+    const registryServer = await getMcpRegistryServer(registryName);
+    if (!registryServer) return res.status(404).json({ error: 'MCP server was not found in the official Registry.' });
+    const advertisedRemote = registryServer.remotes.find((remote) => remote.type === 'streamable-http' && remote.url === serverUrl);
+    if (!advertisedRemote) return res.status(400).json({ error: 'The selected URL is not an advertised streamable HTTP remote for this Registry server.' });
+    let validatedUrl: string;
+    try {
+      validatedUrl = validateRemoteMcpUrl(advertisedRemote.url);
+    } catch (error: any) {
+      return res.status(400).json({ error: String(error?.message || 'The advertised MCP remote is unsafe.').slice(0, 240) });
+    }
+    const headerName = String(req.body?.auth_header_name || 'Authorization').trim();
+    const headerPrefix = String(req.body?.auth_header_prefix ?? 'Bearer').trim();
+    if (!/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,120}$/.test(headerName)) return res.status(400).json({ error: 'The authentication header name is invalid.' });
+    if (!/^[A-Za-z0-9._-]{0,24}$/.test(headerPrefix)) return res.status(400).json({ error: 'The authentication header prefix is invalid.' });
+    const authToken = String(req.body?.auth_token || '').trim().slice(0, 2_000);
+    const encryptedToken = authToken ? encryptConnectorCredentials({ access_token: authToken, header_name: headerName, header_prefix: headerPrefix }) : undefined;
+    const workforce = activeWorkforce(companyId);
+    const requestedEmployeeIds = Array.isArray(req.body?.employee_ids) ? req.body.employee_ids.map((id: unknown) => String(id)).slice(0, 20) : [];
+    const selectedEmployees = (req.body?.all_employees === false ? workforce.filter((employee) => requestedEmployeeIds.includes(employee.id)) : workforce).filter((employee, index, list) => list.findIndex((candidate) => candidate.id === employee.id) === index);
+    if (!selectedEmployees.length) return res.status(400).json({ error: 'No active employees were selected for this MCP server.' });
+    const now = new Date().toISOString();
+    const probe: TenantConnector = {
+      id: Date.now(), company_id: companyId, employee_id: selectedEmployees[0].id, name: registryServer.name, connection_type: 'streamable_http', server_url: validatedUrl,
+      access_level: 'requires_approval', status: 'needs_configuration', config: sanitizeConnectorConfig({ registry_server_name: registryServer.name, registry_directory_url: registryServer.directory_url, registry_repository_url: registryServer.repository_url, registry_remote_type: advertisedRemote.type, auth_header_name: headerName, auth_header_prefix: headerPrefix }), discovered_tools: [], tool_grants: [], auth_token_encrypted: encryptedToken, created_at: now, updated_at: now
+    };
+    const discoveredTools = await discoverMcpTools(probe);
+    const grants = discoveredTools.map((tool) => ({ tool_name: tool.name, access_level: tool.risk === 'write' ? 'requires_approval' as const : 'read_only' as const }));
+    const connections: TenantConnector[] = [];
+    for (const [index, employee] of selectedEmployees.entries()) {
+      const connection: TenantConnector = { ...probe, id: Date.now() + index, employee_id: employee.id, status: 'connected', discovered_tools: discoveredTools, tool_grants: grants, created_at: now, updated_at: now };
+      await persistMcpConnection(connection);
+      connections.push(connection);
+    }
+    await persistActivityLog(companyId, { id: Date.now(), sender: 'Manager', receiver: 'Caveworkers', kind: 'mcp.registry_connected', body: `${registryServer.name} was connected for ${connections.length} employees with ${grants.length} discovered tools.`, created_at: now });
+    res.status(201).json({ ok: true, server: registryServer, connections: connections.map(connectorPublicView), tools_discovered: discoveredTools.length, employees_connected: connections.length, notice: 'Connected to the tenant-owned MCP endpoint. Read tools are available to granted employees; write tools always require manager approval.' });
+  } catch (error: any) {
+    reportOperationalFailure('mcp.registry_connect', error, { tenant_hash: anonymizeIdentifier(companyId), registry_server: registryName, request_id: getRequestId(req) });
+    res.status(502).json({ error: String(error?.message || 'MCP server connection failed').slice(0, 240), request_id: getRequestId(req) });
+  }
 });
 
 app.get('/api/employees/:id/mcp-connections', async (req, res) => {
