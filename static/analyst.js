@@ -1,9 +1,10 @@
 (() => {
-  const state = { profile: null, sources: [], memory: [], runs: [], approvals: [], latestRun: null };
+  const state = { profile: null, sources: [], connectors: [], memory: [], runs: [], approvals: [], latestRun: null };
   const $ = (selector) => document.querySelector(selector);
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char]));
   const formatDate = (value) => value ? new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }).format(new Date(value)) : '—';
   const typeLabel = (kind) => ({ csv: 'CSV', google_sheets: 'Google Sheets', sql: 'SQL workspace' }[kind] || kind);
+  const connectorLabel = (kind) => ({ google_gmail: 'Gmail', google_sheets: 'Google Sheets', streamable_http: 'Custom MCP' }[kind] || kind);
 
   async function jsonRequest(url, options = {}) {
     const response = await fetch(url, { credentials: 'same-origin', ...options, headers: { 'Content-Type': 'application/json', ...(options.headers || {}) } });
@@ -24,6 +25,31 @@
     $('#analyst-source-count').textContent = `${state.sources.length} ${state.sources.length === 1 ? 'source' : 'sources'}`;
     $('#analyst-memory-count').textContent = `${state.memory.length} durable ${state.memory.length === 1 ? 'note' : 'notes'}`;
     $('#analyst-system-status').textContent = profile.active_in_workspace === false ? 'David not activated' : 'Analyst ready';
+  }
+
+  function renderConnectors() {
+    const node = $('#analyst-connector-list');
+    if (!node) return;
+    if (!state.connectors.length) { node.innerHTML = '<div class="analyst-empty-row">No connectors yet. Add Gmail, Sheets, or a custom MCP server above.</div>'; return; }
+    node.innerHTML = state.connectors.map((connector) => {
+      const isGoogle = connector.connection_type === 'google_gmail' || connector.connection_type === 'google_sheets';
+      const tools = connector.discovered_tools || [];
+      const grants = connector.tool_grants || [];
+      const toolMarkup = tools.length ? `<div class="connector-tools">${tools.slice(0, 12).map((tool) => { const grant = grants.find((item) => item.tool_name === tool.name); return `<div class="connector-tool"><span><strong>${esc(tool.name)}</strong><small>${esc(tool.description || (tool.risk === 'write' ? 'Write-capable tool' : 'Read-capable tool'))}</small></span><span class="connector-tool-actions">${grant ? `<b class="connector-grant">${esc(grant.access_level)}</b>` : `<button type="button" data-grant-tool="${esc(tool.name)}" data-connector-id="${connector.id}" data-access="read_only">Grant read</button><button type="button" data-grant-tool="${esc(tool.name)}" data-connector-id="${connector.id}" data-access="requires_approval">Grant HITL</button>`}</span></div>`; }).join('')}</div>` : '';
+      const action = isGoogle ? (connector.status === 'connected' ? '<span class="connector-connected">Connected</span>' : `<a class="connector-action" href="/api/employees/david/mcp-connections/${connector.id}/google/start?service=${encodeURIComponent(connector.connection_type)}">Connect Google</a>`) : `<button type="button" class="connector-action" data-discover-connector="${connector.id}">${tools.length ? 'Refresh tools' : 'Discover tools'}</button>`;
+      return `<article class="connector-card"><div class="connector-card-head"><div><strong>${esc(connector.name)}</strong><small>${esc(connectorLabel(connector.connection_type))}${connector.oauth_email ? ` · ${esc(connector.oauth_email)}` : ''}</small></div><div class="connector-card-actions">${action}<span class="source-state ${connector.status !== 'connected' ? 'pending' : ''}"><i></i>${esc(connector.status || 'needs_configuration')}</span><button type="button" class="source-remove" data-delete-connector="${connector.id}">Remove</button></div></div>${connector.server_url ? `<small class="connector-url">${esc(connector.server_url)}</small>` : ''}${toolMarkup}</article>`;
+    }).join('');
+    node.querySelectorAll('[data-discover-connector]').forEach((button) => button.addEventListener('click', async () => {
+      button.disabled = true; button.textContent = 'Discovering…';
+      try { await jsonRequest(`/api/employees/david/mcp-connections/${button.dataset.discoverConnector}/tools?refresh=1`); await loadAll(); } catch (error) { setMessage('connector-form-message', error.message, 'error'); } finally { button.disabled = false; }
+    }));
+    node.querySelectorAll('[data-grant-tool]').forEach((button) => button.addEventListener('click', async () => {
+      try { await jsonRequest(`/api/employees/david/mcp-connections/${button.dataset.connectorId}/tools/${encodeURIComponent(button.dataset.grantTool)}`, { method: 'POST', body: JSON.stringify({ access_level: button.dataset.access }) }); await loadAll(); } catch (error) { setMessage('connector-form-message', error.message, 'error'); }
+    }));
+    node.querySelectorAll('[data-delete-connector]').forEach((button) => button.addEventListener('click', async () => {
+      if (!confirm('Remove this tenant connector and revoke David access?')) return;
+      try { await jsonRequest(`/api/employees/david/mcp-connections/${button.dataset.deleteConnector}`, { method: 'DELETE' }); await loadAll(); } catch (error) { setMessage('connector-form-message', error.message, 'error'); }
+    }));
   }
 
   function renderSources() {
@@ -97,11 +123,11 @@
 
   async function loadAll() {
     try {
-      const [profile, sources, memory, runs, approvals] = await Promise.all([
-        jsonRequest('/api/analyst/profile'), jsonRequest('/api/analyst/data-sources'), jsonRequest('/api/analyst/memory?type=long_term'), jsonRequest('/api/analyst/runs'), jsonRequest('/api/analyst/approvals')
+      const [profile, sources, connectors, memory, runs, approvals] = await Promise.all([
+        jsonRequest('/api/analyst/profile'), jsonRequest('/api/analyst/data-sources'), jsonRequest('/api/analyst/connectors'), jsonRequest('/api/analyst/memory?type=long_term'), jsonRequest('/api/analyst/runs'), jsonRequest('/api/analyst/approvals')
       ]);
-      state.profile = profile; state.sources = sources.sources || []; state.memory = memory.memory || []; state.runs = runs.runs || []; state.approvals = approvals.approvals || [];
-      renderProfile(); renderSources(); renderMemory(); renderApprovals(); renderRuns();
+      state.profile = profile; state.sources = sources.sources || []; state.connectors = connectors.connections || profile.connectors || []; state.memory = memory.memory || []; state.runs = runs.runs || []; state.approvals = approvals.approvals || [];
+      renderProfile(); renderSources(); renderConnectors(); renderMemory(); renderApprovals(); renderRuns();
       if (state.runs[0] && !state.latestRun) showRun(state.runs[0]);
     } catch (error) {
       $('#analyst-system-status').textContent = 'Needs attention';
@@ -111,6 +137,21 @@
 
   $('#source-kind')?.addEventListener('change', () => {
     const isCsv = $('#source-kind').value === 'csv'; $('#source-csv-field').hidden = !isCsv; $('#source-url-field').hidden = isCsv;
+  });
+
+  $('#connector-type')?.addEventListener('change', () => {
+    const custom = $('#connector-type').value === 'streamable_http';
+    $('#connector-url-field').hidden = !custom; $('#connector-token-field').hidden = !custom;
+    if (!custom) { $('#connector-url').value = ''; $('#connector-token').value = ''; }
+  });
+
+  $('#connector-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const type = $('#connector-type').value; const custom = type === 'streamable_http';
+    const payload = { name: $('#connector-name').value.trim(), connection_type: type, access_level: $('#connector-access').value, server_url: custom ? $('#connector-url').value.trim() : undefined, auth_token: custom ? $('#connector-token').value.trim() : undefined, config: { notes: $('#connector-notes').value.trim() } };
+    if (!payload.name) return setMessage('connector-form-message', 'Name the connector first.', 'error');
+    if (custom && !payload.server_url) return setMessage('connector-form-message', 'Enter the custom MCP HTTPS URL.', 'error');
+    try { const response = await jsonRequest('/api/employees/david/mcp-connections', { method: 'POST', body: JSON.stringify(payload) }); $('#connector-form').reset(); $('#connector-type').dispatchEvent(new Event('change')); await loadAll(); setMessage('connector-form-message', response.notice || 'Connector saved. Connect or discover its tools next.', 'success'); } catch (error) { setMessage('connector-form-message', error.message, 'error'); }
   });
 
   $('#source-form')?.addEventListener('submit', async (event) => {

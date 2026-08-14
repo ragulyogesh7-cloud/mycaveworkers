@@ -5,11 +5,13 @@ import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import ejs from 'ejs';
 import crypto from 'crypto';
+import net from 'net';
 import Razorpay from 'razorpay';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { GoogleGenAI } from '@google/genai';
+import { google } from 'googleapis';
 
 dotenv.config();
 
@@ -55,6 +57,11 @@ const ANALYST_MODEL = process.env.ANALYST_MODEL || 'qwen/qwen3-30b-a3b';
 const OPENROUTER_TIMEOUT_MS = Math.min(Math.max(Number(process.env.OPENROUTER_TIMEOUT_MS || '30000') || 30000, 5000), 60000);
 const ANALYST_MAX_TOKENS = Math.min(Math.max(Number(process.env.ANALYST_MAX_TOKENS || '900') || 900, 128), 2000);
 const PUBLIC_APP_URL = (process.env.PUBLIC_APP_URL || 'https://caveworkers.app').replace(/\/$/, '');
+const GOOGLE_OAUTH_CLIENT_ID = (process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim();
+const GOOGLE_OAUTH_CLIENT_SECRET = (process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
+const GOOGLE_OAUTH_REDIRECT_URI = (process.env.GOOGLE_OAUTH_REDIRECT_URI || `${PUBLIC_APP_URL}/api/google/oauth/callback`).replace(/\/$/, '');
+const MCP_TOKEN_ENCRYPTION_KEY = (process.env.MCP_TOKEN_ENCRYPTION_KEY || '').trim();
+const OAUTH_STATE_SECRET = (process.env.FLASK_SECRET || '').trim();
 
 type AnalystNarrativeResult = {
   text: string;
@@ -379,6 +386,26 @@ interface AnalystDataSource {
   updated_at: string;
 }
 
+interface TenantConnector {
+  id: number;
+  company_id: string;
+  employee_id: string;
+  name: string;
+  connection_type: 'google_gmail' | 'google_sheets' | 'streamable_http' | 'git_repository' | 'custom_skill';
+  server_url?: string;
+  access_level: 'read_only' | 'requires_approval' | 'read_write';
+  status: 'connected' | 'needs_configuration' | 'error';
+  config: Record<string, any>;
+  discovered_tools: Array<{ name: string; description?: string; inputSchema?: any; risk?: 'read' | 'write' }>;
+  tool_grants: Array<{ tool_name: string; access_level: 'read_only' | 'requires_approval' | 'read_write' }>;
+  auth_scopes?: string[];
+  oauth_email?: string;
+  auth_token_encrypted?: string;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 interface AnalystMemory {
   id: string;
   company_id: string;
@@ -500,6 +527,207 @@ async function persistCompany(company: Company) {
 
 function analystTenantCollection(companyId: string, collection: string) {
   return firestoreDb?.collection('tenants').doc(companyId).collection(collection) || null;
+}
+
+function connectorCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'connectors');
+}
+
+function connectorPublicView(connection: TenantConnector) {
+  const { auth_token_encrypted: _secret, ...safe } = connection;
+  return { ...safe, auth_configured: Boolean(connection.auth_token_encrypted) };
+}
+
+function getMcpEncryptionKey(): Buffer | null {
+  if (!MCP_TOKEN_ENCRYPTION_KEY) return null;
+  return crypto.createHash('sha256').update(MCP_TOKEN_ENCRYPTION_KEY).digest();
+}
+
+function encryptConnectorCredentials(value: Record<string, any>): string {
+  const key = getMcpEncryptionKey();
+  if (!key) throw new Error('MCP_TOKEN_ENCRYPTION_KEY is not configured on this server.');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return [iv.toString('base64url'), tag.toString('base64url'), ciphertext.toString('base64url')].join('.');
+}
+
+function decryptConnectorCredentials(value?: string): Record<string, any> | null {
+  if (!value) return null;
+  const key = getMcpEncryptionKey();
+  if (!key) return null;
+  try {
+    const [ivText, tagText, ciphertextText] = value.split('.');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivText, 'base64url'));
+    decipher.setAuthTag(Buffer.from(tagText, 'base64url'));
+    const plaintext = Buffer.concat([decipher.update(Buffer.from(ciphertextText, 'base64url')), decipher.final()]).toString('utf8');
+    return JSON.parse(plaintext);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function sanitizeConnectorConfig(config: Record<string, any> = {}) {
+  return { notes: typeof config.notes === 'string' ? config.notes.slice(0, 800) : '', repo_path: typeof config.repo_path === 'string' ? config.repo_path.slice(0, 400) : undefined };
+}
+
+async function persistMcpConnection(connection: TenantConnector) {
+  const key = `${connection.company_id}:${connection.employee_id}`;
+  const list = db.mcpConnections.get(key) || [];
+  const index = list.findIndex((entry: TenantConnector) => entry.id === connection.id);
+  if (index >= 0) list[index] = connection; else list.unshift(connection);
+  db.mcpConnections.set(key, list.slice(0, 100));
+  const collection = connectorCollection(connection.company_id);
+  if (collection) await collection.doc(`${connection.employee_id}_${connection.id}`).set(stripUndefined(connection), { merge: true });
+}
+
+async function loadMcpConnections(companyId: string, employeeId: string): Promise<TenantConnector[]> {
+  const key = `${companyId}:${employeeId}`;
+  const cached = db.mcpConnections.get(key);
+  if (cached) return cached as TenantConnector[];
+  const collection = connectorCollection(companyId);
+  if (collection) {
+    try {
+      const snapshot = await collection.get();
+      const entries = snapshot.docs.map((doc) => ({ id: Number(doc.data()?.id || doc.id.split('_').pop()), ...(doc.data() || {}) } as TenantConnector)).filter((entry) => entry.employee_id === employeeId);
+      db.mcpConnections.set(key, entries);
+      return entries;
+    } catch (error) {
+      console.warn('Could not load tenant connectors:', error);
+    }
+  }
+  db.mcpConnections.set(key, []);
+  return [];
+}
+
+function isPrivateOrLocalHost(hostname: string) {
+  const normalized = hostname.toLowerCase().replace(/\\.$/, '');
+  if (normalized === 'localhost' || normalized.endsWith('.local') || normalized === '0.0.0.0' || normalized === '::1') return true;
+  const ipVersion = net.isIP(normalized);
+  if (ipVersion !== 4) return false;
+  const octets = normalized.split('.').map(Number);
+  return octets[0] === 10 || octets[0] === 127 || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) || (octets[0] === 192 && octets[1] === 168) || (octets[0] === 169 && octets[1] === 254);
+}
+
+function validateRemoteMcpUrl(value: unknown): string {
+  const raw = String(value || '').trim();
+  if (!raw) throw new Error('A remote MCP HTTPS URL is required.');
+  let parsed: URL;
+  try { parsed = new URL(raw); } catch (_error) { throw new Error('Enter a valid remote MCP URL.'); }
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && !IS_PRODUCTION)) throw new Error('Remote MCP servers must use HTTPS in production.');
+  if (parsed.username || parsed.password || isPrivateOrLocalHost(parsed.hostname)) throw new Error('Private hosts and embedded URL credentials are not allowed.');
+  return parsed.toString();
+}
+
+function oauthStateSign(payload: Record<string, any>) {
+  if (IS_PRODUCTION && !OAUTH_STATE_SECRET) throw new Error('FLASK_SECRET is required for Google OAuth state protection.');
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = crypto.createHmac('sha256', OAUTH_STATE_SECRET || 'caveworkers-development-oauth-state').update(encoded).digest('base64url');
+  return `${encoded}.${signature}`;
+}
+
+function oauthStateVerify(value: string): Record<string, any> | null {
+  try {
+    const [encoded, signature] = value.split('.');
+    const expected = crypto.createHmac('sha256', OAUTH_STATE_SECRET || 'caveworkers-development-oauth-state').update(encoded).digest('base64url');
+    if (!encoded || !signature || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    if (!payload.iat || Date.now() - Number(payload.iat) > 10 * 60 * 1000) return null;
+    return payload;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function googleOAuthClient() {
+  if (!GOOGLE_OAUTH_CLIENT_ID || !GOOGLE_OAUTH_CLIENT_SECRET) throw new Error('Google OAuth client credentials are not configured.');
+  return new google.auth.OAuth2(GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI);
+}
+
+function googleScopesFor(connectionType: TenantConnector['connection_type']) {
+  return connectionType === 'google_gmail'
+    ? ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/gmail.readonly']
+    : ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/spreadsheets.readonly'];
+}
+
+function parseSpreadsheetId(value: string) {
+  const match = String(value || '').match(/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  return match?.[1] || String(value || '').trim();
+}
+
+function isLikelyWriteTool(toolName: string) {
+  return /(^|[._:-])(write|send|create|update|delete|remove|post|put|patch|execute|run|append|move)([._:-]|$)/i.test(toolName) || /send|write|delete|update|create|post|execute/i.test(toolName);
+}
+
+function parseMcpResponse(text: string): any {
+  try { return JSON.parse(text); } catch (_error) {
+    const events = text.split(/\\r?\\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).filter(Boolean);
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      try { return JSON.parse(events[index]); } catch (_ignored) { /* continue */ }
+    }
+  }
+  throw new Error('The MCP server returned an unreadable response.');
+}
+
+async function mcpRpc(connection: TenantConnector, method: string, params: Record<string, any>, sessionId?: string) {
+  const credentials = decryptConnectorCredentials(connection.auth_token_encrypted);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2025-11-25' };
+  if (credentials?.access_token) headers.Authorization = `Bearer ${credentials.access_token}`;
+  if (sessionId) headers['Mcp-Session-Id'] = sessionId;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(connection.server_url!, { method: 'POST', headers, signal: controller.signal, body: JSON.stringify({ jsonrpc: '2.0', id: crypto.randomBytes(4).toString('hex'), method, params }) });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`MCP server returned HTTP ${response.status}.`);
+    return { data: parseMcpResponse(text), sessionId: response.headers.get('mcp-session-id') || sessionId };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function discoverMcpTools(connection: TenantConnector) {
+  const initialized = await mcpRpc(connection, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'Caveworkers', version: '1.0.0' } });
+  const listed = await mcpRpc(connection, 'tools/list', {}, initialized.sessionId);
+  const tools = Array.isArray(listed.data?.result?.tools) ? listed.data.result.tools : [];
+  return tools.slice(0, 100).map((tool: any) => ({ name: String(tool.name || '').slice(0, 120), description: String(tool.description || '').slice(0, 500), inputSchema: tool.inputSchema, risk: isLikelyWriteTool(String(tool.name || '')) ? 'write' : 'read' })).filter((tool: any) => tool.name);
+}
+
+async function getGoogleConnection(companyId: string, connectionId: number, type: 'google_gmail' | 'google_sheets') {
+  const connections = await loadMcpConnections(companyId, 'david');
+  const connection = connections.find((entry) => entry.id === connectionId && entry.connection_type === type && entry.status === 'connected');
+  if (!connection || !connection.auth_token_encrypted) throw new Error('The requested Google connector is not connected for David.');
+  const credentials = decryptConnectorCredentials(connection.auth_token_encrypted);
+  if (!credentials) throw new Error('The Google connector credentials cannot be decrypted. Rotate the connector and reconnect it.');
+  const oauth2 = googleOAuthClient();
+  oauth2.setCredentials(credentials);
+  return { connection, oauth2 };
+}
+
+async function readGoogleSheetValues(companyId: string, connectionId: number, sheetReference: string, range?: string) {
+  const { oauth2 } = await getGoogleConnection(companyId, connectionId, 'google_sheets');
+  const sheets = google.sheets({ version: 'v4', auth: oauth2 });
+  const spreadsheetId = parseSpreadsheetId(sheetReference);
+  if (!spreadsheetId || spreadsheetId.length < 10) throw new Error('A valid Google Sheets URL or spreadsheet ID is required.');
+  const metadata = await sheets.spreadsheets.get({ spreadsheetId, fields: 'properties(title),sheets(properties(title))' });
+  const firstSheet = metadata.data.sheets?.[0]?.properties?.title || 'Sheet1';
+  const boundedRange = String(range || `'${firstSheet}'!A1:Z50`).slice(0, 200);
+  const valuesResponse = await sheets.spreadsheets.values.get({ spreadsheetId, range: boundedRange, majorDimension: 'ROWS' });
+  const values = (valuesResponse.data.values || []).slice(0, 50).map((row) => (row || []).slice(0, 26).map((cell) => String(cell ?? '').slice(0, 500)));
+  return { spreadsheet_id: spreadsheetId, title: metadata.data.properties?.title || 'Google Sheet', range: boundedRange, values };
+}
+
+async function searchGmail(companyId: string, connectionId: number, query: string, maxResults = 10) {
+  const { oauth2 } = await getGoogleConnection(companyId, connectionId, 'google_gmail');
+  const gmail = google.gmail({ version: 'v1', auth: oauth2 });
+  const listed = await gmail.users.messages.list({ userId: 'me', q: String(query || '').slice(0, 500), maxResults: Math.min(Math.max(Number(maxResults) || 10, 1), 10) });
+  const messages = await Promise.all((listed.data.messages || []).slice(0, 10).map(async (message) => {
+    const detail = await gmail.users.messages.get({ userId: 'me', id: message.id!, format: 'metadata', metadataHeaders: ['From', 'To', 'Subject', 'Date'] });
+    const headers = Object.fromEntries((detail.data.payload?.headers || []).map((header) => [header.name || '', header.value || '']));
+    return { id: message.id, thread_id: message.threadId, snippet: detail.data.snippet || '', headers };
+  }));
+  return { query: String(query || '').slice(0, 500), messages };
 }
 
 async function persistAnalystDataSource(sourceRecord: AnalystDataSource) {
@@ -638,16 +866,25 @@ async function runAnalystLoop(input: { companyId: string; managerName: string; q
   const taskId = db.nextTaskId++;
   const runId = `analysis_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
   const now = new Date().toISOString();
+  let liveEvidence = '';
+  if (sourceRecord?.kind === 'google_sheets' && sourceRecord.status === 'connected' && sourceRecord.metadata?.connection_id) {
+    try {
+      const sheetResult = await readGoogleSheetValues(input.companyId, Number(sourceRecord.metadata.connection_id), sourceRecord.metadata.sheet_url);
+      liveEvidence = `Live read-only sample from ${sheetResult.title} (${sheetResult.range}): ${JSON.stringify(sheetResult.values.slice(0, 8))}`;
+    } catch (error: any) {
+      liveEvidence = `The Google Sheets connector was selected but the live read failed: ${String(error?.message || 'unknown error').slice(0, 180)}`;
+    }
+  }
   const trace: AnalystRun['trace'] = [
     { stage: 'perceive', body: `Loaded tenant-scoped context: ${sources.length} source(s) and ${memories.filter((memory) => memory.memory_type === 'long_term').length} durable memory item(s).`, created_at: now },
     { stage: 'plan', body: `Planned a read-only ${outputFormat} workflow with manager review before any external action.`, created_at: new Date().toISOString() },
-    { stage: 'act', body: sourceRecord?.status === 'connected' ? `Prepared a read-only analysis against ${sourceRecord.name}; no source write was attempted.` : 'Prepared a transparent preview because a live source is not fully connected; no data access was claimed.', created_at: new Date().toISOString() }
+    { stage: 'act', body: sourceRecord?.status === 'connected' ? `Prepared a read-only analysis against ${sourceRecord.name}; no source write was attempted.${liveEvidence ? ' Live evidence was fetched within bounded limits.' : ''}` : 'Prepared a transparent preview because a live source is not fully connected; no data access was claimed.', created_at: new Date().toISOString() }
   ];
   const chart = createPreviewChart(question, sourceRecord);
   const verification = sourceRecord?.status === 'connected' ? 'The source is connected read-only. Verify material decisions against the live result before distribution.' : 'No live data connection is configured, so no business fact is presented as verified. Connect a CSV, Sheets, or SQL source to replace this preview with a live query.';
   const preferences = memories.filter((memory) => memory.memory_type === 'long_term').slice(0, 3).map((memory) => `• ${memory.content}`).join('\n') || 'No durable reporting preferences have been saved yet.';
-  const deterministicReport = `### Analysis brief\n\n**Question:** ${question}\n\n**Source status:** ${analystSourceSummary(sourceRecord)}\n\n**Current read:** David has produced a reviewable ${outputFormat} analysis structure with a transparent trend preview.\n\n**What to validate next:**\n1. Confirm reporting period, metric definitions, and exclusions.\n2. Run the approved read-only source query or CSV calculation.\n3. Review material assumptions before sharing externally.\n\n**Manager context applied:**\n${preferences}\n\n**Controls:** ${verification}`;
-  const narrative = await generateAnalystNarrative(`Business question: ${question}\nSource: ${analystSourceSummary(sourceRecord)}\nKnown tenant preferences: ${preferences}\nWrite no more than five short paragraphs. Be explicit about previews, missing data, and validation.`, input.companyId);
+  const deterministicReport = `### Analysis brief\n\n**Question:** ${question}\n\n**Source status:** ${analystSourceSummary(sourceRecord)}\n\n**Live evidence:** ${liveEvidence || 'No live evidence was fetched.'}\n\n**Current read:** David has produced a reviewable ${outputFormat} analysis structure with a transparent trend preview.\n\n**What to validate next:**\n1. Confirm reporting period, metric definitions, and exclusions.\n2. Run the approved read-only source query or CSV calculation.\n3. Review material assumptions before sharing externally.\n\n**Manager context applied:**\n${preferences}\n\n**Controls:** ${verification}`;
+  const narrative = await generateAnalystNarrative(`Business question: ${question}\nSource: ${analystSourceSummary(sourceRecord)}\nLive evidence: ${liveEvidence || 'No live evidence was fetched.'}\nKnown tenant preferences: ${preferences}\nWrite no more than five short paragraphs. Be explicit about previews, missing data, and validation.`, input.companyId);
   const report = narrative.text ? `${deterministicReport}\n\n---\n\n### David’s executive note\n\n${narrative.text}` : deterministicReport;
   trace.push({ stage: 'reflect', body: narrative.text ? `Applied ${narrative.provider}${narrative.model ? ` (${narrative.model})` : ''} narrative with ${narrative.latency_ms} ms latency.` : `No model narrative was applied; returned a deterministic result with status ${narrative.error_code || 'unavailable'}.`, created_at: new Date().toISOString() });
   await persistAnalystMemory({ id: `working_${runId}`, company_id: input.companyId, memory_type: 'working', session_id: runId, category: 'task_state', content: `Run ${runId}: ${question.slice(0, 420)}`, confidence: 1, created_at: now, expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() });
@@ -1724,7 +1961,8 @@ app.get('/api/analyst/profile', async (req, res) => {
   const employee = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === 'david');
   const sources = await loadAnalystDataSources(companyId);
   const memory = await loadAnalystMemory(companyId, 'long_term');
-  res.json({ employee: analyst, active_in_workspace: Boolean(employee), configured_tools: employee?.tools || analyst?.default_tools || [], model: { provider: OPENROUTER_KEY_READY ? 'OpenRouter' : (genAIClient ? 'Gemini fallback' : 'Preview planner'), name: OPENROUTER_KEY_READY ? ANALYST_MODEL : 'Configure OPENROUTER_API_KEY for Qwen3' }, source_count: sources.length, memory_count: memory.length, safety: { read_only_by_default: true, external_actions_require_approval: true, tenant_scoped: true } });
+  const connectors = await loadMcpConnections(companyId, 'david');
+  res.json({ employee: analyst, active_in_workspace: Boolean(employee), configured_tools: employee?.tools || analyst?.default_tools || [], connectors: connectors.map(connectorPublicView), model: { provider: OPENROUTER_KEY_READY ? 'OpenRouter' : (genAIClient ? 'Gemini fallback' : 'Preview planner'), name: OPENROUTER_KEY_READY ? ANALYST_MODEL : 'Configure OPENROUTER_API_KEY for Qwen3' }, source_count: sources.length, memory_count: memory.length, safety: { read_only_by_default: true, external_actions_require_approval: true, tenant_scoped: true } });
 });
 
 app.get('/api/analyst/data-sources', async (req, res) => {
@@ -1745,11 +1983,17 @@ app.post('/api/analyst/data-sources', async (req, res) => {
   if (typeof csv_text === 'string' && csv_text.length > 300000) return res.status(413).json({ error: 'CSV import is limited to 300 KB in this workspace preview.' });
   let metadata: Record<string, any> = {}; let status: AnalystDataSource['status'] = 'needs_configuration'; let sourceName = String(name || database_label || sheet_url || '').trim();
   if (kind === 'csv') { try { metadata = parseCsvPreview(csv_text); status = 'connected'; sourceName = sourceName || 'Imported CSV'; } catch (error: any) { return res.status(400).json({ error: error.message || 'Unable to read this CSV.' }); } }
-  else if (kind === 'google_sheets') metadata = { sheet_url: String(sheet_url || '').trim() }; else metadata = { database_label: String(database_label || name || '').trim() };
+  else if (kind === 'google_sheets') {
+    const connections = await loadMcpConnections(companyId, 'david');
+    const sheetsConnection = connections.find((entry) => entry.connection_type === 'google_sheets' && entry.status === 'connected' && entry.tool_grants.some((grant) => grant.tool_name === 'sheets.read'));
+    if (!sheetsConnection) return res.status(409).json({ error: 'Connect a Google Sheets account for David before registering a live Sheets source.' });
+    metadata = { sheet_url: String(sheet_url || '').trim(), connection_id: sheetsConnection.id };
+    status = 'connected';
+  } else metadata = { database_label: String(database_label || name || '').trim() };
   const now = new Date().toISOString();
   const sourceRecord: AnalystDataSource = { id: `source_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, company_id: companyId, kind, name: sourceName, status, access_level: 'read_only', metadata, created_at: now, updated_at: now };
   await persistAnalystDataSource(sourceRecord);
-  res.status(201).json({ ok: true, source: sourceRecord, notice: status === 'connected' ? 'CSV imported as a tenant-scoped read-only source.' : 'Connection shell saved. Add secure OAuth or read-only database credentials before live data can be queried.' });
+  res.status(201).json({ ok: true, source: sourceRecord, notice: status === 'connected' ? (kind === 'google_sheets' ? 'Google Sheets is connected read-only and can be queried by David.' : 'CSV imported as a tenant-scoped read-only source.') : 'Connection shell saved. Add secure OAuth or read-only database credentials before live data can be queried.' });
 });
 
 app.delete('/api/analyst/data-sources/:id', async (req, res) => {
@@ -1842,63 +2086,241 @@ app.get('/api/mcp/marketplace', (_req, res) => {
   });
 });
 
-app.get('/api/employees/:id/mcp-connections', (req, res) => {
+app.get('/api/employees/:id/mcp-connections', async (req, res) => {
   const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const empId = req.params.id;
-  const key = `${companyId}:${empId}`;
-  const list = db.mcpConnections.get(key) || [];
-  res.json(list);
+  const list = await loadMcpConnections(companyId, req.params.id);
+  res.json(list.map(connectorPublicView));
 });
 
-app.post('/api/employees/:id/mcp-connections', (req, res) => {
+app.post('/api/employees/:id/mcp-connections', async (req, res) => {
   const user = getAuthUser(req);
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
   const empId = req.params.id;
-  const key = `${companyId}:${empId}`;
-  const list = db.mcpConnections.get(key) || [];
-
-  const conn = {
-    id: Date.now(),
-    name: req.body.name || 'Custom Connector',
-    connection_type: req.body.connection_type || 'streamable_http',
-    server_url: req.body.server_url || 'https://mcp.example.com',
-    access_level: req.body.access_level || 'requires_approval',
-    status: 'connected',
-    config: req.body.config || {},
-    discovered_tools: [{ name: 'mcp_query', description: 'Query MCP endpoint' }]
+  const marketplace = ({
+    postgres: { name: 'PostgreSQL Server', tools: [{ name: 'sql.query', description: 'Read-only SQL query', risk: 'read' as const }] },
+    github: { name: 'GitHub Integration', tools: [{ name: 'github.repo.read', description: 'Read repository context', risk: 'read' as const }, { name: 'github.create_pr', description: 'Create a pull request', risk: 'write' as const }] },
+    context7: { name: 'Context7 Docs', tools: [{ name: 'context7.search', description: 'Search documentation', risk: 'read' as const }] }
+  } as Record<string, { name: string; tools: Array<{ name: string; description: string; risk: 'read' | 'write' }> }>)[String(req.body?.marketplace_id || '')];
+  const connectionType = (marketplace ? 'custom_skill' : String(req.body?.connection_type || 'streamable_http')) as TenantConnector['connection_type'];
+  const allowedTypes: TenantConnector['connection_type'][] = ['google_gmail', 'google_sheets', 'streamable_http', 'git_repository', 'custom_skill'];
+  if (!allowedTypes.includes(connectionType)) return res.status(400).json({ error: 'Unsupported connector type.' });
+  const name = String(req.body?.name || marketplace?.name || 'Custom Connector').trim().slice(0, 120);
+  if (!name) return res.status(400).json({ error: 'A connector name is required.' });
+  let serverUrl: string | undefined;
+  if (connectionType === 'streamable_http') {
+    try { serverUrl = validateRemoteMcpUrl(req.body?.server_url); } catch (error: any) { return res.status(400).json({ error: error.message }); }
+  }
+  let encryptedToken: string | undefined;
+  const authToken = String(req.body?.auth_token || '').trim();
+  if (authToken) {
+    try { encryptedToken = encryptConnectorCredentials({ access_token: authToken }); } catch (error: any) { return res.status(503).json({ error: error.message }); }
+  }
+  const now = new Date().toISOString();
+  const connection: TenantConnector = {
+    id: Date.now(), company_id: companyId, employee_id: empId, name, connection_type: connectionType,
+    server_url: serverUrl, access_level: ['read_only', 'requires_approval', 'read_write'].includes(req.body?.access_level) ? req.body.access_level : 'requires_approval',
+    status: marketplace ? 'connected' : 'needs_configuration',
+    config: sanitizeConnectorConfig({ notes: req.body?.config?.notes, repo_path: req.body?.config?.repo_path, marketplace_id: req.body?.marketplace_id }),
+    discovered_tools: marketplace?.tools || [], tool_grants: marketplace?.tools?.map((tool) => ({ tool_name: tool.name, access_level: req.body?.access_level === 'read_write' && tool.risk === 'read' ? 'read_write' : tool.risk === 'write' ? 'requires_approval' : 'read_only' })) || [], created_at: now, updated_at: now
   };
-  list.push(conn);
-  db.mcpConnections.set(key, list);
-
-  res.status(201).json({ ok: true, connection: conn, tools_discovered: true });
+  await persistMcpConnection(connection);
+  res.status(201).json({ ok: true, connection: connectorPublicView(connection), tools_discovered: false, notice: connectionType === 'google_gmail' || connectionType === 'google_sheets' ? 'Connector saved. Start Google OAuth to grant David read-only access.' : 'Connector saved. Discover tools and grant them per-tool before David can use this server.' });
 });
 
-app.get('/api/employees/:id/mcp-connections/:connectionId/tools', (req, res) => {
-  res.json({
-    discovered: [
-      { name: 'mcp_query', description: 'Query MCP server data' },
-      { name: 'mcp_write', description: 'Write or mutate record' }
-    ]
-  });
-});
-
-app.post('/api/employees/:id/mcp-connections/:connectionId/test', (_req, res) => {
-  res.json({ ok: true, message: 'Connection health verified.' });
-});
-
-app.delete('/api/employees/:id/mcp-connections/:connectionId', (req, res) => {
+app.get('/api/employees/:id/mcp-connections/:connectionId/google/start', async (req, res) => {
   const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const connectionId = Number(req.params.connectionId);
+  const requestedType = String(req.query.service || '') as 'google_gmail' | 'google_sheets';
+  const connections = await loadMcpConnections(companyId, req.params.id);
+  const connection = connections.find((entry) => entry.id === connectionId && (entry.connection_type === requestedType || (!requestedType && ['google_gmail', 'google_sheets'].includes(entry.connection_type))));
+  const type = connection?.connection_type as 'google_gmail' | 'google_sheets';
+  if (!connection || !['google_gmail', 'google_sheets'].includes(type)) return res.status(400).json({ error: 'Choose Gmail or Google Sheets.' });
+  if (!connection) return res.status(404).json({ error: 'Google connector not found.' });
+  try {
+    const state = oauthStateSign({ uid: user?.uid, company_id: companyId, employee_id: req.params.id, connection_id: connectionId, connection_type: type, iat: Date.now() });
+    res.cookie('cw_google_oauth_state', state, { httpOnly: true, sameSite: 'lax', secure: IS_PRODUCTION, maxAge: 10 * 60 * 1000 });
+    const oauth2 = googleOAuthClient();
+    return res.redirect(oauth2.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: googleScopesFor(type), state }));
+  } catch (error: any) {
+    return res.status(503).json({ error: error.message || 'Google OAuth is not configured.' });
+  }
+});
+
+app.get('/api/google/oauth/callback', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).send('Your Caveworkers session expired. Return to the app and start Google connection again.');
+  const state = String(req.query.state || '');
+  const payload = oauthStateVerify(state);
+  if (!payload || payload.uid !== user.uid || payload.company_id !== (user.company_id || DEFAULT_COMPANY_ID) || req.cookies?.cw_google_oauth_state !== state) return res.status(400).send('Google OAuth state validation failed. Please restart the connection from Caveworkers.');
+  if (req.query.error) return res.redirect(`/settings?connector_error=${encodeURIComponent(String(req.query.error))}`);
+  const code = String(req.query.code || '');
+  if (!code) return res.status(400).send('Google did not return an authorization code.');
+  try {
+    const oauth2 = googleOAuthClient();
+    const tokenResponse = await oauth2.getToken(code);
+    const tokens = tokenResponse.tokens;
+    const connections = await loadMcpConnections(payload.company_id, payload.employee_id);
+    const connection = connections.find((entry) => entry.id === Number(payload.connection_id) && entry.connection_type === payload.connection_type);
+    if (!connection) return res.status(404).send('The Google connector no longer exists.');
+    let credentials = tokens as Record<string, any>;
+    if (!credentials.refresh_token && connection.auth_token_encrypted) credentials = { ...(decryptConnectorCredentials(connection.auth_token_encrypted) || {}), ...credentials };
+    connection.auth_token_encrypted = encryptConnectorCredentials(credentials);
+    connection.auth_scopes = String(tokens.scope || '').split(' ').filter(Boolean);
+    connection.status = 'connected';
+    connection.last_error = undefined;
+    connection.updated_at = new Date().toISOString();
+    const defaultTool = payload.connection_type === 'google_gmail' ? 'gmail.search' : 'sheets.read';
+    if (!connection.tool_grants.some((grant) => grant.tool_name === defaultTool)) connection.tool_grants.push({ tool_name: defaultTool, access_level: 'read_only' });
+    try {
+      oauth2.setCredentials(credentials);
+      const identity = await google.oauth2({ version: 'v2', auth: oauth2 }).userinfo.get();
+      connection.oauth_email = identity.data.email || undefined;
+    } catch (_identityError) { /* identity is optional; the token remains valid for the requested API */ }
+    await persistMcpConnection(connection);
+    res.clearCookie('cw_google_oauth_state');
+    return res.redirect(`/settings?connector=connected&service=${payload.connection_type === 'google_gmail' ? 'gmail' : 'sheets'}`);
+  } catch (error: any) {
+    console.warn('Google OAuth callback failed:', error?.message || error);
+    return res.status(502).send('Google connection could not be completed. Check the OAuth client, redirect URI, and requested API scopes.');
+  }
+});
+
+app.get('/api/employees/:id/mcp-connections/:connectionId/tools', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const empId = req.params.id;
-  const connectionId = parseInt(req.params.connectionId, 10);
-  const key = `${companyId}:${empId}`;
+  const connectionId = Number(req.params.connectionId);
+  const connections = await loadMcpConnections(companyId, req.params.id);
+  const connection = connections.find((entry) => entry.id === connectionId);
+  if (!connection) return res.status(404).json({ error: 'MCP connection not found.' });
+  if (connection.connection_type !== 'streamable_http') return res.json({ discovered: connection.discovered_tools || [] });
+  try {
+    const tools = await discoverMcpTools(connection);
+    connection.discovered_tools = tools;
+    connection.status = 'connected';
+    connection.last_error = undefined;
+    connection.updated_at = new Date().toISOString();
+    await persistMcpConnection(connection);
+    res.json({ discovered: tools.map((tool) => ({ name: tool.name, description: tool.description, risk: tool.risk })) });
+  } catch (error: any) {
+    connection.status = 'error';
+    connection.last_error = String(error?.message || 'MCP discovery failed').slice(0, 240);
+    connection.updated_at = new Date().toISOString();
+    await persistMcpConnection(connection);
+    res.status(502).json({ error: connection.last_error });
+  }
+});
 
-  let list = db.mcpConnections.get(key) || [];
-  list = list.filter((c) => c.id !== connectionId);
-  db.mcpConnections.set(key, list);
+app.post('/api/employees/:id/mcp-connections/:connectionId/tools/:toolName', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const connection = (await loadMcpConnections(companyId, req.params.id)).find((entry) => entry.id === Number(req.params.connectionId));
+  if (!connection) return res.status(404).json({ error: 'MCP connection not found.' });
+  const toolName = decodeURIComponent(req.params.toolName);
+  if (!connection.discovered_tools.some((tool) => tool.name === toolName) && !['gmail.search', 'sheets.read'].includes(toolName)) return res.status(400).json({ error: 'Discover this tool before granting it.' });
+  const accessLevel = ['read_only', 'requires_approval', 'read_write'].includes(req.body?.access_level) ? req.body.access_level : 'requires_approval';
+  connection.tool_grants = connection.tool_grants.filter((grant) => grant.tool_name !== toolName);
+  connection.tool_grants.push({ tool_name: toolName, access_level: accessLevel });
+  connection.updated_at = new Date().toISOString();
+  await persistMcpConnection(connection);
+  res.json({ ok: true, connection: connectorPublicView(connection) });
+});
 
+app.delete('/api/employees/:id/mcp-connections/:connectionId/tools/:toolName', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const connection = (await loadMcpConnections(companyId, req.params.id)).find((entry) => entry.id === Number(req.params.connectionId));
+  if (!connection) return res.status(404).json({ error: 'MCP connection not found.' });
+  connection.tool_grants = connection.tool_grants.filter((grant) => grant.tool_name !== decodeURIComponent(req.params.toolName));
+  connection.updated_at = new Date().toISOString();
+  await persistMcpConnection(connection);
   res.json({ ok: true });
+});
+
+app.post('/api/employees/:id/mcp-connections/:connectionId/test', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const connection = (await loadMcpConnections(companyId, req.params.id)).find((entry) => entry.id === Number(req.params.connectionId));
+  if (!connection) return res.status(404).json({ error: 'MCP connection not found.' });
+  if (connection.connection_type === 'streamable_http') {
+    try { const tools = await discoverMcpTools(connection); connection.discovered_tools = tools; connection.status = 'connected'; connection.last_error = undefined; await persistMcpConnection(connection); return res.json({ ok: true, message: `Connection healthy. ${tools.length} tools discovered.` }); }
+    catch (error: any) { return res.status(502).json({ ok: false, error: String(error?.message || 'MCP health check failed').slice(0, 240) }); }
+  }
+  if (connection.connection_type === 'google_gmail' || connection.connection_type === 'google_sheets') return res.json({ ok: connection.status === 'connected', message: connection.status === 'connected' ? `Google ${connection.connection_type === 'google_gmail' ? 'Gmail' : 'Sheets'} connection is ready.` : 'Connect the Google account before testing.' });
+  res.json({ ok: true, message: 'Connection configuration is saved.' });
+});
+
+app.delete('/api/employees/:id/mcp-connections/:connectionId', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const connectionId = Number(req.params.connectionId);
+  const key = `${companyId}:${req.params.id}`;
+  const list = await loadMcpConnections(companyId, req.params.id);
+  if (!list.some((entry) => entry.id === connectionId)) return res.status(404).json({ error: 'MCP connection not found.' });
+  db.mcpConnections.set(key, list.filter((entry) => entry.id !== connectionId));
+  const collection = connectorCollection(companyId);
+  if (collection) await collection.doc(`${req.params.id}_${connectionId}`).delete();
+  res.json({ ok: true });
+});
+
+app.get('/api/analyst/connectors', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const connections = await loadMcpConnections(user.company_id || DEFAULT_COMPANY_ID, 'david');
+  res.json({ connections: connections.map(connectorPublicView) });
+});
+
+app.post('/api/analyst/google-sheets/read', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  try {
+    const result = await readGoogleSheetValues(companyId, Number(req.body?.connection_id), String(req.body?.sheet_url || ''), req.body?.range);
+    res.json({ ok: true, result });
+  } catch (error: any) { res.status(502).json({ error: String(error?.message || 'Google Sheets read failed').slice(0, 240) }); }
+});
+
+app.post('/api/analyst/gmail/search', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  try {
+    const result = await searchGmail(companyId, Number(req.body?.connection_id), String(req.body?.query || ''), req.body?.max_results);
+    res.json({ ok: true, result });
+  } catch (error: any) { res.status(502).json({ error: String(error?.message || 'Gmail search failed').slice(0, 240) }); }
+});
+
+app.post('/api/analyst/mcp/call', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const connectionId = Number(req.body?.connection_id);
+  const toolName = String(req.body?.tool_name || '').trim();
+  const connection = (await loadMcpConnections(companyId, 'david')).find((entry) => entry.id === connectionId && entry.status === 'connected');
+  if (!connection || connection.connection_type !== 'streamable_http') return res.status(404).json({ error: 'Connected custom MCP server not found.' });
+  const discovered = connection.discovered_tools.find((tool) => tool.name === toolName);
+  const grant = connection.tool_grants.find((entry) => entry.tool_name === toolName);
+  if (!discovered || !grant) return res.status(403).json({ error: 'David does not have permission for this MCP tool.' });
+  const args = req.body?.arguments && typeof req.body.arguments === 'object' ? req.body.arguments : {};
+  if (discovered.risk === 'write' || isLikelyWriteTool(toolName)) {
+    const approvalId = db.nextApprovalId++;
+    await persistAnalystApproval({ id: approvalId, company_id: companyId, task_id: 0, employee_id: 'david', tool_name: toolName, action_summary: `Run ${toolName} on ${connection.name}`, status: 'pending', payload: { origin: 'analyst', mode: 'mcp_tool_call', connector_id: connection.id, arguments: args }, created_at: new Date().toISOString() });
+    return res.status(202).json({ ok: true, status: 'awaiting_approval', approval_id: approvalId, message: 'Write-capable MCP tools always pause for manager approval before execution.' });
+  }
+  try {
+    const initialized = await mcpRpc(connection, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'Caveworkers', version: '1.0.0' } });
+    const result = await mcpRpc(connection, 'tools/call', { name: toolName, arguments: args }, initialized.sessionId);
+    res.json({ ok: true, result: result.data?.result || result.data });
+  } catch (error: any) { res.status(502).json({ error: String(error?.message || 'MCP tool call failed').slice(0, 240) }); }
 });
 
 app.get('/api/knowledge', (req, res) => {

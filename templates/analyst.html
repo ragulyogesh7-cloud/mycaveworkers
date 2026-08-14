@@ -69,7 +69,7 @@
 
           <section class="analyst-panel source-panel reveal-in delay-3" aria-labelledby="sources-title">
             <div class="analyst-panel-head"><div><p class="analyst-panel-kicker">02 / SOURCE ROOM</p><h2 id="sources-title">Data sources</h2></div><span class="analyst-readonly-chip">READ-ONLY</span></div>
-            <p class="analyst-help">Connect the data David is allowed to inspect. CSV is available now; Sheets and SQL are connection shells ready for secure OAuth or credentials.</p>
+              <p class="analyst-help">Connect the data David is allowed to inspect. CSV is available now; Google Sheets can become live after OAuth, while SQL remains a controlled read-only shell.</p>
             <div id="data-source-list" class="data-source-list"><div class="analyst-empty-row">Loading source registry…</div></div>
             <form id="source-form" class="source-form">
               <div class="source-form-row"><div><label for="source-kind">Add source</label><select id="source-kind"><option value="csv">CSV upload</option><option value="google_sheets">Google Sheets</option><option value="sql">SQL workspace</option></select></div><div><label for="source-name">Name</label><input id="source-name" type="text" placeholder="Q3 revenue export"></div></div>
@@ -78,6 +78,19 @@
               <button class="analyst-secondary-button" type="submit">Register source <span>+</span></button>
               <p class="analyst-form-message" id="source-form-message" role="status"></p>
             </form>
+            <div class="connector-room" aria-labelledby="connector-room-title">
+              <div class="connector-room-head"><div><p class="analyst-panel-kicker">CONNECTOR ROOM</p><h3 id="connector-room-title">Give David approved tools</h3></div><span class="analyst-secure-chip">OAUTH + HITL</span></div>
+              <p class="analyst-help">Each connection belongs to this workspace and David only. Gmail and Sheets start with read-only scopes; custom MCP write tools stay behind manager approval.</p>
+              <div id="analyst-connector-list" class="connector-list"><div class="analyst-empty-row">Loading connector registry…</div></div>
+              <form id="connector-form" class="connector-form">
+                <div class="source-form-row"><div><label for="connector-type">Add connector</label><select id="connector-type"><option value="google_gmail">Google Gmail</option><option value="google_sheets">Google Sheets</option><option value="streamable_http">Custom MCP / Streamable HTTP</option></select></div><div><label for="connector-name">Name</label><input id="connector-name" required placeholder="David's Gmail or finance MCP"></div></div>
+                <div id="connector-url-field" hidden><label for="connector-url">Custom MCP HTTPS URL</label><input id="connector-url" type="url" placeholder="https://mcp.example.com/mcp"></div>
+                <div id="connector-token-field" hidden><label for="connector-token">MCP bearer token <small>(stored encrypted, never displayed again)</small></label><input id="connector-token" type="password" autocomplete="new-password" placeholder="Optional bearer token"></div>
+                <div class="source-form-row"><div><label for="connector-access">Default access</label><select id="connector-access"><option value="read_only">Read only</option><option value="requires_approval" selected>Requires approval</option><option value="read_write">Read &amp; write</option></select></div><div><label for="connector-notes">Purpose</label><input id="connector-notes" maxlength="800" placeholder="What David should use it for"></div></div>
+                <button class="analyst-secondary-button" type="submit">Save connector <span>+</span></button>
+                <p class="analyst-form-message" id="connector-form-message" role="status"></p>
+              </form>
+            </div>
           </section>
         </div>
 

@@ -208,10 +208,11 @@
               <p style="margin: 0 0 16px; color: rgba(255,255,255,.58); font-size: 12px; line-height: 1.5;">Connections belong to one employee only. Google authorization and Git writes stay under your control; Git commits always require a manager approval. Remote MCP URLs that resolve to private networks are blocked.</p>
               <div class="custom-mcp-grid">
                 <div><label>AI Employee</label><select id="custom-mcp-employee"></select></div>
-                <div><label>Connection Type</label><select id="custom-mcp-type" onchange="updateCustomMcpFields()"><option value="streamable_http">Remote MCP Server</option><option value="google_gmail">Google Gmail</option><option value="git_repository">Git Repository</option><option value="custom_skill">Custom Skill</option></select></div>
+                <div><label>Connection Type</label><select id="custom-mcp-type" onchange="updateCustomMcpFields()"><option value="streamable_http">Remote MCP Server</option><option value="google_gmail">Google Gmail</option><option value="google_sheets">Google Sheets</option><option value="git_repository">Git Repository</option><option value="custom_skill">Custom Skill</option></select></div>
                 <div><label>Access Level</label><select id="custom-mcp-access"><option value="read_only">Read Only</option><option value="requires_approval" selected>Requires Approval</option><option value="read_write">Read &amp; Write</option></select></div>
                 <div><label>Connection Name</label><input id="custom-mcp-name" type="text" placeholder="e.g. Product GitHub"></div>
                 <div class="wide"><label id="custom-mcp-target-label">MCP Server URL</label><input id="custom-mcp-target" type="text" placeholder="https://mcp.example.com"></div>
+                <div class="wide"><label>Bearer Token <span style="color: rgba(255,255,255,.42);">(optional; encrypted at rest)</span></label><input id="custom-mcp-token" type="password" autocomplete="new-password" placeholder="Only for custom MCP servers that require it"></div>
                 <div class="wide"><label>Notes / Skill Instructions</label><input id="custom-mcp-notes" type="text" placeholder="What this employee should use this connection for"></div>
               </div>
               <button class="btn btn-primary" onclick="addCustomMcpConnection()" style="margin-top: 14px;">Add employee connection ↗</button>
@@ -330,7 +331,7 @@
           <h5 style="margin: 0 0 7px; color: ${employee.color}; font-size: 15px;">${employee.name}'s connections</h5>
           ${connections.map(c => `<div class="connection-row"><strong>${c.name}</strong> <span class="badge-access">${c.access_level}</span><div class="connection-meta">${c.connection_type} · ${c.server_url || c.config.repo_path || 'employee skill'} · ${c.status}</div>
           ${c.connection_type === 'streamable_http' ? renderToolGrants(employee.id, c) : ''}
-          <div style="margin-top: 8px;">${c.connection_type === 'google_gmail' && c.status !== 'connected' ? `<a class="btn btn-primary" style="padding: 5px 9px; font-size: 11px;" href="/api/employees/${employee.id}/mcp-connections/${c.id}/google/start">Connect Google account</a> ` : ''}${c.connection_type === 'git_repository' ? `<button class="btn btn-primary" style="padding: 5px 9px; font-size: 11px;" onclick="requestGitCommit('${employee.id}', ${c.id})">Request commit</button> ` : ''}${c.connection_type === 'streamable_http' ? `<button class="btn btn-primary" style="padding: 5px 9px; font-size: 11px;" onclick="discoverTools('${employee.id}', ${c.id})">${c.discovered_tools && c.discovered_tools.length ? 'Refresh tools' : 'Discover tools'}</button> ` : ''}<button class="btn btn-light" style="padding: 5px 9px; font-size: 11px;" onclick="testCustomMcp('${employee.id}', ${c.id})">Test safely</button> <button class="btn-danger" onclick="removeCustomMcp('${employee.id}', ${c.id})">Remove</button></div></div>`).join("")}
+          <div style="margin-top: 8px;">${(c.connection_type === 'google_gmail' || c.connection_type === 'google_sheets') && c.status !== 'connected' ? `<a class="btn btn-primary" style="padding: 5px 9px; font-size: 11px;" href="/api/employees/${employee.id}/mcp-connections/${c.id}/google/start?service=${encodeURIComponent(c.connection_type)}">Connect ${c.connection_type === 'google_sheets' ? 'Google Sheets' : 'Gmail'}</a> ` : ''}${c.connection_type === 'git_repository' ? `<button class="btn btn-primary" style="padding: 5px 9px; font-size: 11px;" onclick="requestGitCommit('${employee.id}', ${c.id})">Request commit</button> ` : ''}${c.connection_type === 'streamable_http' ? `<button class="btn btn-primary" style="padding: 5px 9px; font-size: 11px;" onclick="discoverTools('${employee.id}', ${c.id})">${c.discovered_tools && c.discovered_tools.length ? 'Refresh tools' : 'Discover tools'}</button> ` : ''}<button class="btn btn-light" style="padding: 5px 9px; font-size: 11px;" onclick="testCustomMcp('${employee.id}', ${c.id})">Test safely</button> <button class="btn-danger" onclick="removeCustomMcp('${employee.id}', ${c.id})">Remove</button></div></div>`).join("")}
         </div>` : "").join("") || '<p style="font-size: 12px; color: rgba(255,255,255,.45);">No custom connections yet.</p>';
 
       // Render catalog
@@ -389,11 +390,11 @@
       const target = document.getElementById("custom-mcp-target");
       const name = document.getElementById("custom-mcp-name");
       target.disabled = false;
-      if (type === "google_gmail") {
+      if (type === "google_gmail" || type === "google_sheets") {
         label.textContent = "Google Account (connected through OAuth)";
         target.value = "Google OAuth required after saving";
         target.disabled = true;
-        if (!name.value) name.value = "Google Gmail";
+        if (!name.value) name.value = type === "google_sheets" ? "Google Sheets" : "Google Gmail";
       } else if (type === "git_repository") {
         label.textContent = "Absolute Git Repository Path";
         target.placeholder = "C:\\Projects\\your-repository";
@@ -415,18 +416,20 @@
       const name = document.getElementById("custom-mcp-name").value.trim();
       const target = document.getElementById("custom-mcp-target").value.trim();
       const notes = document.getElementById("custom-mcp-notes").value.trim();
+      const authToken = document.getElementById("custom-mcp-token").value.trim();
       const accessLevel = document.getElementById("custom-mcp-access").value;
       if (!name) return alert("Give this employee connection a name.");
       const config = { notes };
       if (connectionType === "git_repository") config.repo_path = target;
       const res = await fetch(`/api/employees/${employeeId}/mcp-connections`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, connection_type: connectionType, server_url: connectionType === "streamable_http" ? target : null, config, access_level: accessLevel })
+        body: JSON.stringify({ name, connection_type: connectionType, server_url: connectionType === "streamable_http" ? target : null, auth_token: authToken || undefined, config, access_level: accessLevel })
       });
       const data = await res.json();
       if (!res.ok) return alert(data.error || "Could not add the connection.");
       document.getElementById("custom-mcp-name").value = "";
       document.getElementById("custom-mcp-target").value = "";
+      document.getElementById("custom-mcp-token").value = "";
       document.getElementById("custom-mcp-notes").value = "";
       updateCustomMcpFields();
       loadData();

@@ -171,3 +171,25 @@ body.analyst-body { margin: 0; min-height: 100vh; background: radial-gradient(ci
 @media (max-width: 1050px) { .analyst-wrap { width: min(100% - 40px, 900px); } .analyst-hero { padding: 34px; } .analyst-status-grid { grid-template-columns: repeat(2, 1fr); } .analyst-top-grid, .analyst-bottom-grid { grid-template-columns: 1fr; } }
 @media (max-width: 760px) { .analyst-shell { display: block; } .analyst-rail { position: fixed; left: -270px; width: 244px; transition: left .22s var(--analyst-ease); } .analyst-shell.rail-open .analyst-rail { left: 0; box-shadow: 30px 0 70px rgba(0,0,0,.4); } .analyst-menu-button { display: block; } .analyst-topbar { padding: 0 18px; } .analyst-top-actions .analyst-back-link, .analyst-top-actions .analyst-settings-link { display: none; } .analyst-workspace-name small { display: none; } .analyst-wrap { width: calc(100% - 28px); padding-top: 26px; } .analyst-hero { min-height: unset; padding: 29px 24px 90px; } .david-profile-orb { position: absolute; right: 22px; bottom: -52px; transform: scale(.66); transform-origin: right bottom; } .analyst-hero-lede { font-size: 13px; } .analyst-status-grid { gap: 8px; } .analyst-status-card { min-height: 95px; padding: 14px; } .analyst-status-card strong { margin-top: 12px; font-size: 15px; } .analyst-panel-head, .analysis-form, .source-form, .memory-form { padding-left: 19px; padding-right: 19px; } .analyst-help { margin-left: 19px; margin-right: 19px; } .data-source-list, .analyst-approval-list { padding-left: 19px; padding-right: 19px; } .memory-list, .analyst-runs { margin-left: 19px; margin-right: 19px; } .result-layout { grid-template-columns: 1fr; padding-left: 19px; padding-right: 19px; } .trace-section { padding-left: 19px; padding-right: 19px; } .analyst-trace { grid-template-columns: 1fr 1fr; } .analyst-footer { flex-direction: column; gap: 7px; } }
 @media (max-width: 460px) { .analysis-form-row, .source-form-row, .memory-form-row { grid-template-columns: 1fr; } .analysis-form-foot { align-items: stretch; flex-direction: column; } .analyst-primary-button { width: 100%; } .analyst-status-grid { grid-template-columns: 1fr 1fr; } .analyst-hero h1 { font-size: 37px; } .analyst-hero-tags span { font-size: 8px; } .analyst-panel h2 { font-size: 20px; } .analyst-trace { grid-template-columns: 1fr; } .run-row { grid-template-columns: 1fr auto; gap: 7px; } .run-row time { display: none; } }
+
+/* Connector room */
+.connector-room { margin-top: 22px; padding-top: 18px; border-top: 1px solid rgba(255,255,255,.09); }
+.connector-room-head, .connector-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.connector-room-head h3 { margin: 3px 0 0; font: 600 17px 'Space Grotesk', sans-serif; color: #fff; }
+.connector-form { margin-top: 14px; display: grid; gap: 10px; }
+.connector-form label small { color: rgba(255,255,255,.42); font-size: 10px; }
+.connector-list { display: grid; gap: 10px; margin-top: 14px; }
+.connector-card { padding: 13px 14px; border: 1px solid rgba(255,255,255,.09); border-radius: 14px; background: rgba(0,0,0,.14); }
+.connector-card-head strong { display: block; color: #fff; font-size: 13px; }
+.connector-card-head small, .connector-url { display: block; margin-top: 4px; color: rgba(255,255,255,.47); font-size: 11px; }
+.connector-card-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
+.connector-action, .connector-tool-actions button { border: 1px solid rgba(110,231,255,.28); border-radius: 7px; padding: 5px 8px; color: #c9f8ff; background: rgba(44,198,232,.1); font: 600 10px 'DM Mono', monospace; text-decoration: none; cursor: pointer; }
+.connector-connected { color: #b7ff81; font: 600 10px 'DM Mono', monospace; text-transform: uppercase; }
+.connector-tools { margin-top: 10px; display: grid; gap: 5px; padding-top: 9px; border-top: 1px solid rgba(255,255,255,.07); }
+.connector-tool { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 0; }
+.connector-tool > span:first-child { min-width: 0; }
+.connector-tool strong { display: block; overflow: hidden; color: rgba(255,255,255,.85); font: 600 11px 'DM Mono', monospace; text-overflow: ellipsis; white-space: nowrap; }
+.connector-tool small { display: block; overflow: hidden; max-width: 280px; color: rgba(255,255,255,.42); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.connector-tool-actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 4px; }
+.connector-grant { color: #b7ff81; font: 600 9px 'DM Mono', monospace; text-transform: uppercase; }
+@media (max-width: 720px) { .connector-card-head, .connector-tool { flex-direction: column; align-items: stretch; } .connector-card-actions, .connector-tool-actions { justify-content: flex-start; } .connector-tool small { max-width: 100%; } }

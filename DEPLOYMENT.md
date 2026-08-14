@@ -50,3 +50,18 @@ Configure `RAZORPAY_WEBHOOK_SECRET` in the deployment secret store and register 
 The server now checks the `X-CSRF-Token` header against the `cw_csrf` cookie for unsafe API methods, restricts credentialed CORS to `ALLOWED_ORIGINS`, and applies local-process rate limits to login, task, payment, and analyst execution endpoints. The bundled limiter is not shared between instances; use an external edge limiter or Redis-backed limiter before horizontal scaling.
 
 Core operational Maps remain process-local in this release. Users and companies are persisted to Firestore, while tasks, approvals, conversations, connector state, knowledge entries, and activity logs still require a later Firestore or Postgres migration before multi-instance production deployment.
+
+
+## David connectors: Gmail, Google Sheets, and custom MCP
+
+David’s connector registry is tenant-scoped. A connector is stored under `tenants/{company_id}/connectors`, while OAuth tokens and custom MCP bearer tokens are encrypted before persistence with `MCP_TOKEN_ENCRYPTION_KEY`. The API never returns the encrypted token or raw credentials to the browser.
+
+Create a Google OAuth 2.0 **Web application** client and add the exact callback URL `https://YOUR_DOMAIN/api/google/oauth/callback` to its authorized redirect URIs. Configure `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `PUBLIC_APP_URL`, and `GOOGLE_OAUTH_REDIRECT_URI` in the managed secret/runtime configuration. The default callback is `${PUBLIC_APP_URL}/api/google/oauth/callback` when `GOOGLE_OAUTH_REDIRECT_URI` is omitted.
+
+Gmail uses the restricted read-only scope `https://www.googleapis.com/auth/gmail.readonly`; Google Sheets uses `https://www.googleapis.com/auth/spreadsheets.readonly`. Users grant access to their own Google account through the OAuth consent screen. Caveworkers stores the refresh token encrypted and exposes only connection status, granted scopes, and optional account email to the tenant workspace. Configure the OAuth consent screen, publishing status, authorized domains, and Google API enablement in Google Cloud before inviting customers.
+
+Custom MCP servers must be registered with an HTTPS Streamable HTTP endpoint in production. Private-network hosts, localhost, embedded URL credentials, and unencrypted HTTP are rejected in production. Optional bearer tokens are encrypted at rest and never shown again after submission. David can discover tools, but tool grants are per-connector and per-tool. Read tools may execute only after an explicit read grant; write-capable tools always create a pending human approval record and are not dispatched automatically by the current release.
+
+To enable durable connector credentials, create a high-entropy secret and inject it as `MCP_TOKEN_ENCRYPTION_KEY`. Rotating this key without a migration plan makes previously stored connector tokens unreadable, so rotate through a controlled re-encryption or reconnect procedure. Before public multi-instance deployment, move the in-process connector cache to the same managed datastore/queue used for the rest of the control plane and add external rate limiting.
+
+The connector API is available from David’s data lab and Workspace Settings. The current integration includes bounded Gmail metadata search and Google Sheets preview reads. Gmail sending, Sheets writes, arbitrary MCP write calls, scheduled autonomous execution, and background task dispatch remain approval-gated infrastructure work rather than silently enabled actions.
