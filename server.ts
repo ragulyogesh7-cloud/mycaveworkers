@@ -14,7 +14,7 @@ import { GoogleGenAI } from '@google/genai';
 dotenv.config();
 
 const app = express();
-const PORT = 3000;
+const PORT = Number(process.env.PORT || '3000') || 3000;
 const HOST = '0.0.0.0';
 const IS_PRODUCTION = process.env.CAVEWORKERS_ENV === 'production';
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((origin) => origin.trim().replace(/\/$/, '')).filter(Boolean);
@@ -47,51 +47,82 @@ if (process.env.GEMINI_API_KEY) {
 
 // David's provider is configurable. OpenRouter/Qwen is preferred in production;
 // Gemini remains a backwards-compatible fallback while a tenant is provisioned.
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
+const OPENROUTER_API_KEY = (process.env.OPENROUTER_API_KEY || '').trim();
+const OPENROUTER_KEY_READY = /^sk-or-v1-[A-Za-z0-9_-]{20,}$/.test(OPENROUTER_API_KEY);
+if (OPENROUTER_API_KEY && !OPENROUTER_KEY_READY) console.warn('OPENROUTER_API_KEY is present but does not match the expected provider key format; analyst model calls are disabled.');
 const OPENROUTER_BASE_URL = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
 const ANALYST_MODEL = process.env.ANALYST_MODEL || 'qwen/qwen3-30b-a3b';
+const OPENROUTER_TIMEOUT_MS = Math.min(Math.max(Number(process.env.OPENROUTER_TIMEOUT_MS || '30000') || 30000, 5000), 60000);
+const ANALYST_MAX_TOKENS = Math.min(Math.max(Number(process.env.ANALYST_MAX_TOKENS || '900') || 900, 128), 2000);
+const PUBLIC_APP_URL = (process.env.PUBLIC_APP_URL || 'https://caveworkers.app').replace(/\/$/, '');
 
-async function generateAnalystNarrative(prompt: string): Promise<string> {
-  if (OPENROUTER_API_KEY) {
+type AnalystNarrativeResult = {
+  text: string;
+  provider: 'openrouter' | 'gemini' | 'preview';
+  model?: string;
+  latency_ms: number;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cost?: number };
+  error_code?: string;
+};
+
+function extractAnalystText(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (Array.isArray(value)) return value.map((part: any) => typeof part === 'string' ? part : part?.text || '').join('').trim();
+  return '';
+}
+
+async function generateAnalystNarrative(prompt: string, tenantId: string): Promise<AnalystNarrativeResult> {
+  const startedAt = Date.now();
+  let openRouterFailure: AnalystNarrativeResult | null = null;
+  if (OPENROUTER_KEY_READY) {
     try {
       const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
         method: 'POST',
+        signal: AbortSignal.timeout(OPENROUTER_TIMEOUT_MS),
         headers: {
           Authorization: `Bearer ${OPENROUTER_API_KEY}`,
           'Content-Type': 'application/json',
-          'HTTP-Referer': process.env.PUBLIC_APP_URL || 'https://caveworkers.app',
-          'X-Title': 'Caveworkers Data Analyst'
+          'HTTP-Referer': PUBLIC_APP_URL,
+          'X-OpenRouter-Title': 'Caveworkers Data Analyst',
+          'X-OpenRouter-Categories': 'cloud-agent'
         },
         body: JSON.stringify({
           model: ANALYST_MODEL,
           temperature: 0.2,
-          max_tokens: 700,
+          max_tokens: ANALYST_MAX_TOKENS,
+          stream: false,
+          user: crypto.createHash('sha256').update(tenantId).digest('hex').slice(0, 32),
           messages: [
-            { role: 'system', content: 'You are David, a precise senior business data analyst. Write concise decision-ready analysis. Never invent access to data, results, or external actions.' },
+            { role: 'system', content: 'You are David, a precise senior business data analyst. Write concise decision-ready analysis. Never invent access to data, results, or external actions. Clearly label previews, assumptions, and missing sources.' },
             { role: 'user', content: prompt }
           ]
         })
       });
       if (response.ok) {
         const payload: any = await response.json();
-        const content = payload?.choices?.[0]?.message?.content;
-        if (typeof content === 'string' && content.trim()) return content.trim();
+        const content = extractAnalystText(payload?.choices?.[0]?.message?.content);
+        if (content) return { text: content, provider: 'openrouter', model: payload?.model || ANALYST_MODEL, latency_ms: Date.now() - startedAt, usage: payload?.usage ? { prompt_tokens: payload.usage.prompt_tokens, completion_tokens: payload.usage.completion_tokens, total_tokens: payload.usage.total_tokens, cost: payload.usage.cost } : undefined };
+        console.warn('OpenRouter analyst returned no text:', payload?.id || 'unknown response');
+        openRouterFailure = { text: '', provider: 'openrouter', model: ANALYST_MODEL, latency_ms: Date.now() - startedAt, error_code: 'empty_response' };
       } else {
-        console.warn('OpenRouter analyst response warning:', response.status, await response.text());
+        console.warn('OpenRouter analyst request failed:', response.status, response.statusText);
+        openRouterFailure = { text: '', provider: 'openrouter', model: ANALYST_MODEL, latency_ms: Date.now() - startedAt, error_code: `http_${response.status}` };
       }
-    } catch (error) {
-      console.warn('OpenRouter analyst request warning:', error);
+    } catch (error: any) {
+      const errorCode = error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'timeout' : 'network_error';
+      console.warn('OpenRouter analyst request failed:', errorCode);
+      openRouterFailure = { text: '', provider: 'openrouter', model: ANALYST_MODEL, latency_ms: Date.now() - startedAt, error_code: errorCode };
     }
   }
   if (genAIClient) {
     try {
       const response = await genAIClient.models.generateContent({ model: 'gemini-3.6-flash', contents: prompt });
-      if (response.text?.trim()) return response.text.trim();
+      if (response.text?.trim()) return { text: response.text.trim(), provider: 'gemini', model: 'gemini-3.6-flash', latency_ms: Date.now() - startedAt };
     } catch (error) {
-      console.warn('Gemini analyst fallback warning:', error);
+      console.warn('Gemini analyst fallback failed:', error instanceof Error ? error.name : 'unknown_error');
     }
   }
-  return '';
+  return openRouterFailure || { text: '', provider: 'preview', latency_ms: Date.now() - startedAt, error_code: OPENROUTER_KEY_READY ? 'provider_unavailable' : 'model_not_configured' };
 }
 
 app.use((req, res, next) => {
@@ -373,6 +404,7 @@ interface AnalystRun {
   report: string;
   chart?: { title: string; labels: string[]; values: number[]; unit: string; source_note: string };
   approval_id?: number;
+  model?: { provider: 'openrouter' | 'gemini' | 'preview'; name?: string; latency_ms: number; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cost?: number }; error_code?: string };
   created_at: string;
 }
 
@@ -389,6 +421,7 @@ const db = {
   analystDataSources: new Map<string, AnalystDataSource[]>(),
   analystMemory: new Map<string, AnalystMemory[]>(),
   analystRuns: new Map<string, AnalystRun[]>(),
+  analystApprovalsLoaded: new Set<string>(),
   nextTaskId: 1,
   nextApprovalId: 101,
 };
@@ -532,6 +565,32 @@ async function persistAnalystRun(run: AnalystRun) {
   if (collection) await collection.doc(run.id).set(stripUndefined(run), { merge: true });
 }
 
+async function persistAnalystApproval(approval: ApprovalRecord) {
+  db.approvals.set(approval.id, approval);
+  db.analystApprovalsLoaded.add(approval.company_id);
+  const collection = analystTenantCollection(approval.company_id, 'approvals');
+  if (collection) await collection.doc(String(approval.id)).set(stripUndefined(approval), { merge: true });
+}
+
+async function loadAnalystApprovals(companyId: string): Promise<ApprovalRecord[]> {
+  if (!db.analystApprovalsLoaded.has(companyId)) {
+    const collection = analystTenantCollection(companyId, 'approvals');
+    if (collection) {
+      try {
+        const snapshot = await collection.limit(100).get();
+        snapshot.docs.forEach((doc) => {
+          const approval = { id: Number(doc.id), ...(doc.data() || {}) } as ApprovalRecord;
+          if (approval.employee_id === 'david') db.approvals.set(approval.id, approval);
+        });
+      } catch (error) {
+        console.warn('Could not load analyst approvals:', error);
+      }
+    }
+    db.analystApprovalsLoaded.add(companyId);
+  }
+  return Array.from(db.approvals.values()).filter((approval) => approval.company_id === companyId && approval.employee_id === 'david');
+}
+
 function analystSourceSummary(sourceRecord: AnalystDataSource | undefined): string {
   if (!sourceRecord) return 'No live data source is connected. David will prepare a transparent preview and state which source is needed to verify it.';
   if (sourceRecord.kind === 'csv') return `CSV source “${sourceRecord.name}” is connected read-only with ${Number(sourceRecord.metadata?.row_count || 0)} imported rows.`;
@@ -570,6 +629,7 @@ function parseCsvPreview(csvText: string) {
 async function runAnalystLoop(input: { companyId: string; managerName: string; question: string; sourceId?: string; outputFormat?: string }) {
   const question = String(input.question || '').trim();
   if (!question) throw new Error('An analysis question is required.');
+  if (question.length > 6000) throw new Error('Keep the analysis question under 6,000 characters.');
   const outputFormat: AnalystRun['output_format'] = ['brief', 'report', 'chart', 'table'].includes(input.outputFormat || '') ? input.outputFormat as AnalystRun['output_format'] : 'brief';
   const sources = await loadAnalystDataSources(input.companyId);
   const sourceRecord = input.sourceId ? sources.find((entry) => entry.id === input.sourceId) : sources.find((entry) => entry.status === 'connected') || sources[0];
@@ -587,8 +647,9 @@ async function runAnalystLoop(input: { companyId: string; managerName: string; q
   const verification = sourceRecord?.status === 'connected' ? 'The source is connected read-only. Verify material decisions against the live result before distribution.' : 'No live data connection is configured, so no business fact is presented as verified. Connect a CSV, Sheets, or SQL source to replace this preview with a live query.';
   const preferences = memories.filter((memory) => memory.memory_type === 'long_term').slice(0, 3).map((memory) => `• ${memory.content}`).join('\n') || 'No durable reporting preferences have been saved yet.';
   const deterministicReport = `### Analysis brief\n\n**Question:** ${question}\n\n**Source status:** ${analystSourceSummary(sourceRecord)}\n\n**Current read:** David has produced a reviewable ${outputFormat} analysis structure with a transparent trend preview.\n\n**What to validate next:**\n1. Confirm reporting period, metric definitions, and exclusions.\n2. Run the approved read-only source query or CSV calculation.\n3. Review material assumptions before sharing externally.\n\n**Manager context applied:**\n${preferences}\n\n**Controls:** ${verification}`;
-  const modelNarrative = await generateAnalystNarrative(`Business question: ${question}\nSource: ${analystSourceSummary(sourceRecord)}\nKnown tenant preferences: ${preferences}\nWrite no more than five short paragraphs. Be explicit about previews, missing data, and validation.`);
-  const report = modelNarrative ? `${deterministicReport}\n\n---\n\n### David’s executive note\n\n${modelNarrative}` : deterministicReport;
+  const narrative = await generateAnalystNarrative(`Business question: ${question}\nSource: ${analystSourceSummary(sourceRecord)}\nKnown tenant preferences: ${preferences}\nWrite no more than five short paragraphs. Be explicit about previews, missing data, and validation.`, input.companyId);
+  const report = narrative.text ? `${deterministicReport}\n\n---\n\n### David’s executive note\n\n${narrative.text}` : deterministicReport;
+  trace.push({ stage: 'reflect', body: narrative.text ? `Applied ${narrative.provider}${narrative.model ? ` (${narrative.model})` : ''} narrative with ${narrative.latency_ms} ms latency.` : `No model narrative was applied; returned a deterministic result with status ${narrative.error_code || 'unavailable'}.`, created_at: new Date().toISOString() });
   await persistAnalystMemory({ id: `working_${runId}`, company_id: input.companyId, memory_type: 'working', session_id: runId, category: 'task_state', content: `Run ${runId}: ${question.slice(0, 420)}`, confidence: 1, created_at: now, expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() });
   if (/\b(always|never|prefer|exclude|definition|call it)\b/i.test(question)) {
     await persistAnalystMemory({ id: `memory_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, company_id: input.companyId, memory_type: 'long_term', category: 'reflection', content: `Manager guidance: ${question.slice(0, 500)}`, confidence: 0.72, created_at: now });
@@ -600,10 +661,10 @@ async function runAnalystLoop(input: { companyId: string; managerName: string; q
   let approvalId: number | undefined;
   if (externalAction.requested) {
     approvalId = db.nextApprovalId++;
-    db.approvals.set(approvalId, { id: approvalId, company_id: input.companyId, task_id: taskId, employee_id: 'david', tool_name: externalAction.tool, action_summary: `${externalAction.summary}: “${question.slice(0, 180)}”`, status: 'pending', payload: { origin: 'analyst', mode: 'draft_only', external_action: true, run_id: runId }, created_at: new Date().toISOString() });
+    await persistAnalystApproval({ id: approvalId, company_id: input.companyId, task_id: taskId, employee_id: 'david', tool_name: externalAction.tool, action_summary: `${externalAction.summary}: “${question.slice(0, 180)}”`, status: 'pending', payload: { origin: 'analyst', mode: 'draft_only', external_action: true, run_id: runId }, created_at: new Date().toISOString() });
     trace.push({ stage: 'approval', body: `Created a human-approval gate for ${externalAction.tool}. This is a draft only; no external action has been performed.`, created_at: new Date().toISOString() });
   }
-  const run: AnalystRun = { id: runId, company_id: input.companyId, task_id: taskId, question, source_id: sourceRecord?.id, output_format: outputFormat, status: approvalId ? 'awaiting_approval' : 'completed', plan: ['Perceive tenant context', 'Plan read-only analysis', 'Act with a configured source or transparent preview', 'Reflect to tenant memory'], trace, report, chart, approval_id: approvalId, created_at: now };
+  const run: AnalystRun = { id: runId, company_id: input.companyId, task_id: taskId, question, source_id: sourceRecord?.id, output_format: outputFormat, status: approvalId ? 'awaiting_approval' : 'completed', plan: ['Perceive tenant context', 'Plan read-only analysis', 'Act with a configured source or transparent preview', 'Reflect to tenant memory'], trace, report, chart, approval_id: approvalId, model: { provider: narrative.provider, name: narrative.model, latency_ms: narrative.latency_ms, usage: narrative.usage, error_code: narrative.error_code }, created_at: now };
   await persistAnalystRun(run);
   db.tasks.set(taskId, { id: taskId, company_id: input.companyId, question, owner: 'david', status: approvalId ? 'pending_approval' : 'completed', answer: report, plan: run.plan.join(' → '), created_at: now, trace: trace.map((entry) => ({ kind: entry.stage, sender: 'David', receiver: entry.stage === 'approval' ? 'Human approval gate' : 'Analyst run', body: entry.body, created_at: entry.created_at })) });
   const activity = db.activity.get(input.companyId) || [];
@@ -825,7 +886,10 @@ app.use('/api', (req, res, next) => {
     '/tasks': [30, 60 * 1000],
     '/payments/create-order': [8, 15 * 60 * 1000],
     '/payments/verify': [12, 15 * 60 * 1000],
-    '/payments/webhook': [120, 60 * 1000]
+    '/payments/webhook': [120, 60 * 1000],
+    '/analyst/analyze': [10, 5 * 60 * 1000],
+    '/analyst/data-sources': [20, 15 * 60 * 1000],
+    '/analyst/memory': [30, 15 * 60 * 1000]
   };
   const rule = limits[req.path];
   if (!rule || !isRateLimited(rateLimitKey(req, req.path), rule[0], rule[1])) return next();
@@ -901,7 +965,7 @@ app.get('/dashboard', (_req, res) => {
 app.get('/analyst', (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.redirect('/login');
-  res.render('analyst', { firebase_config: FIREBASE_WEB_CONFIG, user, org_id: user.company_id || DEFAULT_COMPANY_ID, analyst_model: OPENROUTER_API_KEY ? ANALYST_MODEL : (genAIClient ? 'Gemini fallback' : 'Preview planner') });
+  res.render('analyst', { firebase_config: FIREBASE_WEB_CONFIG, user, org_id: user.company_id || DEFAULT_COMPANY_ID, analyst_model: OPENROUTER_KEY_READY ? ANALYST_MODEL : (genAIClient ? 'Gemini fallback' : 'Preview planner') });
 });
 
 app.get('/settings', (req, res) => {
@@ -936,6 +1000,7 @@ app.get('/api/health', (_req, res) => {
       database: { status: 'up' },
       payments: { status: RAZORPAY_KEY_ID ? 'configured' : 'unconfigured' },
       firebase: { status: firebaseAuth && firestoreDb ? 'active' : 'unconfigured' },
+      analyst: { status: OPENROUTER_KEY_READY ? 'openrouter_configured' : genAIClient ? 'gemini_fallback' : 'preview_only', model: OPENROUTER_KEY_READY ? ANALYST_MODEL : undefined },
       mcp_bus: { status: 'active' }
     }
   });
@@ -1622,22 +1687,26 @@ app.get('/api/tasks', (req, res) => {
   });
 });
 
-app.get('/api/approvals', (req, res) => {
+app.get('/api/approvals', async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  res.json(Array.from(db.approvals.values()).filter((approval) => approval.company_id === companyId && approval.status === 'pending'));
+  const analystApprovals = await loadAnalystApprovals(companyId);
+  const approvals = [...Array.from(db.approvals.values()), ...analystApprovals].filter((approval, index, list) => list.findIndex((entry) => entry.id === approval.id && entry.company_id === approval.company_id) === index);
+  res.json(approvals.filter((approval) => approval.company_id === companyId && approval.status === 'pending'));
 });
 
-app.post('/api/approvals/:id', (req, res) => {
+app.post('/api/approvals/:id', async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const id = parseInt(req.params.id, 10);
   const { status } = req.body || {};
+  await loadAnalystApprovals(companyId);
   const approval = db.approvals.get(id);
   if (!approval || approval.company_id !== companyId) return res.status(404).json({ error: 'Approval request not found' });
   approval.status = status === 'approved' ? 'approved' : 'rejected';
+  if (approval.payload?.origin === 'analyst') await persistAnalystApproval(approval);
   if (approval.payload?.origin === 'analyst') {
     const activity = db.activity.get(companyId) || [];
     activity.unshift({ id: Date.now(), sender: 'Manager', receiver: 'David', kind: approval.status === 'approved' ? 'analyst.action_authorized' : 'analyst.action_declined', body: approval.status === 'approved' ? `Approved analyst draft for ${approval.tool_name}. No external dispatch occurs until that connector is configured.` : `Declined analyst draft for ${approval.tool_name}.`, created_at: new Date().toISOString() });
@@ -1655,7 +1724,7 @@ app.get('/api/analyst/profile', async (req, res) => {
   const employee = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === 'david');
   const sources = await loadAnalystDataSources(companyId);
   const memory = await loadAnalystMemory(companyId, 'long_term');
-  res.json({ employee: analyst, active_in_workspace: Boolean(employee), configured_tools: employee?.tools || analyst?.default_tools || [], model: { provider: OPENROUTER_API_KEY ? 'OpenRouter' : (genAIClient ? 'Gemini fallback' : 'Preview planner'), name: OPENROUTER_API_KEY ? ANALYST_MODEL : 'Configure OPENROUTER_API_KEY for Qwen3' }, source_count: sources.length, memory_count: memory.length, safety: { read_only_by_default: true, external_actions_require_approval: true, tenant_scoped: true } });
+  res.json({ employee: analyst, active_in_workspace: Boolean(employee), configured_tools: employee?.tools || analyst?.default_tools || [], model: { provider: OPENROUTER_KEY_READY ? 'OpenRouter' : (genAIClient ? 'Gemini fallback' : 'Preview planner'), name: OPENROUTER_KEY_READY ? ANALYST_MODEL : 'Configure OPENROUTER_API_KEY for Qwen3' }, source_count: sources.length, memory_count: memory.length, safety: { read_only_by_default: true, external_actions_require_approval: true, tenant_scoped: true } });
 });
 
 app.get('/api/analyst/data-sources', async (req, res) => {
@@ -1731,11 +1800,11 @@ app.get('/api/analyst/runs', async (req, res) => {
   try { const snapshot = await collection.orderBy('created_at', 'desc').limit(12).get(); const runs = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as AnalystRun)); db.analystRuns.set(companyId, runs); res.json({ runs }); } catch (error) { console.warn('Could not load analyst runs:', error); res.json({ runs: [] }); }
 });
 
-app.get('/api/analyst/approvals', (req, res) => {
-  const user = getAuthUser(req);
-  if (!user) return res.status(401).json({ error: 'Authentication required' });
+app.get('/api/analyst/approvals', async (req, res) => {
+  const user = getAuthUser(req); if (!user) return res.status(401).json({ error: 'Authentication required' });
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  res.json({ approvals: Array.from(db.approvals.values()).filter((approval) => approval.company_id === companyId && approval.employee_id === 'david' && approval.status === 'pending') });
+  const approvals = await loadAnalystApprovals(companyId);
+  res.json({ approvals: approvals.filter((approval) => approval.status === 'pending') });
 });
 
 app.post('/api/analyst/analyze', async (req, res) => {

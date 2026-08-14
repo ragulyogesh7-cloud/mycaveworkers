@@ -1,10 +1,15 @@
-FROM python:3.12-slim
-WORKDIR /workspace/caveworkers
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+FROM node:22-bookworm-slim
+
+WORKDIR /app
+ENV NODE_ENV=production
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
 COPY . .
-ENV PYTHONPATH=/workspace
-USER 10001
+RUN npm run build && npm prune --omit=dev
+
+USER node
 EXPOSE 8080
-CMD ["waitress-serve", "--port=8080", "caveworkers.app:app"]
+ENV PORT=8080
+CMD ["node", "dist/server.js"]
