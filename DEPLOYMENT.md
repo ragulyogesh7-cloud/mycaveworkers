@@ -65,3 +65,39 @@ Custom MCP servers must be registered with an HTTPS Streamable HTTP endpoint in 
 To enable durable connector credentials, create a high-entropy secret and inject it as `MCP_TOKEN_ENCRYPTION_KEY`. Rotating this key without a migration plan makes previously stored connector tokens unreadable, so rotate through a controlled re-encryption or reconnect procedure. Before public multi-instance deployment, move the in-process connector cache to the same managed datastore/queue used for the rest of the control plane and add external rate limiting.
 
 The connector API is available from David’s data lab and Workspace Settings. The current integration includes bounded Gmail metadata search and Google Sheets preview reads. Gmail sending, Sheets writes, arbitrary MCP write calls, scheduled autonomous execution, and background task dispatch remain approval-gated infrastructure work rather than silently enabled actions.
+
+
+## Always-on employee worker and company workroom
+
+The current release includes a process-local always-on worker loop. New manager tasks enter a tenant-scoped queue, the worker claims one job at a time, updates employee presence, emits company-workroom events, and persists task progress and collaboration traces. The command center consumes the authenticated workroom snapshot and Server-Sent Events stream at `/api/workforce/workroom` and `/api/workforce/stream`.
+
+For a persistent deployment, set `ALWAYS_ON_WORKER_ENABLED=true`, choose `WORKER_POLL_MS` between 500 and 10000 milliseconds, and optionally set a stable `WORKER_INSTANCE_ID` for logs. The worker uses a Firestore transaction when Firestore is configured to reduce duplicate claims across instances. The process-local event stream is instance-local, so a production multi-instance rollout needs a shared realtime broker or sticky routing for complete cross-instance event delivery. The in-process queue, activity cache, presence cache, and task cache also require migration to a managed shared store before horizontal scaling.
+
+The persistent hosting option should run the Node service and worker as a continuously available service with automatic restart, health checks, encrypted runtime secrets, structured logs, and bounded concurrency. Do not run multiple unmanaged copies with separate local queues. Before inviting production customers, use a managed queue/lease store, an external rate limiter, idempotency keys, dead-letter handling, retry backoff, and an operator alert when jobs remain processing beyond their lease.
+
+## Controlled internet research
+
+Set `WEB_RESEARCH_ENABLED=true` only after configuring either `TAVILY_API_KEY` or `BRAVE_SEARCH_API_KEY` in the managed secret store. The worker sends a bounded question to one provider, limits the result count, allows only HTTPS result URLs, rejects localhost and private-network hosts after DNS resolution, fetches a bounded page excerpt, and stores title, URL, snippet, and fetched evidence in the tenant task trace. The manager can see the source metadata in the company workroom.
+
+Internet research is retrieval-only. It does not grant an employee permission to send messages, change records, make purchases, publish content, or call arbitrary private endpoints. External writes remain connector-specific and approval-gated. Treat web pages as untrusted data: employees may summarize retrieved content, but page instructions must never be executed as system commands or connector authorization.
+
+A suitable persistent deployment must also provide a process supervisor, TLS, outbound egress controls, request timeouts, provider quotas, audit retention, and a restart/recovery test. The current worker is appropriate for a controlled alpha or single-worker deployment; a public multi-instance deployment should complete the managed queue and shared realtime migration before relying on unattended execution.
+
+## Worker environment reference
+
+```text
+ALWAYS_ON_WORKER_ENABLED=true
+WORKER_POLL_MS=1500
+WORKER_INSTANCE_ID=<stable-instance-label>
+WEB_RESEARCH_ENABLED=false
+TAVILY_API_KEY=<managed-secret-if-used>
+BRAVE_SEARCH_API_KEY=<managed-secret-if-used>
+```
+
+Keep `WEB_RESEARCH_ENABLED=false` until a provider key, domain policy, monitoring, and retention policy are approved. Never place provider keys in browser code, committed files, Docker build arguments, or task payloads.
+
+## Current operational boundary
+
+The employee experience now supports automatic queued task progression, persistent presence while a worker is processing, manager-visible company-room updates, bounded research evidence, and approval-aware completion. It does not yet provide unrestricted autonomous mutation of customer systems. This boundary is intentional and should remain in place until each connector has a documented action policy, idempotency strategy, approval path, and rollback behavior.
+
+The current release includes a single-process worker loop rather than a separate persistent worker service. For the always-on experience selected for Caveworkers, deploy the service on a managed persistent host or equivalent continuously running environment, and complete the shared queue/realtime work before scaling horizontally.

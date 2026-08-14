@@ -268,6 +268,96 @@ async function loadRoiMetrics() {
   }
 }
 
+let workroomSource = null;
+let workroomMessages = [];
+let workroomPresence = [];
+let workroomTasks = [];
+
+function renderWorkroomPresence(presence = workroomPresence) {
+  const container = $('#workroom-presence');
+  if (!container) return;
+  container.innerHTML = presence.length ? presence.map((entry) => {
+    const employee = employees.find((item) => item.id === entry.employee_id) || {};
+    const status = entry.status || 'idle';
+    return `<div class="workroom-presence-card"><span class="presence-avatar" style="color:${safe(employee.color || '#8ee6ff')}; border-color:${safe(employee.color || '#8ee6ff')}66; background:${safe(employee.color || '#8ee6ff')}18">${safe((employee.name || entry.employee_id || 'AI').charAt(0))}</span><div><b>${safe(employee.name || entry.employee_id || 'AI employee')}</b><small>${safe(employee.role || 'Specialist')} · <span class="presence-status ${safe(status)}">${safe(status)}</span></small></div></div>`;
+  }).join('') : '<p class="empty-state-sm">No active employees are available yet.</p>';
+}
+
+function renderWorkroomMessages() {
+  const container = $('#workroom-thread');
+  if (!container) return;
+  container.innerHTML = workroomMessages.length ? workroomMessages.slice(-40).reverse().map((message) => `<div class="workroom-message"><span class="workroom-message-avatar">${safe(String(message.sender || 'AI').charAt(0))}</span><div><div class="workroom-message-meta"><b>${safe(message.sender || 'Caveworkers')}</b><span>to ${safe(message.receiver || 'Company')}</span><time>${formatTime(message.created_at)}</time></div><p>${safe(message.body || '')}</p>${message.task_id ? `<small class="workroom-task-ref">Task #${safe(message.task_id)}</small>` : ''}</div></div>`).join('') : '<p class="empty-state-sm">The workroom will show employee updates when the worker is active.</p>';
+}
+
+function rebuildWorkroomMessages() {
+  const messages = [];
+  workroomTasks.forEach((task) => (task.trace || []).forEach((step) => {
+    if (!step || !step.body) return;
+    messages.push({ ...step, task_id: task.id });
+  }));
+  const seen = new Set();
+  workroomMessages = messages.filter((message) => {
+    const key = `${message.task_id}:${message.created_at}:${message.sender}:${message.receiver}:${message.body}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()).slice(-100);
+  renderWorkroomMessages();
+}
+
+function upsertWorkroomPresence(entry) {
+  if (!entry || !entry.employee_id) return;
+  const existing = workroomPresence.findIndex((item) => item.employee_id === entry.employee_id);
+  if (existing >= 0) workroomPresence[existing] = { ...workroomPresence[existing], ...entry };
+  else workroomPresence.push(entry);
+  renderWorkroomPresence();
+}
+
+function applyWorkroomEvent(event) {
+  if (!event) return;
+  if (event.type === 'presence' && event.presence) upsertWorkroomPresence(event.presence);
+  if (event.type === 'message' && event.message) { workroomMessages.push(event.message); renderWorkroomMessages(); }
+  if (event.type === 'task_update' && event.task) {
+    const index = workroomTasks.findIndex((task) => task.id === event.task.id);
+    if (index >= 0) workroomTasks[index] = event.task; else workroomTasks.push(event.task);
+    rebuildWorkroomMessages();
+    loadTaskDashboard();
+  }
+  const status = $('#workroom-status');
+  if (status) { status.textContent = 'LIVE'; status.classList.add('signal-ok'); }
+}
+
+async function loadWorkroomSnapshot() {
+  try {
+    const snapshot = await responseJson('/api/workforce/workroom');
+    workroomPresence = snapshot.presence || [];
+    workroomTasks = snapshot.tasks || [];
+    renderWorkroomPresence();
+    rebuildWorkroomMessages();
+    const status = $('#workroom-status');
+    if (status) { status.textContent = 'LIVE'; status.classList.add('signal-ok'); }
+  } catch (error) {
+    const status = $('#workroom-status');
+    if (status) status.textContent = 'UNAVAILABLE';
+    console.error('Unable to load company workroom:', error);
+  }
+}
+
+function connectWorkroom() {
+  if (!window.EventSource) return;
+  if (workroomSource) workroomSource.close();
+  workroomSource = new EventSource('/api/workforce/stream');
+  const handleEvent = (event) => { try { applyWorkroomEvent(JSON.parse(event.data)); } catch (error) { console.warn('Invalid workroom update:', error); } };
+  workroomSource.onopen = () => { const status = $('#workroom-status'); if (status) { status.textContent = 'LIVE'; status.classList.add('signal-ok'); } };
+  workroomSource.onmessage = handleEvent;
+  workroomSource.addEventListener('connected', handleEvent);
+  workroomSource.addEventListener('presence', handleEvent);
+  workroomSource.addEventListener('task_update', handleEvent);
+  workroomSource.onerror = () => { const status = $('#workroom-status'); if (status) status.textContent = 'RECONNECTING…'; };
+}
+
+window.addEventListener('beforeunload', () => workroomSource?.close());
+
 let allTasksCache = [];
 let currentTaskFilter = 'all';
 
@@ -436,7 +526,7 @@ $('#logout-btn')?.addEventListener('click', async (e) => {
   window.location.replace('/login');
 });
 
-(async () => { await Promise.all([loadBilling(), loadApprovals(), loadTools(), loadKnowledge(), loadActivity(), loadHealth(), loadTaskDashboard()]); await loadEmployees(); })();
+(async () => { await Promise.all([loadBilling(), loadApprovals(), loadTools(), loadKnowledge(), loadActivity(), loadHealth(), loadTaskDashboard()]); await loadEmployees(); await loadWorkroomSnapshot(); connectWorkroom(); })();
 
 
 // Liquid-glass interaction polish. This is progressive enhancement only; all core task flows above remain independent of motion.

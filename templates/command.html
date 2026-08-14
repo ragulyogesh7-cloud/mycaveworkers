@@ -20,6 +20,7 @@
       <a class="rail-link" href="/analyst"><i></i>David's data lab <span class="rail-badge analyst-nav-badge">NEW</span></a>
       <a class="rail-link" href="#new-task"><i></i>New task</a>
       <a class="rail-link" href="#team"><i></i>AI team</a>
+      <a class="rail-link" href="#company-workroom"><i></i>Company workroom <span class="rail-badge workroom-nav-badge">LIVE</span></a>
       <a class="rail-link" href="#approvals-section"><i></i>Approvals <span class="rail-badge" id="approval-count-badge">0</span></a>
       <a class="rail-link" href="#task-dashboard-section"><i></i>Tasks <span class="rail-badge" id="task-count-badge">0</span></a>
       <div class="rail-label rail-gap">MANAGE</div>
@@ -73,6 +74,13 @@
             <div id="approvals-list" class="approvals-list"><p class="empty-state-sm">Checking for actions that need your approval…</p></div>
           </article>
         </div>
+
+        <article class="panel-block workroom-panel" id="company-workroom">
+          <div class="panel-head"><div><p class="panel-kicker">COMPANY WORKROOM</p><h2>Live employee floor</h2></div><span class="live-pill" id="workroom-status">CONNECTING…</span></div>
+          <p class="section-help">Watch your employees coordinate, research, and progress company work. Every message is recorded inside this workspace.</p>
+          <div class="workroom-presence" id="workroom-presence"><p class="empty-state-sm">Loading employee presence…</p></div>
+          <div class="workroom-thread" id="workroom-thread"><p class="empty-state-sm">The workroom will show employee updates when the worker is active.</p></div>
+        </article>
 
         <article class="panel-block task-dashboard-panel" id="task-dashboard-section">
           <div class="panel-head"><div><p class="panel-kicker">WORK QUEUE</p><h2>Tasks</h2></div><span class="live-pill" id="task-metrics-summary">0 TOTAL TASKS</span></div>

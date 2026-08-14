@@ -6,6 +6,7 @@ import dotenv from 'dotenv';
 import ejs from 'ejs';
 import crypto from 'crypto';
 import net from 'net';
+import { lookup } from 'dns/promises';
 import Razorpay from 'razorpay';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
@@ -62,6 +63,12 @@ const GOOGLE_OAUTH_CLIENT_SECRET = (process.env.GOOGLE_OAUTH_CLIENT_SECRET || ''
 const GOOGLE_OAUTH_REDIRECT_URI = (process.env.GOOGLE_OAUTH_REDIRECT_URI || `${PUBLIC_APP_URL}/api/google/oauth/callback`).replace(/\/$/, '');
 const MCP_TOKEN_ENCRYPTION_KEY = (process.env.MCP_TOKEN_ENCRYPTION_KEY || '').trim();
 const OAUTH_STATE_SECRET = (process.env.FLASK_SECRET || '').trim();
+const ALWAYS_ON_WORKER_ENABLED = process.env.ALWAYS_ON_WORKER_ENABLED !== 'false';
+const WORKER_POLL_MS = Math.min(Math.max(Number(process.env.WORKER_POLL_MS || '1500') || 1500, 500), 10000);
+const WORKER_INSTANCE_ID = process.env.WORKER_INSTANCE_ID || `worker-${crypto.randomBytes(6).toString('hex')}`;
+const WEB_RESEARCH_ENABLED = process.env.WEB_RESEARCH_ENABLED === 'true';
+const TAVILY_API_KEY = (process.env.TAVILY_API_KEY || '').trim();
+const BRAVE_SEARCH_API_KEY = (process.env.BRAVE_SEARCH_API_KEY || '').trim();
 
 type AnalystNarrativeResult = {
   text: string;
@@ -338,6 +345,28 @@ interface OrgEmployee {
   permissions: Array<{ tool_name: string; access_level: string }>;
 }
 
+interface WebResearchEvidence {
+  title: string;
+  url: string;
+  snippet: string;
+  content_preview?: string;
+  fetched_at: string;
+}
+
+interface WorkforceQueueJob {
+  id: string;
+  task_id: number;
+  company_id: string;
+  question: string;
+  preferred_employee_id?: string;
+  status: 'queued' | 'processing' | 'completed' | 'failed';
+  claimed_by?: string;
+  attempts: number;
+  created_at: string;
+  updated_at: string;
+  error?: string;
+}
+
 interface TaskRecord {
   id: number;
   company_id: string;
@@ -351,6 +380,10 @@ interface TaskRecord {
   participants?: string[];
   collaboration_summary?: string;
   live_tool_evidence?: WorkforceLiveToolEvidence[];
+  web_research?: WebResearchEvidence[];
+  queued_at?: string;
+  started_at?: string;
+  completed_at?: string;
 }
 
 interface WorkforceLiveToolEvidence {
@@ -461,6 +494,8 @@ const db = {
   analystApprovalsLoaded: new Set<string>(),
   employeeMemory: new Map<string, EmployeeMemory[]>(),
   taskTenantsLoaded: new Set<string>(),
+  workforceQueue: new Map<string, WorkforceQueueJob>(),
+  employeePresence: new Map<string, { employee_id: string; status: 'idle' | 'working' | 'offline'; task_id?: number; last_seen_at: string }>(),
   nextTaskId: 1,
   nextApprovalId: 101,
 };
@@ -468,6 +503,7 @@ const db = {
 const authenticatedUsers = new WeakMap<express.Request, User>();
 const pendingPaymentOrders = new Map<string, { uid: string; company_id: string; tier: string; amount: number; created_at: string }>();
 const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
+const workroomStreams = new Map<string, Set<express.Response>>();
 function rateLimitKey(req: express.Request, scope: string): string { return `${scope}:${req.ip || req.socket.remoteAddress || 'unknown'}`; }
 function isRateLimited(key: string, limit: number, windowMs: number): boolean {
   const now = Date.now();
@@ -606,6 +642,229 @@ async function hydrateTenantTasks(companyId: string) {
 async function persistTaskRecord(task: TaskRecord) {
   const collection = analystTenantCollection(task.company_id, 'tasks');
   if (collection) await collection.doc(String(task.id)).set(stripUndefined(task), { merge: true });
+}
+
+
+function queueCollection() {
+  return firestoreDb?.collection('workforce_jobs') || null;
+}
+
+async function persistWorkforceJob(job: WorkforceQueueJob) {
+  db.workforceQueue.set(job.id, job);
+  const collection = queueCollection();
+  if (collection) await collection.doc(job.id).set(stripUndefined(job), { merge: true });
+}
+
+function workroomStreamKey(companyId: string, taskId?: number) {
+  return `${companyId}:${taskId || 'all'}`;
+}
+
+function workroomSnapshot(task: TaskRecord) {
+  return {
+    id: task.id,
+    company_id: task.company_id,
+    question: task.question,
+    owner: task.owner,
+    status: task.status,
+    answer: task.answer,
+    plan: task.plan,
+    trace: task.trace || [],
+    participants: task.participants || [],
+    collaboration_summary: task.collaboration_summary,
+    live_tool_evidence: task.live_tool_evidence || [],
+    web_research: task.web_research || [],
+    queued_at: task.queued_at,
+    started_at: task.started_at,
+    completed_at: task.completed_at,
+  };
+}
+
+function emitWorkroomEvent(companyId: string, taskId: number | undefined, payload: Record<string, any>) {
+  const targets = [workroomStreamKey(companyId), taskId ? workroomStreamKey(companyId, taskId) : ''];
+  const delivered = new Set<express.Response>();
+  targets.filter(Boolean).forEach((key) => {
+    for (const response of workroomStreams.get(key) || []) {
+      if (delivered.has(response)) continue;
+      delivered.add(response);
+      try { response.write(`event: ${payload.type || 'update'}\ndata: ${JSON.stringify(payload)}\n\n`); } catch (_error) { /* cleanup occurs on close */ }
+    }
+  });
+}
+
+function setEmployeePresence(companyId: string, employeeId: string, status: 'idle' | 'working' | 'offline', taskId?: number) {
+  const presence = { employee_id: employeeId, status, task_id: taskId, last_seen_at: new Date().toISOString() };
+  db.employeePresence.set(`${companyId}:${employeeId}`, presence);
+  emitWorkroomEvent(companyId, taskId, { type: 'presence', presence });
+}
+
+function companyPresence(companyId: string) {
+  return activeWorkforce(companyId).map((employee) => db.employeePresence.get(`${companyId}:${employee.id}`) || { employee_id: employee.id, status: 'idle', last_seen_at: new Date().toISOString() });
+}
+
+async function loadQueuedJobs() {
+  const collection = queueCollection();
+  if (!collection) return;
+  try {
+    const snapshot = await collection.where('status', 'in', ['queued', 'processing']).limit(50).get();
+    snapshot.docs.forEach((doc) => {
+      const job = { id: doc.id, ...(doc.data() || {}) } as WorkforceQueueJob;
+      if (job.status === 'processing' && job.claimed_by !== WORKER_INSTANCE_ID) {
+        const staleAt = Date.now() - 5 * 60 * 1000;
+        if (new Date(job.updated_at || 0).getTime() < staleAt) job.status = 'queued'; else return;
+      }
+      db.workforceQueue.set(job.id, job);
+    });
+  } catch (error) {
+    console.warn('Could not hydrate workforce queue:', error);
+  }
+}
+
+async function enqueueWorkforceTask(companyId: string, question: string, preferredEmployeeId?: string) {
+  await hydrateTenantTasks(companyId);
+  const taskId = db.nextTaskId++;
+  const now = new Date().toISOString();
+  const { lead, collaborators } = selectCollaborativeTeam(question || 'Operations review', companyId, preferredEmployeeId);
+  const trace = [{ kind: 'queued', sender: 'Caveworkers worker', receiver: 'Company workroom', body: `Task queued for ${lead.name}. The employee group will begin automatically.`, created_at: now }];
+  const task: TaskRecord = {
+    id: taskId,
+    company_id: companyId,
+    question: question.slice(0, 6000),
+    owner: lead.id,
+    status: 'queued',
+    answer: 'Your employee group is preparing the task…',
+    plan: `Queued → ${lead.name} lead → ${collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'role assessment'} → evidence → manager brief`,
+    created_at: now,
+    queued_at: now,
+    trace,
+    participants: ['Manager', lead.name, ...collaborators.map((employee) => employee.name)],
+    collaboration_summary: `${lead.name} will lead a monitored collaboration with ${collaborators.length || 'no'} additional specialist${collaborators.length === 1 ? '' : 's'}.`,
+    live_tool_evidence: [],
+    web_research: [],
+  };
+  db.tasks.set(taskId, task);
+  await persistTaskRecord(task);
+  const job: WorkforceQueueJob = { id: `${companyId}:${taskId}`, task_id: taskId, company_id: companyId, question: task.question, preferred_employee_id: preferredEmployeeId, status: 'queued', attempts: 0, created_at: now, updated_at: now };
+  await persistWorkforceJob(job);
+  const logs = db.activity.get(companyId) || [];
+  logs.unshift({ id: Date.now(), sender: 'Manager', receiver: 'Caveworkers worker', kind: 'task.queued', body: `Task #${taskId} entered the always-on employee queue.`, created_at: now });
+  db.activity.set(companyId, logs.slice(0, 100));
+  emitWorkroomEvent(companyId, taskId, { type: 'task_update', task: workroomSnapshot(task) });
+  return { ...workroomSnapshot(task), queued: true, worker_instance: WORKER_INSTANCE_ID };
+}
+
+async function claimNextWorkforceJob(): Promise<WorkforceQueueJob | null> {
+  await loadQueuedJobs();
+  const candidates = Array.from(db.workforceQueue.values()).filter((job) => job.status === 'queued').sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+  for (const candidate of candidates) {
+    const collection = queueCollection();
+    if (collection) {
+      try {
+        const claimed = await firestoreDb!.runTransaction(async (transaction) => {
+          const ref = collection.doc(candidate.id);
+          const snapshot = await transaction.get(ref);
+          const current = snapshot.exists ? { id: candidate.id, ...(snapshot.data() || {}) } as WorkforceQueueJob : candidate;
+          if (current.status !== 'queued') return null;
+          const next = { ...current, status: 'processing' as const, claimed_by: WORKER_INSTANCE_ID, attempts: Number(current.attempts || 0) + 1, updated_at: new Date().toISOString() };
+          transaction.set(ref, stripUndefined(next), { merge: true });
+          return next;
+        });
+        if (claimed) { db.workforceQueue.set(candidate.id, claimed); return claimed; }
+      } catch (error) { console.warn('Could not claim workforce job:', error); }
+    } else {
+      candidate.status = 'processing';
+      candidate.claimed_by = WORKER_INSTANCE_ID;
+      candidate.attempts += 1;
+      candidate.updated_at = new Date().toISOString();
+      db.workforceQueue.set(candidate.id, candidate);
+      return candidate;
+    }
+  }
+  return null;
+}
+
+async function updateQueuedTask(task: TaskRecord, status: TaskRecord['status'], body: string) {
+  task.status = status;
+  task.trace = [...(task.trace || []), { kind: status === 'processing' ? 'worker_started' : status === 'failed' ? 'worker_failed' : 'worker_update', sender: 'Caveworkers worker', receiver: 'Company workroom', body, created_at: new Date().toISOString() }];
+  if (status === 'processing') task.started_at = new Date().toISOString();
+  if (status === 'completed' || status === 'pending_approval' || status === 'failed') task.completed_at = new Date().toISOString();
+  await persistTaskRecord(task);
+  emitWorkroomEvent(task.company_id, task.id, { type: 'task_update', task: workroomSnapshot(task) });
+}
+
+let workerBusy = false;
+async function processNextWorkforceJob() {
+  if (!ALWAYS_ON_WORKER_ENABLED || workerBusy) return;
+  workerBusy = true;
+  try {
+    const job = await claimNextWorkforceJob();
+    if (!job) return;
+    const task = db.tasks.get(job.task_id);
+    if (!task || task.company_id !== job.company_id) {
+      job.status = 'failed'; job.error = 'Tenant task record was not found.'; job.updated_at = new Date().toISOString(); await persistWorkforceJob(job); return;
+    }
+    const { lead, collaborators } = selectCollaborativeTeam(job.question, job.company_id, job.preferred_employee_id);
+    const workerEmployees = [...new Set([lead.id, ...collaborators.map((employee) => employee.id)])];
+    workerEmployees.forEach((employeeId) => setEmployeePresence(job.company_id, employeeId, 'working', task.id));
+    await updateQueuedTask(task, 'processing', `${lead.name} accepted the task. The employee group is now working in the company room.`);
+    try {
+      const completed = await handleTaskRoutingAsync(job.question, job.company_id, job.preferred_employee_id, task.id);
+      Object.assign(task, completed);
+      task.status = completed.status || 'completed';
+      task.started_at = task.started_at || new Date().toISOString();
+      task.completed_at = new Date().toISOString();
+      await persistTaskRecord(task);
+      job.status = 'completed'; job.updated_at = new Date().toISOString(); await persistWorkforceJob(job);
+      emitWorkroomEvent(job.company_id, task.id, { type: 'task_update', task: workroomSnapshot(task) });
+    } catch (error: any) {
+      task.answer = 'The employee group could not complete this task. Review the workroom trace and retry when the source is available.';
+      await updateQueuedTask(task, 'failed', String(error?.message || 'Worker execution failed').slice(0, 300));
+      job.status = 'failed'; job.error = String(error?.message || 'Worker execution failed').slice(0, 300); job.updated_at = new Date().toISOString(); await persistWorkforceJob(job);
+    } finally {
+      workerEmployees.forEach((employeeId) => setEmployeePresence(job.company_id, employeeId, 'idle'));
+    }
+  } finally {
+    workerBusy = false;
+  }
+}
+
+async function startAlwaysOnWorker() {
+  if (!ALWAYS_ON_WORKER_ENABLED) { console.log('Always-on workforce worker disabled by configuration.'); return; }
+  console.log(`Always-on workforce worker enabled (${WORKER_INSTANCE_ID}); poll ${WORKER_POLL_MS}ms.`);
+  await processNextWorkforceJob();
+  const timer = setInterval(() => { void processNextWorkforceJob(); }, WORKER_POLL_MS);
+  (timer as any).unref?.();
+}
+
+async function performWebResearch(question: string): Promise<WebResearchEvidence[]> {
+  if (!WEB_RESEARCH_ENABLED || (!TAVILY_API_KEY && !BRAVE_SEARCH_API_KEY)) return [];
+  let results: Array<{ title?: string; url?: string; snippet?: string }> = [];
+  try {
+    if (TAVILY_API_KEY) {
+      const response = await fetch('https://api.tavily.com/search', { method: 'POST', signal: AbortSignal.timeout(12000), headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ api_key: TAVILY_API_KEY, query: question.slice(0, 500), search_depth: 'basic', max_results: 5, include_answer: false }) });
+      if (response.ok) { const payload: any = await response.json(); results = Array.isArray(payload?.results) ? payload.results : []; }
+    } else if (BRAVE_SEARCH_API_KEY) {
+      const response = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(question.slice(0, 500))}&count=5`, { signal: AbortSignal.timeout(12000), headers: { Accept: 'application/json', 'X-Subscription-Token': BRAVE_SEARCH_API_KEY } });
+      if (response.ok) { const payload: any = await response.json(); results = Array.isArray(payload?.web?.results) ? payload.web.results.map((entry: any) => ({ title: entry.title, url: entry.url, snippet: entry.description })) : []; }
+    }
+  } catch (error) { console.warn('Web research provider failure:', error instanceof Error ? error.name : 'unknown_error'); }
+  const evidence: WebResearchEvidence[] = [];
+  for (const result of results.slice(0, 5)) {
+    const url = String(result.url || '').trim();
+    if (!url || !/^https:\/\//i.test(url)) continue;
+    try {
+      const parsed = new URL(url);
+      if (isPrivateOrLocalHost(parsed.hostname)) continue;
+      const addresses = await lookup(parsed.hostname, { all: true });
+      if (addresses.some((address) => isPrivateOrLocalHost(address.address))) continue;
+      let preview = '';
+      const page = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(12000), headers: { Accept: 'text/html,text/plain', 'User-Agent': 'CaveworkersResearch/1.0' } });
+      if (page.ok) preview = (await page.text()).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1000);
+      evidence.push({ title: String(result.title || url).slice(0, 200), url: url.slice(0, 500), snippet: String(result.snippet || '').slice(0, 500), content_preview: preview, fetched_at: new Date().toISOString() });
+    } catch (_error) {
+      evidence.push({ title: String(result.title || url).slice(0, 200), url: url.slice(0, 500), snippet: String(result.snippet || '').slice(0, 500), fetched_at: new Date().toISOString() });
+    }
+  }
+  return evidence;
 }
 
 function connectorPublicView(connection: TenantConnector) {
@@ -1277,6 +1536,19 @@ async function enforceWorkspaceAccess(req: express.Request, res: express.Respons
   return false;
 }
 
+function getTenantIdOrFail(req: express.Request, res: express.Response): string | null {
+  const user = getAuthUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Authentication required.' });
+    return null;
+  }
+  if (!user.company_id) {
+    res.status(403).json({ error: 'A verified workspace is required.' });
+    return null;
+  }
+  return user.company_id;
+}
+
 // ── PAGE ROUTES ──────────────────────────────────────────
 
 app.get('/', (_req, res) => {
@@ -1752,8 +2024,8 @@ app.post('/api/employees/:id/tools', async (req, res) => {
 
 app.get('/api/employees/:id/profile', async (req, res) => {
   const user = getAuthUser(req);
-  if (!user) return res.status(401).json({ error: 'Authentication required.' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
   const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
   if (!employee) return res.status(404).json({ error: 'Employee not found.' });
   const active = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === employee.id);
@@ -1764,32 +2036,35 @@ app.get('/api/employees/:id/profile', async (req, res) => {
 
 app.get('/api/employees/:id/memory', async (req, res) => {
   const user = getAuthUser(req);
-  if (!user) return res.status(401).json({ error: 'Authentication required.' });
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
   const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
   if (!employee) return res.status(404).json({ error: 'Employee not found.' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
   res.json({ memory: await loadEmployeeMemory(companyId, employee.id) });
 });
 
 app.post('/api/employees/:id/memory', async (req, res) => {
   const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
   if (await enforceWorkspaceAccess(req, res)) return;
   const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
   if (!employee) return res.status(404).json({ error: 'Employee not found.' });
   const content = String(req.body?.content || '').trim();
   const category = ['preference', 'playbook', 'handoff'].includes(req.body?.category) ? req.body.category : 'preference';
   if (!content || content.length > 1200) return res.status(400).json({ error: 'Memory must be between 1 and 1200 characters.' });
-  const memory: EmployeeMemory = { id: `memory_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, company_id: user?.company_id || DEFAULT_COMPANY_ID, employee_id: employee.id, category, content, created_at: new Date().toISOString() };
+  const memory: EmployeeMemory = { id: `memory_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, company_id: companyId, employee_id: employee.id, category, content, created_at: new Date().toISOString() };
   await persistEmployeeMemory(memory);
   res.status(201).json({ memory });
 });
 
 app.delete('/api/employees/:id/memory/:memoryId', async (req, res) => {
   const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
   if (await enforceWorkspaceAccess(req, res)) return;
   const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
   if (!employee) return res.status(404).json({ error: 'Employee not found.' });
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
   const memories = await loadEmployeeMemory(companyId, employee.id);
   if (!memories.some((entry) => entry.id === req.params.memoryId)) return res.status(404).json({ error: 'Memory note not found.' });
   await deleteEmployeeMemory(companyId, employee.id, req.params.memoryId);
@@ -1797,19 +2072,53 @@ app.delete('/api/employees/:id/memory/:memoryId', async (req, res) => {
 });
 
 app.get('/api/tasks/:id/group-chat', async (req, res) => {
-  const user = getAuthUser(req);
-  if (!user) return res.status(401).json({ error: 'Authentication required.' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
   await hydrateTenantTasks(companyId);
   const task = db.tasks.get(Number(req.params.id));
   if (!task || task.company_id !== companyId) return res.status(404).json({ error: 'Task room not found.' });
   res.json({ task_id: task.id, question: task.question, owner: task.owner, participants: task.participants || ['Manager', task.owner], messages: task.trace.filter((step) => !['rag_retrieval', 'verified'].includes(step.kind)) });
 });
 
-app.get('/api/employees/:id/conversation', (req, res) => {
+
+app.get('/api/workforce/workroom', async (req, res) => {
   const user = getAuthUser(req);
-  if (!user) return res.status(401).json({ error: 'Authentication required.' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
+  await hydrateTenantTasks(companyId);
+  const tasks = Array.from(db.tasks.values()).filter((task) => task.company_id === companyId).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).slice(0, 30).map(workroomSnapshot);
+  res.json({ company: { id: companyId, name: user.company_name || 'Your company' }, employees: activeWorkforce(companyId), presence: companyPresence(companyId), tasks, worker: { enabled: ALWAYS_ON_WORKER_ENABLED, instance: WORKER_INSTANCE_ID, poll_ms: WORKER_POLL_MS }, research: { enabled: WEB_RESEARCH_ENABLED && Boolean(TAVILY_API_KEY || BRAVE_SEARCH_API_KEY) } });
+});
+
+app.post('/api/workforce/workroom', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const message = String(req.body?.message || '').trim().slice(0, 6000);
+  if (!message) return res.status(400).json({ error: 'A company workroom message is required.' });
+  const result = await enqueueWorkforceTask(companyId, message, typeof req.body?.preferred_employee_id === 'string' ? req.body.preferred_employee_id : undefined);
+  res.status(202).json(result);
+});
+
+app.get('/api/workforce/stream', (req, res) => {
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
+  const requestedTaskId = Number(req.query.task_id);
+  const taskId = Number.isFinite(requestedTaskId) && requestedTaskId > 0 ? requestedTaskId : undefined;
+  const key = workroomStreamKey(companyId, taskId);
+  res.status(200).set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+  res.flushHeaders?.();
+  const streams = workroomStreams.get(key) || new Set<express.Response>();
+  streams.add(res); workroomStreams.set(key, streams);
+  res.write(`event: connected\ndata: ${JSON.stringify({ company_id: companyId, task_id: taskId || null })}\n\n`);
+  const heartbeat = setInterval(() => { try { res.write(': heartbeat\n\n'); } catch (_error) { clearInterval(heartbeat); } }, 15000);
+  req.on('close', () => { clearInterval(heartbeat); streams.delete(res); if (!streams.size) workroomStreams.delete(key); });
+});
+
+app.get('/api/employees/:id/conversation', (req, res) => {
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
   const empId = req.params.id;
   const key = `${companyId}:${empId}`;
 
@@ -1943,9 +2252,10 @@ function collaborationFinding(employee: any, question: string, context?: Workfor
   return `${employee.name} reviewed the ${employee.department.toLowerCase()} implications of “${topic}” and returned a permissioned recommendation for the lead’s decision brief.${toolNote}${connectorNote}${memoryNote}${evidenceNote}`;
 }
 
-async function handleTaskRoutingAsync(question: string, companyId: string, preferredEmployeeId?: string) {
+async function handleTaskRoutingAsync(question: string, companyId: string, preferredEmployeeId?: string, existingTaskId?: number) {
   await hydrateTenantTasks(companyId);
-  const taskId = db.nextTaskId++;
+  const taskId = existingTaskId || db.nextTaskId++;
+  const existingTask = existingTaskId ? db.tasks.get(existingTaskId) : undefined;
   const now = new Date().toISOString();
   const { lead, collaborators, workforce } = selectCollaborativeTeam(question || 'Operations review', companyId, preferredEmployeeId);
   const lowerQ = (question || '').toLowerCase();
@@ -1955,12 +2265,15 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   }));
   const contextByEmployeeId = new Map(specialistContexts.map((context) => [context.employee.id, context]));
   const knowList = db.knowledge.get(companyId) || [];
+  const webResearch = await performWebResearch(question);
   const relevantDocs = knowList.filter((document) => lowerQ.includes(document.title.toLowerCase()) || document.content.toLowerCase().split(' ').some((word) => word.length > 4 && lowerQ.includes(word)));
   const knowText = relevantDocs.length ? relevantDocs.map((document) => `[${document.title}] ${document.content}`).join('\n').slice(0, 2400) : 'No matching workspace knowledge was found.';
+  const webText = webResearch.length ? webResearch.map((source) => `[${source.title}] ${source.url}\n${source.snippet}\n${source.content_preview || ''}`).join('\n\n').slice(0, 4200) : 'No web research provider is enabled or no public sources matched.';
   const trace: any[] = [
     { kind: 'received', sender: 'Manager', receiver: 'Caveworkers group', body: `New task: “${question}”`, created_at: now },
     { kind: 'team_context', sender: 'Caveworkers coordinator', receiver: lead.name, body: `${lead.name} is leading with ${collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'no additional specialist'} assigned for this task.`, created_at: new Date(Date.now() + 250).toISOString() },
-    { kind: 'knowledge', sender: 'Workspace knowledge', receiver: lead.name, body: relevantDocs.length ? `Shared ${relevantDocs.length} relevant workspace reference${relevantDocs.length === 1 ? '' : 's'} with the team.` : 'No matching reference was found; the team will state assumptions clearly.', created_at: new Date(Date.now() + 500).toISOString() }
+    { kind: 'knowledge', sender: 'Workspace knowledge', receiver: lead.name, body: relevantDocs.length ? `Shared ${relevantDocs.length} relevant workspace reference${relevantDocs.length === 1 ? '' : 's'} with the team.` : 'No matching reference was found; the team will state assumptions clearly.', created_at: new Date(Date.now() + 500).toISOString() },
+    ...(webResearch.length ? [{ kind: 'web_research', sender: 'Caveworkers research desk', receiver: 'Company workroom', body: `Collected ${webResearch.length} public source${webResearch.length === 1 ? '' : 's'} for the team. Sources remain linked in the task evidence panel.`, created_at: new Date(Date.now() + 650).toISOString() }] : [])
   ];
   collaborators.forEach((employee, index) => {
     trace.push({ kind: 'group_message', sender: lead.name, receiver: employee.name, body: `@${employee.name} Please assess the ${employee.department.toLowerCase()} portion of this request and return constraints, evidence needed, and a safe next step.`, created_at: new Date(Date.now() + 900 + index * 600).toISOString() });
@@ -1969,7 +2282,7 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   specialistContexts.flatMap((context) => context.live_tool_evidence).forEach((evidence, index) => {
     trace.push({ kind: 'tool_execution', sender: evidence.employee_name, receiver: 'Caveworkers group', body: `${evidence.status === 'executed' ? 'Read tool executed' : 'Read tool failed'}: ${evidence.connector_name} / ${evidence.tool_name}. ${evidence.summary.slice(0, 500)}`, created_at: new Date(Date.now() + 650 + index * 120).toISOString() });
   });
-  const teamBrief = specialistContexts.map((context) => `${context.employee.name}: ${context.employee.role} — ${context.employee.persona}\nGranted tools: ${context.tools.join(', ') || 'none'}\nConnected tenant tools: ${context.connectors.join(', ') || 'none'}\nRole memory: ${context.memory.join(' | ') || 'none'}\nLive MCP evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} [${entry.status}] ${entry.summary.slice(0, 900)}`).join(' | ') || 'none'}`).join('\n\n');
+  const teamBrief = `Public research evidence:\n${webText}\n\n` + specialistContexts.map((context) => `${context.employee.name}: ${context.employee.role} — ${context.employee.persona}\nGranted tools: ${context.tools.join(', ') || 'none'}\nConnected tenant tools: ${context.connectors.join(', ') || 'none'}\nRole memory: ${context.memory.join(' | ') || 'none'}\nLive MCP evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} [${entry.status}] ${entry.summary.slice(0, 900)}`).join(' | ') || 'none'}`).join('\n\n');
   let answer = '';
   if (genAIClient) {
     try {
@@ -1994,21 +2307,23 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   trace.push({ kind: 'group_message', sender: lead.name, receiver: 'Caveworkers group', body: `I consolidated the team’s inputs into the manager brief. The task ledger now contains the full conversation and approval state.`, created_at: new Date(Date.now() + 3400).toISOString() });
   trace.push({ kind: 'completed', sender: lead.name, receiver: 'Task ledger', body: 'Collaborative task recorded with tenant-scoped participants and audit trace.', created_at: new Date(Date.now() + 3600).toISOString() });
   const liveToolEvidence = specialistContexts.flatMap((context) => context.live_tool_evidence);
-  const taskRecord: TaskRecord = { id: taskId, company_id: companyId, question, owner: lead.id, status: requiresApproval ? 'pending_approval' : 'completed', answer, plan: `1. Intake → 2. Assign ${lead.name} → 3. Group specialist handoffs${collaborators.length ? ` (${collaborators.map((employee) => employee.name).join(', ')})` : ''} → 4. Permissioned read tools → 5. Consolidate → 6. Human approval if required`, created_at: now, trace, participants: ['Manager', lead.name, ...collaborators.map((employee) => employee.name)], collaboration_summary: `${lead.name} led a permissioned collaboration with ${collaborators.length || 'no'} additional specialist${collaborators.length === 1 ? '' : 's'}.`, live_tool_evidence: liveToolEvidence };
+  const taskRecord: TaskRecord = { id: taskId, company_id: companyId, question, owner: lead.id, status: requiresApproval ? 'pending_approval' : 'completed', answer, plan: `1. Intake → 2. Assign ${lead.name} → 3. Group specialist handoffs${collaborators.length ? ` (${collaborators.map((employee) => employee.name).join(', ')})` : ''} → 4. Permissioned read tools → 5. Consolidate → 6. Human approval if required`, created_at: now, trace, participants: ['Manager', lead.name, ...collaborators.map((employee) => employee.name)], collaboration_summary: `${lead.name} led a permissioned collaboration with ${collaborators.length || 'no'} additional specialist${collaborators.length === 1 ? '' : 's'}.`, live_tool_evidence: liveToolEvidence, web_research: webResearch, queued_at: existingTask?.queued_at, started_at: existingTask?.started_at || now, completed_at: new Date().toISOString() };
   db.tasks.set(taskId, taskRecord);
   await persistTaskRecord(taskRecord);
   const logs = db.activity.get(companyId) || [];
   logs.unshift({ id: Date.now(), sender: lead.name, receiver: collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'Task ledger', kind: 'task.collaborative', body: `Task #${taskId} completed with a visible group-chat audit trail.`, created_at: now });
   db.activity.set(companyId, logs);
-  return { id: taskId, owner: lead.id, participants: taskRecord.participants, status: taskRecord.status, plan: taskRecord.plan, answer, trace, live_tool_evidence: liveToolEvidence, collaboration_summary: taskRecord.collaboration_summary, workforce_size: workforce.length };
+  return { id: taskId, company_id: companyId, question, status: taskRecord.status, owner: lead.id, participants: taskRecord.participants, plan: taskRecord.plan, answer, trace, live_tool_evidence: liveToolEvidence, web_research: webResearch, collaboration_summary: taskRecord.collaboration_summary, workforce_size: workforce.length };
 }
 app.post('/api/task', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const { request: question, preferred_employee_id: preferredEmployeeId } = req.body || {};
-  const result = await handleTaskRoutingAsync(question || 'Operations review', companyId, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined);
-  res.json(result);
+  const normalizedQuestion = String(question || 'Operations review').trim().slice(0, 6000);
+  if (!normalizedQuestion) return res.status(400).json({ error: 'A task request is required.' });
+  const result = await enqueueWorkforceTask(companyId, normalizedQuestion, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined);
+  res.status(202).json(result);
 });
 
 app.post('/api/tasks', async (req, res) => {
@@ -2016,8 +2331,10 @@ app.post('/api/tasks', async (req, res) => {
   if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const { request: question, preferred_employee_id: preferredEmployeeId } = req.body || {};
-  const result = await handleTaskRoutingAsync(question || 'Operations review', companyId, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined);
-  res.json(result);
+  const normalizedQuestion = String(question || 'Operations review').trim().slice(0, 6000);
+  if (!normalizedQuestion) return res.status(400).json({ error: 'A task request is required.' });
+  const result = await enqueueWorkforceTask(companyId, normalizedQuestion, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined);
+  res.status(202).json(result);
 });
 
 app.get('/api/tasks', async (req, res) => {
@@ -2653,4 +2970,5 @@ app.get('/api/office/status', (req, res) => {
 
 app.listen(PORT, HOST, () => {
   console.log(`CaveWorkers backend running on http://${HOST}:${PORT}`);
+  void startAlwaysOnWorker();
 });
