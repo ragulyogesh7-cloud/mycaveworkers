@@ -313,3 +313,26 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .workspace-tools-grid .panel-block { padding: 18px; }
   .activity-panel > .event-feed { padding: 0 19px 19px; }
 }
+
+/* Collaborative workforce: manager-visible task group chat */
+.task-team-line { margin: 10px 0 0; color: #a6b9ca; font: 11px/1.5 'DM Mono', monospace; letter-spacing: .01em; }
+.task-team-line b { color: #9beeff; }
+.group-chat-button { border-color: rgba(103, 232, 249, .36) !important; color: #9beeff !important; }
+.task-group-chat-drawer { display: none; margin-top: 14px; padding: 16px; border: 1px solid rgba(103, 232, 249, .2); border-radius: 14px; background: linear-gradient(145deg, rgba(8, 24, 36, .72), rgba(10, 15, 28, .65)); }
+.group-chat-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.group-chat-head .panel-kicker { margin: 0 0 5px; color: #8ceeff; }
+.group-chat-head b { color: #e9f6ff; font-size: 14px; }
+.group-chat-head > span { color: #a7c3d8; font: 10px 'DM Mono', monospace; text-transform: uppercase; white-space: nowrap; }
+.group-chat-help { margin: 10px 0 14px; color: #9db2c4; font-size: 12px; line-height: 1.5; }
+.task-group-messages { display: grid; gap: 9px; max-height: 460px; overflow: auto; padding-right: 3px; }
+.task-group-message { display: grid; grid-template-columns: 29px 1fr; gap: 9px; padding: 10px; border-radius: 12px; border: 1px solid rgba(172, 222, 255, .11); background: rgba(4, 10, 20, .34); }
+.task-group-message.group_message { border-color: rgba(182,245,106,.15); background: rgba(182,245,106,.04); }
+.task-group-message.approval_required { border-color: rgba(251,191,36,.27); background: rgba(251,191,36,.07); }
+.task-group-message.completed { border-color: rgba(103,232,249,.2); }
+.group-message-avatar { width: 29px; height: 29px; display: grid; place-items: center; border-radius: 9px; background: rgba(103, 232, 249, .15); color: #9beeff; font: 700 12px 'Space Grotesk', sans-serif; }
+.task-group-message.group_message .group-message-avatar { color: #d8ff9a; background: rgba(182,245,106,.14); }
+.group-message-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 5px; color: #b9c8d6; font-size: 11px; }
+.group-message-meta b { color: #eff8ff; font-size: 12px; }
+.group-message-meta time { margin-left: auto; color: #7890a4; font: 10px 'DM Mono', monospace; }
+.task-group-message p { margin: 5px 0 0; color: #cbd7e3; font-size: 12px; line-height: 1.55; }
+@media (max-width: 560px) { .group-chat-head { display: block; } .group-chat-head > span { display: inline-block; margin-top: 7px; } .group-message-meta time { width: 100%; margin-left: 0; } }

@@ -232,76 +232,64 @@ const SUBSCRIPTION_PLANS: Record<string, any> = {
 
 const EMPLOYEE_CATALOG = [
   {
-    id: 'sarah',
-    employee_code: 'CW_EMP_001',
-    name: 'Sarah',
-    role: 'HR & Talent Acquisition Manager',
-    department: 'Human Resources',
-    color: '#10b981',
-    autonomy_level: 'Level 3 (Recommend with Review)',
-    system_prompt: 'You are Sarah, HR Manager at Caveworkers OS. Specializations: recruiting, candidate screening, onboarding, HR policy compliance, leave management, employee communication.',
-    default_tools: ['Gmail', 'Notion', 'Slack'],
-    status: 'active'
+    id: 'sarah', employee_code: 'CW_EMP_001', name: 'Sarah', role: 'Talent & HR Manager', department: 'Talent & Human Resources', color: '#10b981', autonomy_level: 'Level 3 (Recommend with Review)',
+    persona: 'A precise, empathetic talent leader who turns workforce needs into compliant, human-first hiring and onboarding decisions.',
+    system_prompt: 'You are Sarah, Caveworkers Talent & HR Manager. You own recruiting plans, candidate screening, interview operations, onboarding readiness, policy-aware people communications, and safe handoffs to People Operations and Analytics.',
+    default_tools: ['Gmail', 'Google Calendar', 'ATS / HRIS MCP', 'Drive / Notion'], collaborates_with: ['arav', 'david', 'alex'], status: 'active'
   },
   {
-    id: 'david',
-    employee_code: 'CW_EMP_002',
-    name: 'David',
-    role: 'Data & Financial Analyst',
-    department: 'Finance & Analytics',
-    color: '#f59e0b',
-    autonomy_level: 'Level 2 (Analyze & Draft)',
-    system_prompt: 'You are David, Data Analyst. Specializations: SQL queries, revenue analysis, KPI calculations, trend detection, business reports, workforce demand forecasting.',
-    default_tools: ['SQL workspace', 'Notion', 'Slack'],
-    status: 'active'
+    id: 'david', employee_code: 'CW_EMP_002', name: 'David', role: 'Data & Financial Analyst', department: 'Finance & Analytics', color: '#f59e0b', autonomy_level: 'Level 2 (Analyze & Draft)',
+    persona: 'An evidence-first analyst who distinguishes data from assumptions, surfaces uncertainty, and gives every department a decision-ready view of the numbers.',
+    system_prompt: 'You are David, Caveworkers Data & Financial Analyst. You own read-only business analysis, KPI definitions, trends, forecasts, variance explanations, and evidence-backed handoffs to the workforce.',
+    default_tools: ['Google Sheets', 'SQL workspace', 'Gmail', 'Custom analytics MCP'], collaborates_with: ['priya', 'olivia', 'maya', 'sarah', 'arav', 'alex'], status: 'active'
   },
   {
-    id: 'alex',
-    employee_code: 'CW_EMP_003',
-    name: 'Alex',
-    role: 'Senior Operations Specialist',
-    department: 'Operations',
-    color: '#3b82f6',
-    autonomy_level: 'Level 4 (Execute with Approval)',
-    system_prompt: 'You are Alex, Operations Specialist. Specializations: task routing, SLA management, workflow orchestration, vendor communications.',
-    default_tools: ['SQL workspace', 'Gmail', 'Notion'],
-    status: 'active'
+    id: 'alex', employee_code: 'CW_EMP_003', name: 'Alex', role: 'Operations Manager', department: 'Operations', color: '#3b82f6', autonomy_level: 'Level 4 (Execute with Approval)',
+    persona: 'A calm operating leader who turns ambiguous requests into accountable workflows, clear owners, service levels, and escalation paths.',
+    system_prompt: 'You are Alex, Caveworkers Operations Manager. You own workflow design, work intake, SLA tracking, vendor and team coordination, process documentation, and approval-gated operational actions.',
+    default_tools: ['Gmail', 'Google Calendar', 'Sheets', 'Project management MCP', 'Notion'], collaborates_with: ['david', 'mike', 'iris', 'emma'], status: 'active'
   },
   {
-    id: 'mike',
-    employee_code: 'CW_EMP_004',
-    name: 'Mike',
-    role: 'Technical Lead & Systems Developer',
-    department: 'Engineering',
-    color: '#8b5cf6',
-    autonomy_level: 'Level 3 (Recommend with Review)',
-    system_prompt: 'You are Mike, Technical Lead. Specializations: architecture review, repository management, CI/CD, MCP connector verification.',
-    default_tools: ['Notion', 'Slack'],
-    status: 'active'
+    id: 'mike', employee_code: 'CW_EMP_004', name: 'Mike', role: 'Engineering Manager', department: 'Engineering', color: '#8b5cf6', autonomy_level: 'Level 3 (Recommend with Review)',
+    persona: 'A pragmatic engineering leader who prioritizes reliability, technical clarity, change safety, and honest incident communication.',
+    system_prompt: 'You are Mike, Caveworkers Engineering Manager. You own technical planning, backlog and incident triage, architecture review, release readiness, repository and CI workflow drafts, and safe technical handoffs.',
+    default_tools: ['GitHub MCP', 'Jira / Linear MCP', 'Slack', 'Notion'], collaborates_with: ['iris', 'alex', 'david'], status: 'active'
   },
   {
-    id: 'emma',
-    employee_code: 'CW_EMP_005',
-    name: 'Emma',
-    role: 'Customer Success Lead',
-    department: 'Support',
-    color: '#ec4899',
-    autonomy_level: 'Level 2 (Analyze & Draft)',
-    system_prompt: 'You are Emma, Customer Success Lead. Specializations: client onboarding, support ticket resolution, client retention feedback.',
-    default_tools: ['Gmail', 'Slack'],
-    status: 'active'
+    id: 'emma', employee_code: 'CW_EMP_005', name: 'Emma', role: 'Customer Success Manager', department: 'Customer Success', color: '#ec4899', autonomy_level: 'Level 2 (Analyze & Draft)',
+    persona: 'A thoughtful customer advocate who turns inbound signals into timely, empathetic resolutions and clear account-health actions.',
+    system_prompt: 'You are Emma, Caveworkers Customer Success Manager. You own customer triage, onboarding progress, support insight, renewal risk summaries, knowledge-base drafts, and escalation handoffs.',
+    default_tools: ['Gmail', 'Help desk MCP', 'CRM MCP', 'Slack', 'Knowledge base MCP'], collaborates_with: ['olivia', 'alex', 'david'], status: 'active'
   },
   {
-    id: 'arav',
-    employee_code: 'CW_EMP_006',
-    name: 'Arav',
-    role: 'People Operations & HR Analyst',
-    department: 'Human Resources',
-    color: '#06b6d4',
-    autonomy_level: 'Level 3 (Recommend with Review)',
-    system_prompt: 'You are Arav, People Operations Specialist. Specializations: workforce analytics, compensation benchmarks, handbook policy updates.',
-    default_tools: ['Notion', 'Gmail'],
-    status: 'active'
+    id: 'arav', employee_code: 'CW_EMP_006', name: 'Arav', role: 'People Operations Manager', department: 'People Operations', color: '#06b6d4', autonomy_level: 'Level 3 (Recommend with Review)',
+    persona: 'A discreet people-operations specialist who turns policy, workforce signals, and employee moments into consistent internal operations.',
+    system_prompt: 'You are Arav, Caveworkers People Operations Manager. You own people-program operations, policy acknowledgements, onboarding and offboarding logistics, engagement reporting, and confidential workflow handoffs.',
+    default_tools: ['HRIS MCP', 'Gmail', 'Google Calendar', 'Drive / Notion'], collaborates_with: ['sarah', 'david', 'alex'], status: 'active'
+  },
+  {
+    id: 'olivia', employee_code: 'CW_EMP_007', name: 'Olivia', role: 'Sales & Revenue Operations Manager', department: 'Revenue Operations', color: '#f97316', autonomy_level: 'Level 3 (Recommend with Review)',
+    persona: 'A revenue operator who keeps pipeline reality, follow-up discipline, customer context, and forecasting aligned without overstating certainty.',
+    system_prompt: 'You are Olivia, Caveworkers Sales & Revenue Operations Manager. You own lead qualification, pipeline hygiene, CRM workflow drafts, account follow-up preparation, revenue forecast handoffs, and approval-gated outreach.',
+    default_tools: ['CRM MCP', 'Gmail', 'Google Calendar', 'Google Sheets'], collaborates_with: ['emma', 'david', 'maya'], status: 'active'
+  },
+  {
+    id: 'maya', employee_code: 'CW_EMP_008', name: 'Maya', role: 'Marketing & Growth Manager', department: 'Marketing & Growth', color: '#e879f9', autonomy_level: 'Level 3 (Recommend with Review)',
+    persona: 'A commercially minded growth leader who converts audience insight and performance signals into cohesive, reviewable campaigns.',
+    system_prompt: 'You are Maya, Caveworkers Marketing & Growth Manager. You own campaign briefs, content calendars, audience research, performance synthesis, lifecycle draft work, and approval-gated publishing plans.',
+    default_tools: ['Analytics MCP', 'Ads MCP', 'CRM MCP', 'Google Sheets', 'Content / social MCP'], collaborates_with: ['olivia', 'david', 'emma'], status: 'active'
+  },
+  {
+    id: 'priya', employee_code: 'CW_EMP_009', name: 'Priya', role: 'Finance Operations Manager', department: 'Finance Operations', color: '#14b8a6', autonomy_level: 'Level 3 (Recommend with Review)',
+    persona: 'A methodical finance operator who keeps transaction workflows organized, exception-aware, and subject to appropriate review.',
+    system_prompt: 'You are Priya, Caveworkers Finance Operations Manager. You own invoice and expense workflow drafts, receivables follow-up preparation, budget variance operations, cash-flow preparation, and audit-ready handoffs to David.',
+    default_tools: ['Accounting MCP', 'Gmail', 'Google Sheets', 'Drive / Notion'], collaborates_with: ['david', 'olivia', 'alex'], status: 'active'
+  },
+  {
+    id: 'iris', employee_code: 'CW_EMP_010', name: 'Iris', role: 'IT & Security Operations Manager', department: 'IT & Security', color: '#64748b', autonomy_level: 'Level 3 (Recommend with Review)',
+    persona: 'A security-conscious IT operator who prefers least privilege, clear evidence, reversible changes, and escalation before impact.',
+    system_prompt: 'You are Iris, Caveworkers IT & Security Operations Manager. You own IT request triage, access-review drafts, security questionnaire evidence, asset and compliance workflow preparation, and approval-gated administrative changes.',
+    default_tools: ['Identity provider MCP', 'ITSM MCP', 'Endpoint / security MCP', 'Gmail', 'Drive'], collaborates_with: ['mike', 'alex', 'david'], status: 'active'
   }
 ];
 
@@ -360,6 +348,17 @@ interface TaskRecord {
   plan: string;
   created_at: string;
   trace: any[];
+  participants?: string[];
+  collaboration_summary?: string;
+}
+
+interface EmployeeMemory {
+  id: string;
+  company_id: string;
+  employee_id: string;
+  category: 'preference' | 'playbook' | 'handoff';
+  content: string;
+  created_at: string;
 }
 
 interface ApprovalRecord {
@@ -449,6 +448,8 @@ const db = {
   analystMemory: new Map<string, AnalystMemory[]>(),
   analystRuns: new Map<string, AnalystRun[]>(),
   analystApprovalsLoaded: new Set<string>(),
+  employeeMemory: new Map<string, EmployeeMemory[]>(),
+  taskTenantsLoaded: new Set<string>(),
   nextTaskId: 1,
   nextApprovalId: 101,
 };
@@ -531,6 +532,69 @@ function analystTenantCollection(companyId: string, collection: string) {
 
 function connectorCollection(companyId: string) {
   return analystTenantCollection(companyId, 'connectors');
+}
+
+function employeeMemoryKey(companyId: string, employeeId: string) {
+  return `${companyId}:${employeeId}`;
+}
+
+async function loadEmployeeMemory(companyId: string, employeeId: string): Promise<EmployeeMemory[]> {
+  const key = employeeMemoryKey(companyId, employeeId);
+  const cached = db.employeeMemory.get(key);
+  if (cached) return cached;
+  const collection = analystTenantCollection(companyId, 'employee_memory');
+  if (collection) {
+    try {
+      const snapshot = await collection.where('employee_id', '==', employeeId).get();
+      const entries = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as EmployeeMemory)).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)).slice(0, 50);
+      db.employeeMemory.set(key, entries);
+      return entries;
+    } catch (error) {
+      console.warn('Could not load employee memory:', error);
+    }
+  }
+  db.employeeMemory.set(key, []);
+  return [];
+}
+
+async function persistEmployeeMemory(memory: EmployeeMemory) {
+  const key = employeeMemoryKey(memory.company_id, memory.employee_id);
+  const existing = db.employeeMemory.get(key) || [];
+  db.employeeMemory.set(key, [memory, ...existing.filter((entry) => entry.id !== memory.id)].slice(0, 50));
+  const collection = analystTenantCollection(memory.company_id, 'employee_memory');
+  if (collection) await collection.doc(memory.id).set(stripUndefined(memory), { merge: true });
+}
+
+async function deleteEmployeeMemory(companyId: string, employeeId: string, memoryId: string) {
+  const key = employeeMemoryKey(companyId, employeeId);
+  const entries = await loadEmployeeMemory(companyId, employeeId);
+  db.employeeMemory.set(key, entries.filter((entry) => entry.id !== memoryId));
+  const collection = analystTenantCollection(companyId, 'employee_memory');
+  if (collection) await collection.doc(memoryId).delete();
+}
+
+async function hydrateTenantTasks(companyId: string) {
+  if (db.taskTenantsLoaded.has(companyId)) return;
+  db.taskTenantsLoaded.add(companyId);
+  const collection = analystTenantCollection(companyId, 'tasks');
+  if (!collection) return;
+  try {
+    const snapshot = await collection.orderBy('created_at', 'desc').limit(100).get();
+    snapshot.docs.forEach((doc) => {
+      const record = { id: Number(doc.data()?.id || doc.id), ...(doc.data() || {}) } as TaskRecord;
+      if (record.company_id === companyId && Number.isFinite(record.id)) {
+        db.tasks.set(record.id, record);
+        db.nextTaskId = Math.max(db.nextTaskId, record.id + 1);
+      }
+    });
+  } catch (error) {
+    console.warn('Could not hydrate tenant tasks:', error);
+  }
+}
+
+async function persistTaskRecord(task: TaskRecord) {
+  const collection = analystTenantCollection(task.company_id, 'tasks');
+  if (collection) await collection.doc(String(task.id)).set(stripUndefined(task), { merge: true });
 }
 
 function connectorPublicView(connection: TenantConnector) {
@@ -1205,6 +1269,20 @@ app.get('/analyst', (req, res) => {
   res.render('analyst', { firebase_config: FIREBASE_WEB_CONFIG, user, org_id: user.company_id || DEFAULT_COMPANY_ID, analyst_model: OPENROUTER_KEY_READY ? ANALYST_MODEL : (genAIClient ? 'Gemini fallback' : 'Preview planner') });
 });
 
+app.get('/employee/:id', (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.redirect('/login');
+  const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
+  if (!employee) return res.status(404).render('404', { message: 'Employee not found' });
+  res.render('employee', {
+    firebase_config: FIREBASE_WEB_CONFIG,
+    user,
+    org_id: user.company_id || DEFAULT_COMPANY_ID,
+    employee,
+    employee_catalog: EMPLOYEE_CATALOG
+  });
+});
+
 app.get('/settings', (req, res) => {
   const user = getAuthUser(req);
   if (!user) {
@@ -1615,8 +1693,65 @@ app.post('/api/employees/:id/tools', async (req, res) => {
   res.json({ ok: true, permissions: emp.permissions });
 });
 
+app.get('/api/employees/:id/profile', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required.' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+  const active = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === employee.id);
+  const [connectors, memory] = await Promise.all([loadMcpConnections(companyId, employee.id), loadEmployeeMemory(companyId, employee.id)]);
+  const teammates = (db.orgEmployees.get(companyId) || []).filter((entry) => entry.id !== employee.id).map((entry) => ({ id: entry.id, name: entry.name, role: entry.role, department: entry.department }));
+  res.json({ employee, active_in_workspace: Boolean(active), instance: active || null, connectors: connectors.map(connectorPublicView), memory, teammates });
+});
+
+app.get('/api/employees/:id/memory', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required.' });
+  const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  res.json({ memory: await loadEmployeeMemory(companyId, employee.id) });
+});
+
+app.post('/api/employees/:id/memory', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+  const content = String(req.body?.content || '').trim();
+  const category = ['preference', 'playbook', 'handoff'].includes(req.body?.category) ? req.body.category : 'preference';
+  if (!content || content.length > 1200) return res.status(400).json({ error: 'Memory must be between 1 and 1200 characters.' });
+  const memory: EmployeeMemory = { id: `memory_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, company_id: user?.company_id || DEFAULT_COMPANY_ID, employee_id: employee.id, category, content, created_at: new Date().toISOString() };
+  await persistEmployeeMemory(memory);
+  res.status(201).json({ memory });
+});
+
+app.delete('/api/employees/:id/memory/:memoryId', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const memories = await loadEmployeeMemory(companyId, employee.id);
+  if (!memories.some((entry) => entry.id === req.params.memoryId)) return res.status(404).json({ error: 'Memory note not found.' });
+  await deleteEmployeeMemory(companyId, employee.id, req.params.memoryId);
+  res.json({ ok: true });
+});
+
+app.get('/api/tasks/:id/group-chat', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required.' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  await hydrateTenantTasks(companyId);
+  const task = db.tasks.get(Number(req.params.id));
+  if (!task || task.company_id !== companyId) return res.status(404).json({ error: 'Task room not found.' });
+  res.json({ task_id: task.id, question: task.question, owner: task.owner, participants: task.participants || ['Manager', task.owner], messages: task.trace.filter((step) => !['rag_retrieval', 'verified'].includes(step.kind)) });
+});
+
 app.get('/api/employees/:id/conversation', (req, res) => {
   const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required.' });
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const empId = req.params.id;
   const key = `${companyId}:${empId}`;
@@ -1638,6 +1773,7 @@ app.get('/api/employees/:id/conversation', (req, res) => {
 
 app.post('/api/employees/:id/conversation', async (req, res) => {
   const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const empId = req.params.id;
   const { message } = req.body || {};
@@ -1660,6 +1796,8 @@ Role: ${empCatalog.role} (${empCatalog.employee_code || empId.toUpperCase()})
 Department: ${empCatalog.department}
 Autonomy Level: ${empCatalog.autonomy_level || 'Level 3'}
 Attached Tools: ${empCatalog.default_tools.join(', ')}
+Active teammate context: ${(db.orgEmployees.get(companyId) || []).filter((entry) => entry.id !== empId).map((entry) => `${entry.name} (${entry.role})`).join(', ') || 'No other activated teammates'}
+Collaboration rule: keep the manager accountable, mention a specialist handoff only when it is useful, and never claim an external tool action occurred without an approval-backed trace.
 
 User Manager Message: "${message}"
 
@@ -1694,195 +1832,117 @@ Respond as ${empName} directly to your manager in a helpful, concise, profession
   res.json({ ok: true, employee_message: botMsg, messages: msgs });
 });
 
-async function handleTaskRoutingAsync(question: string, companyId: string) {
+function activeWorkforce(companyId: string) {
+  const activeIds = (db.orgEmployees.get(companyId) || []).map((employee) => employee.id);
+  const workforce = activeIds.length ? EMPLOYEE_CATALOG.filter((employee) => activeIds.includes(employee.id)) : EMPLOYEE_CATALOG;
+  return workforce.length ? workforce : EMPLOYEE_CATALOG;
+}
+
+const WORKFORCE_DOMAINS: Array<{ employeeId: string; keywords: string[] }> = [
+  { employeeId: 'david', keywords: ['data', 'sql', 'revenue', 'forecast', 'kpi', 'margin', 'metric', 'dashboard', 'trend', 'analytics'] },
+  { employeeId: 'priya', keywords: ['invoice', 'expense', 'budget', 'cash flow', 'payable', 'receivable', 'reconciliation', 'billing'] },
+  { employeeId: 'olivia', keywords: ['lead', 'pipeline', 'deal', 'prospect', 'crm', 'sales', 'follow-up', 'renewal'] },
+  { employeeId: 'emma', keywords: ['support', 'customer', 'ticket', 'onboarding client', 'account health', 'complaint'] },
+  { employeeId: 'maya', keywords: ['marketing', 'campaign', 'content', 'audience', 'brand', 'advertising', 'growth'] },
+  { employeeId: 'mike', keywords: ['code', 'repo', 'github', 'ci', 'technical', 'engineering', 'bug', 'incident', 'release'] },
+  { employeeId: 'iris', keywords: ['security', 'access', 'identity', 'compliance', 'it ', 'device', 'vulnerability', 'risk review'] },
+  { employeeId: 'sarah', keywords: ['hire', 'recruit', 'candidate', 'interview', 'job description', 'talent', 'staffing'] },
+  { employeeId: 'arav', keywords: ['people ops', 'offboarding', 'policy acknowledgement', 'engagement', 'leave', 'handbook', 'employee experience'] },
+  { employeeId: 'alex', keywords: ['route', 'workflow', 'sla', 'operations', 'vendor', 'project', 'process', 'coordinate'] }
+];
+
+function selectCollaborativeTeam(question: string, companyId: string, preferredEmployeeId?: string) {
+  const workforce = activeWorkforce(companyId);
+  const lower = question.toLowerCase();
+  const scored = WORKFORCE_DOMAINS.map((domain) => ({ ...domain, score: domain.keywords.reduce((total, keyword) => total + (lower.includes(keyword) ? 1 : 0), 0) }))
+    .filter((domain) => workforce.some((employee) => employee.id === domain.employeeId));
+  const winner = scored.sort((a, b) => b.score - a.score)[0];
+  const preferredLead = workforce.find((employee) => employee.id === preferredEmployeeId);
+  const lead = preferredLead || workforce.find((employee) => employee.id === (winner?.score ? winner.employeeId : 'alex')) || workforce[0];
+  const leadPeers = (lead.collaborates_with || []).map((id: string) => workforce.find((employee) => employee.id === id)).filter(Boolean) as any[];
+  const explicitMatches = scored.filter((domain) => domain.score > 0 && domain.employeeId !== lead.id).map((domain) => workforce.find((employee) => employee.id === domain.employeeId)).filter(Boolean) as any[];
+  const collaborators: any[] = [];
+  for (const employee of [...explicitMatches, ...leadPeers]) {
+    if (employee.id !== lead.id && !collaborators.some((entry) => entry.id === employee.id) && collaborators.length < 3) collaborators.push(employee);
+  }
+  return { lead, collaborators, workforce };
+}
+
+interface WorkforceTaskContext { employee: any; tools: string[]; memory: string[]; connectors: string[]; }
+
+async function loadWorkforceTaskContext(companyId: string, employee: any): Promise<WorkforceTaskContext> {
+  const instance = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === employee.id);
+  const [memory, connectors] = await Promise.all([loadEmployeeMemory(companyId, employee.id), loadMcpConnections(companyId, employee.id)]);
+  const tools = instance?.tools?.length ? instance.tools : employee.default_tools || [];
+  return { employee, tools: tools.slice(0, 8), memory: memory.slice(0, 4).map((entry) => entry.content), connectors: connectors.filter((connector) => connector.status === 'connected').slice(0, 5).map((connector) => connector.name) };
+}
+
+function collaborationFinding(employee: any, question: string, context?: WorkforceTaskContext) {
+  const topic = question.length > 110 ? `${question.slice(0, 110)}…` : question;
+  const toolNote = context?.tools?.length ? ` Available permissioned tools: ${context.tools.join(', ')}.` : '';
+  const connectorNote = context?.connectors?.length ? ` Connected tenant tools considered: ${context.connectors.join(', ')}.` : '';
+  const memoryNote = context?.memory?.length ? ` Applied role memory: ${context.memory[0].slice(0, 180)}.` : '';
+  return `${employee.name} reviewed the ${employee.department.toLowerCase()} implications of “${topic}” and returned a permissioned recommendation for the lead’s decision brief.${toolNote}${connectorNote}${memoryNote}`;
+}
+
+async function handleTaskRoutingAsync(question: string, companyId: string, preferredEmployeeId?: string) {
+  await hydrateTenantTasks(companyId);
   const taskId = db.nextTaskId++;
+  const now = new Date().toISOString();
+  const { lead, collaborators, workforce } = selectCollaborativeTeam(question || 'Operations review', companyId, preferredEmployeeId);
   const lowerQ = (question || '').toLowerCase();
-
-  // 1. Determine Lead Employee based on domain keywords
-  let leadEmp = EMPLOYEE_CATALOG[0]; // Sarah (HR Manager) default
-  if (lowerQ.includes('data') || lowerQ.includes('sql') || lowerQ.includes('sales') || lowerQ.includes('revenue') || lowerQ.includes('forecast') || lowerQ.includes('kpi') || lowerQ.includes('margin')) {
-    leadEmp = EMPLOYEE_CATALOG.find((e) => e.id === 'david') || leadEmp;
-  } else if (lowerQ.includes('code') || lowerQ.includes('repo') || lowerQ.includes('github') || lowerQ.includes('ci') || lowerQ.includes('tech') || lowerQ.includes('dev')) {
-    leadEmp = EMPLOYEE_CATALOG.find((e) => e.id === 'mike') || leadEmp;
-  } else if (lowerQ.includes('support') || lowerQ.includes('client') || lowerQ.includes('ticket') || lowerQ.includes('customer')) {
-    leadEmp = EMPLOYEE_CATALOG.find((e) => e.id === 'emma') || leadEmp;
-  } else if (lowerQ.includes('route') || lowerQ.includes('workflow') || lowerQ.includes('sla') || lowerQ.includes('ops')) {
-    leadEmp = EMPLOYEE_CATALOG.find((e) => e.id === 'alex') || leadEmp;
-  } else if (lowerQ.includes('hire') || lowerQ.includes('recruiting') || lowerQ.includes('candidate') || lowerQ.includes('personnel') || lowerQ.includes('hr') || lowerQ.includes('staffing')) {
-    leadEmp = EMPLOYEE_CATALOG.find((e) => e.id === 'sarah') || leadEmp;
-  }
-
-  // 2. Search Organizational Knowledge RAG
+  const specialistContexts = await Promise.all([lead, ...collaborators].map((employee) => loadWorkforceTaskContext(companyId, employee)));
+  const contextByEmployeeId = new Map(specialistContexts.map((context) => [context.employee.id, context]));
   const knowList = db.knowledge.get(companyId) || [];
-  const relevantDocs = knowList.filter((d) =>
-    lowerQ.includes(d.title.toLowerCase()) ||
-    d.content.toLowerCase().split(' ').some((w) => w.length > 4 && lowerQ.includes(w))
-  );
-  const knowText = relevantDocs.length
-    ? relevantDocs.map((d) => `[Doc: ${d.title}] ${d.content}`).join('\n')
-    : 'No specific matching policy document found in Knowledge Base.';
-
-  // 3. Multi-Agent Delegation Identification
-  let subtaskPartner: any = null;
-  if (leadEmp.id === 'sarah' && (lowerQ.includes('sales') || lowerQ.includes('forecast') || lowerQ.includes('revenue') || lowerQ.includes('data') || lowerQ.includes('growth'))) {
-    subtaskPartner = EMPLOYEE_CATALOG.find((e) => e.id === 'david');
-  } else if (leadEmp.id === 'david' && (lowerQ.includes('hire') || lowerQ.includes('headcount') || lowerQ.includes('staff'))) {
-    subtaskPartner = EMPLOYEE_CATALOG.find((e) => e.id === 'sarah');
-  } else if (leadEmp.id === 'alex' && (lowerQ.includes('tech') || lowerQ.includes('app'))) {
-    subtaskPartner = EMPLOYEE_CATALOG.find((e) => e.id === 'mike');
-  }
-
+  const relevantDocs = knowList.filter((document) => lowerQ.includes(document.title.toLowerCase()) || document.content.toLowerCase().split(' ').some((word) => word.length > 4 && lowerQ.includes(word)));
+  const knowText = relevantDocs.length ? relevantDocs.map((document) => `[${document.title}] ${document.content}`).join('\n').slice(0, 2400) : 'No matching workspace knowledge was found.';
   const trace: any[] = [
-    { kind: 'received', sender: 'Workspace Manager', receiver: 'Task Orchestrator', body: `Ingested task brief: "${question}"`, created_at: new Date().toISOString() },
-    { kind: 'rag_retrieval', sender: 'Knowledge Vault', receiver: leadEmp.name, body: `Retrieved workspace context: ${knowText.slice(0, 110)}...`, created_at: new Date().toISOString() }
+    { kind: 'received', sender: 'Manager', receiver: 'Caveworkers group', body: `New task: “${question}”`, created_at: now },
+    { kind: 'team_context', sender: 'Caveworkers coordinator', receiver: lead.name, body: `${lead.name} is leading with ${collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'no additional specialist'} assigned for this task.`, created_at: new Date(Date.now() + 250).toISOString() },
+    { kind: 'knowledge', sender: 'Workspace knowledge', receiver: lead.name, body: relevantDocs.length ? `Shared ${relevantDocs.length} relevant workspace reference${relevantDocs.length === 1 ? '' : 's'} with the team.` : 'No matching reference was found; the team will state assumptions clearly.', created_at: new Date(Date.now() + 500).toISOString() }
   ];
-
-  let interAgentMsgText = '';
-  if (subtaskPartner) {
-    trace.push({
-      kind: 'inter_agent',
-      sender: leadEmp.name,
-      receiver: subtaskPartner.name,
-      body: `[Inter-Agent Bus] Delegating subtask to ${subtaskPartner.name} (${subtaskPartner.role}): "Analyze underlying dataset for task: ${question}"`,
-      created_at: new Date().toISOString()
-    });
-    trace.push({
-      kind: 'inter_agent',
-      sender: subtaskPartner.name,
-      receiver: leadEmp.name,
-      body: `[Inter-Agent Bus] ${subtaskPartner.name} returned verified analytics payload. Key finding: Q3 revenue trend justifies headcount capacity expansion.`,
-      created_at: new Date().toISOString()
-    });
-    interAgentMsgText = `Collaborated with ${subtaskPartner.name} (${subtaskPartner.role}) via Inter-Agent Message Bus.`;
-  }
-
-  // 4. Generate Answer using Gemini 3.6 Flash if available
+  collaborators.forEach((employee, index) => {
+    trace.push({ kind: 'group_message', sender: lead.name, receiver: employee.name, body: `@${employee.name} Please assess the ${employee.department.toLowerCase()} portion of this request and return constraints, evidence needed, and a safe next step.`, created_at: new Date(Date.now() + 900 + index * 600).toISOString() });
+    trace.push({ kind: 'group_message', sender: employee.name, receiver: lead.name, body: collaborationFinding(employee, question, contextByEmployeeId.get(employee.id)), created_at: new Date(Date.now() + 1200 + index * 600).toISOString() });
+  });
+  const teamBrief = specialistContexts.map((context) => `${context.employee.name}: ${context.employee.role} — ${context.employee.persona}\nGranted tools: ${context.tools.join(', ') || 'none'}\nConnected tenant tools: ${context.connectors.join(', ') || 'none'}\nRole memory: ${context.memory.join(' | ') || 'none'}`).join('\n\n');
   let answer = '';
   if (genAIClient) {
     try {
       const response = await genAIClient.models.generateContent({
         model: 'gemini-3.6-flash',
-        contents: `You are ${leadEmp.name}, ${leadEmp.role} (${leadEmp.employee_code}) at Caveworkers OS.
-Autonomy Level: ${leadEmp.autonomy_level}.
-Task Brief: "${question}"
-Workspace Knowledge Context: ${knowText}
-Inter-Agent Collaboration: ${interAgentMsgText}
-
-Provide an executive strategic response with findings, policy compliance, and next steps.`
+        contents: `You are ${lead.name}, ${lead.role} (${lead.employee_code}) at Caveworkers.\nTask: "${question}"\nActive specialist team:\n${teamBrief}\nWorkspace knowledge:\n${knowText}\n\nWrite an evidence-aware executive response. Explain the contribution of each collaborating specialist, distinguish assumptions from evidence, and state that external writes require manager approval.`
       });
       answer = response.text || '';
-    } catch (e) {
-      console.warn('Gemini 3.6 Flash task routing note:', e);
+    } catch (error) {
+      console.warn('Collaborative task model response note:', error);
     }
   }
-
   if (!answer) {
-    if (leadEmp.id === 'sarah') {
-      answer = `### Executive Workforce & Recruitment Brief (Task #${taskId})
-
-**Assigned Lead**: Sarah (HR Manager · ${leadEmp.employee_code})
-${subtaskPartner ? `**Collaborator**: ${subtaskPartner.name} (Data Analyst)\n` : ''}
-**Strategic Summary**:
-Based on ${subtaskPartner ? `${subtaskPartner.name}'s data forecast (+32% Q-o-Q growth projection)` : 'workspace requirements'} and Knowledge Base policies, I have synthesized a phased hiring plan:
-1. **Headcount Demand**: 5 new positions (3 Senior Software Engineers, 1 Operations Lead, 1 Data Analyst).
-2. **Candidate Screening**: Sourcing pipeline initiated with 4-stage technical & behavioral screening rubrics.
-3. **Policy Compliance**: Salary benchmarks align with workspace operating margin requirements.
-
-*Action Required*: Review candidate outreach email brief in Approvals queue prior to dispatch.`;
-    } else if (leadEmp.id === 'david') {
-      answer = `### Financial & Data Analytics Report (Task #${taskId})
-
-**Assigned Lead**: David (Data Analyst · ${leadEmp.employee_code})
-
-**Data Analysis Findings**:
-1. **Revenue Growth**: Q3 net ARR increased by +32% YoY ($1.84M total).
-2. **Operating Margins**: Net margin maintained at 31.4%, complying with Q3 Financial Goals.
-3. **Resource Efficiency**: Operational capacity is at 88% threshold. Recommend expanding bandwidth by 25%.`;
-    } else {
-      answer = `### Executive Operational Brief (Task #${taskId})
-
-**Assigned Lead**: ${leadEmp.name} (${leadEmp.role})
-
-**Execution Summary**:
-In response to "${question}", work was routed through permissioned workspace tools with full audit logging.
-- **Status**: Completed within SLA.
-- **Traceability**: All subtask handoffs logged in Task Ledger.`;
-    }
+    answer = `### ${lead.name}'s collaborative brief (Task #${taskId})\n\n**Lead:** ${lead.name} — ${lead.role}\n**Contributors:** ${collaborators.length ? collaborators.map((employee) => `${employee.name} (${employee.role})`).join(', ') : 'No additional specialist required'}\n\n**Decision view**\n${lead.persona}\n\n**Team handoffs**\n${collaborators.length ? collaborators.map((employee) => `- **${employee.name}:** ${collaborationFinding(employee, question, contextByEmployeeId.get(employee.id))}`).join('\n') : '- The lead assessed the request within the employee’s defined role and tool permissions.'}\n\n**Safe next step**\nReview the group conversation and evidence requirements. Any email, record change, publication, payment, access change, or external MCP write remains a draft until a workspace manager approves it.`;
   }
-
-  trace.push({
-    kind: 'verified',
-    sender: leadEmp.name,
-    receiver: 'Permission Engine',
-    body: `Verified MCP tool access levels (${leadEmp.default_tools.join(', ')})`,
-    created_at: new Date().toISOString()
-  });
-  trace.push({
-    kind: 'completed',
-    sender: leadEmp.name,
-    receiver: 'Task Ledger',
-    body: 'Task execution recorded in immutable ledger with audit trailing active.',
-    created_at: new Date().toISOString()
-  });
-
-  const taskRecord: TaskRecord = {
-    id: taskId,
-    company_id: companyId,
-    question,
-    owner: leadEmp.id,
-    status: 'completed',
-    answer,
-    plan: `1. Ingest brief -> 2. Knowledge Vault Search -> ${subtaskPartner ? `3. Inter-Agent Bus (${subtaskPartner.name}) -> ` : ''}4. Generate Report & Check HITL Approvals`,
-    created_at: new Date().toISOString(),
-    trace
-  };
-
+  const requiresApproval = ['email', 'send', 'commit', 'hire', 'publish', 'recruit', 'payment', 'invoice', 'access', 'delete', 'post', 'write'].some((term) => lowerQ.includes(term));
+  if (requiresApproval) {
+    const approvalId = db.nextApprovalId++;
+    db.approvals.set(approvalId, { id: approvalId, company_id: companyId, task_id: taskId, employee_id: lead.id, tool_name: lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action', action_summary: `${lead.name} requests manager sign-off for: "${question}"`, status: 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', collaborators: collaborators.map((employee) => employee.id) } });
+    trace.push({ kind: 'approval_required', sender: lead.name, receiver: 'Manager approval queue', body: 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
+  }
+  trace.push({ kind: 'group_message', sender: lead.name, receiver: 'Caveworkers group', body: `I consolidated the team’s inputs into the manager brief. The task ledger now contains the full conversation and approval state.`, created_at: new Date(Date.now() + 3400).toISOString() });
+  trace.push({ kind: 'completed', sender: lead.name, receiver: 'Task ledger', body: 'Collaborative task recorded with tenant-scoped participants and audit trace.', created_at: new Date(Date.now() + 3600).toISOString() });
+  const taskRecord: TaskRecord = { id: taskId, company_id: companyId, question, owner: lead.id, status: requiresApproval ? 'pending_approval' : 'completed', answer, plan: `1. Intake → 2. Assign ${lead.name} → 3. Group specialist handoffs${collaborators.length ? ` (${collaborators.map((employee) => employee.name).join(', ')})` : ''} → 4. Consolidate → 5. Human approval if required`, created_at: now, trace, participants: ['Manager', lead.name, ...collaborators.map((employee) => employee.name)], collaboration_summary: `${lead.name} led a permissioned collaboration with ${collaborators.length || 'no'} additional specialist${collaborators.length === 1 ? '' : 's'}.` };
   db.tasks.set(taskId, taskRecord);
-
-  // Check if HITL Approval is required
-  if (lowerQ.includes('email') || lowerQ.includes('send') || lowerQ.includes('commit') || lowerQ.includes('hire') || lowerQ.includes('publish') || lowerQ.includes('recruit')) {
-    const appValId = db.nextApprovalId++;
-    db.approvals.set(appValId, {
-      id: appValId,
-      company_id: companyId,
-      task_id: taskId,
-      employee_id: leadEmp.id,
-      tool_name: lowerQ.includes('commit') ? 'Git Repository' : 'Gmail',
-      action_summary: `${leadEmp.name} (${leadEmp.role}) requests sign-off for: "${question}"`,
-      status: 'pending',
-      created_at: new Date().toISOString()
-    });
-  }
-
-  // Push activity log
+  await persistTaskRecord(taskRecord);
   const logs = db.activity.get(companyId) || [];
-  logs.unshift({
-    id: Date.now(),
-    sender: leadEmp.name,
-    receiver: subtaskPartner ? subtaskPartner.name : 'Task Ledger',
-    kind: 'task.executed',
-    body: `Task #${taskId} complete: "${question.slice(0, 60)}${question.length > 60 ? '...' : ''}"`,
-    created_at: new Date().toISOString()
-  });
+  logs.unshift({ id: Date.now(), sender: lead.name, receiver: collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'Task ledger', kind: 'task.collaborative', body: `Task #${taskId} completed with a visible group-chat audit trail.`, created_at: now });
   db.activity.set(companyId, logs);
-
-  return {
-    id: taskId,
-    owner: leadEmp.id,
-    participants: subtaskPartner ? ['Manager', leadEmp.name, subtaskPartner.name] : ['Manager', leadEmp.name],
-    status: 'completed',
-    plan: taskRecord.plan,
-    answer,
-    trace
-  };
+  return { id: taskId, owner: lead.id, participants: taskRecord.participants, status: taskRecord.status, plan: taskRecord.plan, answer, trace, collaboration_summary: taskRecord.collaboration_summary, workforce_size: workforce.length };
 }
-
 app.post('/api/task', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const { request: question } = req.body || {};
-  const result = await handleTaskRoutingAsync(question || 'Operations review', companyId);
+  const { request: question, preferred_employee_id: preferredEmployeeId } = req.body || {};
+  const result = await handleTaskRoutingAsync(question || 'Operations review', companyId, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined);
   res.json(result);
 });
 
@@ -1890,15 +1950,16 @@ app.post('/api/tasks', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const { request: question } = req.body || {};
-  const result = await handleTaskRoutingAsync(question || 'Operations review', companyId);
+  const { request: question, preferred_employee_id: preferredEmployeeId } = req.body || {};
+  const result = await handleTaskRoutingAsync(question || 'Operations review', companyId, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined);
   res.json(result);
 });
 
-app.get('/api/tasks', (req, res) => {
+app.get('/api/tasks', async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  await hydrateTenantTasks(companyId);
   const taskList = Array.from(db.tasks.values()).filter((task) => task.company_id === companyId).reverse().map((t: any) => {
     const ownerEmp = EMPLOYEE_CATALOG.find((e) => e.id === t.owner) || {
       id: t.owner,

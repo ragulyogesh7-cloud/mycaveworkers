@@ -349,6 +349,7 @@ function renderFilteredTasks() {
         <div class="task-question">Task #${t.id}: ${safe(t.question)}</div>
 
         ${t.plan ? `<div class="task-plan-box"><b>EXECUTION PLAN:</b> ${safe(t.plan)}</div>` : ''}
+        ${t.participants?.length ? `<div class="task-team-line"><b>GROUP:</b> ${safe(t.participants.join(' · '))}</div>` : ''}
 
         <div class="task-answer-box">${safe(t.answer || 'Processing task execution...')}</div>
 
@@ -356,7 +357,20 @@ function renderFilteredTasks() {
           <span class="task-time">Created: ${formatTime(t.created_at)}</span>
           <div class="task-btn-group">
             ${t.has_pending_approval ? `<button class="btn-sm btn-approve" onclick="resolveApproval(${t.approval_id}, 'approved')">Approve HITL Action ✓</button>` : ''}
+            <button class="btn-sm text-button group-chat-button" onclick="toggleTaskGroupChat(${t.id})">Open AI group chat ↗</button>
             <button class="btn-sm text-button" onclick="toggleTaskTrace(${t.id})">Inspect Full Trace ▾</button>
+          </div>
+        </div>
+
+        <div class="task-group-chat-drawer" id="group-chat-drawer-${t.id}">
+          <div class="group-chat-head"><div><p class="panel-kicker">AI GROUP CHAT</p><b>Visible collaboration room</b></div><span>${safe((t.participants || []).length ? `${t.participants.length} participants` : 'Task activity')}</span></div>
+          <p class="group-chat-help">This is the manager-visible record of how the team delegated and consolidated the work. Tool writes remain paused until approval.</p>
+          <div class="task-group-messages">
+            ${(t.trace || []).filter((step) => ['received', 'team_context', 'group_message', 'approval_required', 'completed'].includes(step.kind)).map((step) => `
+              <div class="task-group-message ${safe(step.kind)}">
+                <span class="group-message-avatar">${safe(String(step.sender || 'AI').charAt(0))}</span>
+                <div><div class="group-message-meta"><b>${safe(step.sender)}</b><span>to ${safe(step.receiver)}</span><time>${formatTime(step.created_at)}</time></div><p>${safe(step.body)}</p></div>
+              </div>`).join('') || '<p class="empty-state-sm">No group messages were recorded for this task.</p>'}
           </div>
         </div>
 
@@ -384,6 +398,15 @@ function toggleTaskTrace(taskId) {
   const drawer = document.getElementById(`trace-drawer-${taskId}`);
   if (drawer) {
     drawer.style.display = drawer.style.display === 'block' ? 'none' : 'block';
+  }
+}
+
+function toggleTaskGroupChat(taskId) {
+  const drawer = document.getElementById(`group-chat-drawer-${taskId}`);
+  if (drawer) {
+    const shouldOpen = drawer.style.display !== 'block';
+    drawer.style.display = shouldOpen ? 'block' : 'none';
+    if (shouldOpen) drawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 }
 
