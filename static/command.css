@@ -98,6 +98,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 }
 .brand-mark::before, .brand .mark::before { content: ""; width: 12px; height: 12px; border-radius: 5px 50% 50% 50%; transform: rotate(45deg); background: var(--chalk); box-shadow: 0 0 20px rgba(255,255,255,.64); }
 .brand-mark::after, .brand .mark::after { display: none; }
+.brand-logo { width: 30px; height: 30px; flex: 0 0 30px; display: block; object-fit: contain; border-radius: 10px; box-shadow: 0 8px 20px rgba(126,232,255,.16); transition: transform 180ms var(--ease-out), filter 180ms var(--ease-out); }
+.brand:hover .brand-logo { transform: translateY(-1px) scale(1.04); filter: saturate(1.12) brightness(1.04); }
 .nav-links { display: flex; align-items: center; gap: 18px; color: var(--muted); font-size: 13px; }
 .nav-links a { transition: color 160ms var(--ease-out); }
 .nav-links a:hover { color: var(--chalk); }
