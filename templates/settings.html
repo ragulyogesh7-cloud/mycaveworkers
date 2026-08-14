@@ -1,647 +1,117 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Workspace Settings &amp; Tools — CaveWorkers</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#070b1a">
+  <meta name="description" content="Manage Caveworkers workspace, AI team, integrations, security, and billing.">
+  <title>Caveworkers — Settings</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=Playfair+Display:ital,wght@0,600;1,600&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/command.css">
-  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
-  <style>
-    .settings-grid {
-      display: grid;
-      grid-template-columns: 280px 1fr;
-      gap: 24px;
-      margin-top: 24px;
-    }
-    .settings-nav {
-      background: rgba(8, 12, 38, 0.78);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 18px;
-      padding: 16px;
-    }
-    .settings-nav button {
-      display: block;
-      width: 100%;
-      text-align: left;
-      background: none;
-      border: none;
-      color: rgba(255, 255, 255, 0.6);
-      padding: 12px 16px;
-      border-radius: 10px;
-      font-size: 14px;
-      margin-bottom: 6px;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    .settings-nav button.active,
-    .settings-nav button:hover {
-      background: rgba(255, 255, 255, 0.1);
-      color: #fff;
-    }
-    .settings-panel {
-      background: rgba(8, 12, 38, 0.78);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 18px;
-      padding: 30px;
-    }
-    .settings-panel h3 {
-      font: 600 24px 'Playfair Display', serif;
-      margin: 0 0 16px;
-      color: #fff;
-    }
-    .tool-add-card {
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 12px;
-      padding: 20px;
-      margin-bottom: 24px;
-    }
-    .tool-add-card label {
-      display: block;
-      font-size: 12px;
-      color: rgba(255, 255, 255, 0.6);
-      margin-bottom: 6px;
-    }
-    .tool-add-card input, .tool-add-card select {
-      width: 100%;
-      height: 40px;
-      background: rgba(0, 0, 0, 0.4);
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      border-radius: 8px;
-      padding: 0 12px;
-      color: #fff;
-      margin-bottom: 12px;
-    }
-    .employee-tool-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      padding: 12px;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-    }
-    .badge-access {
-      font-size: 11px;
-      padding: 3px 8px;
-      border-radius: 4px;
-      background: rgba(135, 241, 234, 0.15);
-      color: var(--aqua);
-    }
-    .btn-danger {
-      background: rgba(255, 95, 87, 0.2);
-      color: #ff8cad;
-      border: 1px solid rgba(255, 95, 87, 0.4);
-      padding: 4px 10px;
-      border-radius: 6px;
-      font-size: 11px;
-      cursor: pointer;
-    }
-    .upgrade-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 12px;
-      margin-top: 16px;
-    }
-    .upgrade-card {
-      border: 1px solid var(--line);
-      border-radius: 12px;
-      padding: 16px;
-      background: rgba(255, 255, 255, 0.03);
-    }
-    .upgrade-card h5 { margin: 0; color: #fff; font-size: 15px; }
-    .upgrade-card p { margin: 7px 0 15px; color: rgba(255,255,255,.56); font-size: 12px; line-height: 1.45; }
-    .upgrade-price { color: var(--moss); font: 600 18px 'DM Mono', monospace; }
-    .custom-mcp-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-    .custom-mcp-grid .wide { grid-column: span 2; }
-    .connection-row { border-top: 1px solid rgba(255,255,255,.08); padding: 12px 0; }
-    .connection-row:first-child { border-top: 0; }
-    .connection-meta { margin-top: 4px; color: rgba(255,255,255,.5); font: 10px 'DM Mono', monospace; }
-    @media(max-width:760px) { .upgrade-grid, .custom-mcp-grid { grid-template-columns: 1fr; } .custom-mcp-grid .wide { grid-column: auto; } }
-  </style>
   <link rel="stylesheet" href="/static/settings.css">
 </head>
-<body class="command-body">
-  <div class="sky sky-command">
-    <div class="rain"></div>
-    <div class="moon"></div>
+<body class="command-body settings-body">
+  <div class="app-shell settings-app-shell">
+    <aside class="side-rail settings-rail" aria-label="Workspace navigation">
+      <a class="brand" href="/command"><img class="brand-logo" src="/static/logo.jpeg" alt=""><span>Caveworkers</span></a>
+      <div class="rail-label">WORKSPACE</div>
+      <a class="rail-link" href="/command"><i></i>Company room</a>
+      <a class="rail-link" href="/analyst"><i></i>David’s data lab</a>
+      <div class="rail-label rail-gap">MANAGE</div>
+      <a class="rail-link active" href="/settings"><i></i>Settings</a>
+      <div class="rail-footer"><span class="system-dot"></span><div><b>Workspace protected</b><small>Tenant-scoped controls</small></div></div>
+    </aside>
 
-    <nav class="nav">
-      <div class="wrap nav-row">
-        <a href="/command" class="brand">
-          <img class="brand-logo" src="/static/logo.jpeg" alt="">
-          CaveWorkers OS
-        </a>
-        <div class="nav-links">
-          <a href="/command">Dashboard</a>
-          <a href="/settings" style="color: var(--aqua);">Settings</a>
-          <button id="logout-btn" class="btn btn-light nav-cta" style="cursor: pointer;">Sign Out</button>
-        </div>
-      </div>
-    </nav>
+    <main class="command-main settings-main">
+      <header class="app-topbar settings-topbar">
+        <button class="menu-button" id="menuButton" aria-label="Open navigation">☰</button>
+        <div class="workspace-name"><span class="status-dot"></span><span id="settings-workspace-title"><%= (user && user.company_name) || "Your workspace" %></span><small>SETTINGS</small></div>
+        <div class="top-actions"><a class="settings-link" href="/command">Company room <span>↗</span></a><a id="logout-btn" href="/logout" class="logout-button">Sign out</a></div>
+      </header>
 
-    <div class="wrap" style="padding-top: 100px; padding-bottom: 60px;">
-      <div class="workspace-header">
-        <div>
-          <span class="mono eyebrow"><span>✦</span> Settings</span>
-          <h1 class="section-title" style="font-size: 38px;">Manage Your AI Workforce</h1>
-        </div>
-      </div>
+      <div class="settings-wrap">
+        <section class="settings-hero">
+          <div><p class="eyebrow">WORKSPACE MANAGEMENT</p><h1>Settings that stay<br><em>out of your way.</em></h1><p>Control your workspace identity, AI team, connected tools, and plan without interrupting the company room.</p></div>
+          <div class="settings-plan-chip"><span class="plan-chip-kicker">CURRENT PLAN</span><strong id="settings-plan-name">Loading plan…</strong><small id="settings-plan-detail">Checking workspace capacity</small></div>
+        </section>
 
-      <div class="settings-grid">
-        <div class="settings-nav">
-          <button class="active" onclick="showTab('tab-tools')">🛠️ MCP Skills &amp; Permissions</button>
-          <button onclick="showTab('tab-employees')">👥 AI Employees Catalog</button>
-          <button onclick="showTab('tab-company')">🏢 Company Profile &amp; Billing</button>
-        </div>
+        <p class="settings-feedback" id="settings-feedback" role="status" aria-live="polite"></p>
 
-        <div class="settings-panel">
-          <!-- Tab 1: Tools -->
-          <div id="tab-tools">
-            <h3>Attach MCP Skills to AI Employees</h3>
-            <p style="color: rgba(255,255,255,0.6); font-size: 14px; margin-bottom: 20px;">
-              Connect permissioned MCP-style tools to the employee who needs them. Every attachment is scoped to that employee and can require your approval before it acts.
-            </p>
+        <div class="settings-layout">
+          <nav class="settings-nav" aria-label="Settings sections">
+            <button class="active" type="button" data-settings-tab="workspace"><span>01</span>Workspace</button>
+            <button type="button" data-settings-tab="team"><span>02</span>Team</button>
+            <button type="button" data-settings-tab="integrations"><span>03</span>Integrations</button>
+            <button type="button" data-settings-tab="billing"><span>04</span>Billing</button>
+            <p>Every connected tool is isolated to this workspace and controlled with least-privilege grants.</p>
+          </nav>
 
-            <div class="tool-add-card">
-              <h4 style="margin: 0 0 12px; color: var(--aqua);">Attach a Connector or Custom Skill</h4>
-              <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px;">
-                <div>
-                  <label>Select AI Employee</label>
-                  <select id="grant-emp-id"></select>
-                </div>
-                <div>
-                  <label>MCP Connector / Skill</label>
-                  <input type="text" id="grant-tool-name" list="mcp-connectors" placeholder="e.g. Gmail, Notion, custom connector">
-                  <datalist id="mcp-connectors"></datalist>
-                </div>
-                <div>
-                  <label>Access Level</label>
-                  <select id="grant-access-level">
-                    <option value="read_write">Read &amp; Write (Full)</option>
-                    <option value="read_only">Read Only</option>
-                    <option value="requires_approval">Requires Approval (HITL)</option>
-                  </select>
-                </div>
+          <div class="settings-panels">
+            <section class="settings-panel active" data-settings-panel="workspace" id="workspace">
+              <header class="settings-panel-header"><div><p class="panel-kicker">WORKSPACE PROFILE</p><h2>Make the room yours</h2><p>The company name and industry help your employees frame work in the right business context.</p></div><span class="section-status">PRIVATE</span></header>
+              <form class="settings-form" id="company-settings-form">
+                <label for="setting-company-name">Company name<input id="setting-company-name" maxlength="120" autocomplete="organization" placeholder="Your company name"></label>
+                <label for="setting-industry">Industry<input id="setting-industry" maxlength="120" placeholder="e.g. Retail, manufacturing, SaaS"></label>
+                <div class="form-actions"><p>Changes are saved only for your workspace.</p><button class="btn btn-primary" type="submit">Save workspace</button></div>
+              </form>
+              <div class="security-overview">
+                <article><span class="security-icon">◌</span><div><b>Tenant-scoped data</b><p>Tasks, approvals, activity, and tool connections remain isolated to this workspace.</p></div></article>
+                <article><span class="security-icon">✓</span><div><b>Approval gates active</b><p>Write actions are paused for manager review before a connected tool can act.</p></div></article>
+                <article><span class="security-icon">⌁</span><div><b>Encrypted credentials</b><p>Connector tokens are stored encrypted and are never displayed back in Settings.</p></div></article>
               </div>
-              <button class="btn btn-primary" onclick="submitToolGrant()" style="margin-top: 8px;">Attach to Employee ↗</button>
-            </div>
+            </section>
 
-            <h4 style="color: #fff; margin-top: 24px;">Current Employee MCP Attachments</h4>
-            <div id="employee-tools-list">Loading employee permissions...</div>
+            <section class="settings-panel" data-settings-panel="team" id="team" hidden>
+              <header class="settings-panel-header"><div><p class="panel-kicker">AI WORKFORCE</p><h2>Build the right team</h2><p>Add employees to your organization, remove unused roles, and review their permissioned capabilities.</p></div><a href="/command" class="panel-action-link">Open company room ↗</a></header>
+              <div class="settings-section-row"><div><h3>Active team</h3><p>Employees currently available to your workspace.</p></div><span class="section-count" id="active-team-count">0 active</span></div>
+              <div class="employee-settings-list" id="employee-tools-list"><p class="empty-state-sm">Loading your employee team…</p></div>
+              <div class="settings-section-row catalog-row"><div><h3>Employee catalog</h3><p>Add specialised employees only when your team needs them.</p></div></div>
+              <div class="employee-catalog" id="catalog-list"><p class="empty-state-sm">Loading employee catalog…</p></div>
+            </section>
 
-            <div class="tool-add-card">
-              <h4 style="margin: 0 0 7px; color: var(--gold);">MCP Marketplace — attach a curated server</h4>
-              <p style="margin: 0 0 16px; color: rgba(255,255,255,.58); font-size: 12px; line-height: 1.5;">One-click attach of well-known MCP servers. The employee will gain the server's discovered tools <em>per-tool</em> — grant only what they need. Context7 is a read-only docs server, so its tools default to Read Only.</p>
-              <div class="custom-mcp-grid">
-                <div><label>AI Employee</label><select id="marketplace-employee"></select></div>
-                <div><label>Marketplace Server</label><select id="marketplace-server"></select></div>
-                <div><label>Default Access</label><select id="marketplace-access"><option value="read_only">Read Only</option><option value="requires_approval">Requires Approval</option><option value="read_write">Read &amp; Write</option></select></div>
-                <div class="wide"><label>Connection Name (optional)</label><input id="marketplace-name" type="text" placeholder="Defaults to the server name"></div>
+            <section class="settings-panel" data-settings-panel="integrations" id="integrations" hidden>
+              <header class="settings-panel-header"><div><p class="panel-kicker">CONNECTED TOOLS</p><h2>Connect with control</h2><p>Give employees only the read or approval-gated access they need. Connections stay employee- and tenant-scoped.</p></div><span class="section-status secure">ENCRYPTED</span></header>
+              <div class="integration-intro-grid"><article><span>01</span><b>Connect a capability</b><p>Add a supported Google connection, a safe custom MCP server, a repository, or a custom skill.</p></article><article><span>02</span><b>Discover and grant</b><p>Inspect exposed tools before granting each employee a read-only or approval-gated capability.</p></article><article><span>03</span><b>Review continuously</b><p>Test safely, revoke any connection, and keep write actions behind manager approval.</p></article></div>
+              <div class="integration-grid">
+                <form class="tool-add-card" id="custom-mcp-form"><div class="card-heading"><span class="card-index">A</span><div><h3>Add a connection</h3><p>Connect a capability to one employee at a time.</p></div></div>
+                  <div class="form-grid two"><label>Employee<select id="custom-mcp-employee"></select></label><label>Connection type<select id="custom-mcp-type"><option value="google_gmail">Google Gmail</option><option value="google_sheets">Google Sheets</option><option value="streamable_http">Custom MCP server</option><option value="git_repository">Git repository</option><option value="custom_skill">Custom skill</option></select></label></div>
+                  <label>Connection name<input id="custom-mcp-name" maxlength="100" placeholder="e.g. Sales Gmail"></label>
+                  <label id="custom-mcp-target-label">MCP Server URL<input id="custom-mcp-target" maxlength="500" placeholder="https://mcp.example.com"></label>
+                  <div class="form-grid two"><label>Access level<select id="custom-mcp-access"><option value="read_only">Read only</option><option value="requires_approval">Requires approval</option></select></label><label>Bearer token <span class="field-note">Optional</span><input id="custom-mcp-token" type="password" autocomplete="new-password" placeholder="Stored encrypted"></label></div>
+                  <label>Notes <span class="field-note">Optional</span><textarea id="custom-mcp-notes" rows="2" maxlength="1000" placeholder="Describe the safe use of this connection."></textarea></label>
+                  <button class="btn btn-primary" type="submit">Save connection</button>
+                </form>
+                <form class="tool-add-card" id="marketplace-form"><div class="card-heading"><span class="card-index">B</span><div><h3>Use the marketplace</h3><p>Attach a reviewed server to a specific employee.</p></div></div>
+                  <label>Employee<select id="marketplace-employee"></select></label>
+                  <label>Server<select id="marketplace-server"></select></label>
+                  <div class="form-grid two"><label>Access level<select id="marketplace-access"><option value="read_only">Read only</option><option value="requires_approval">Requires approval</option></select></label><label>Connection name <span class="field-note">Optional</span><input id="marketplace-name" maxlength="100" placeholder="Use server default"></label></div>
+                  <button class="btn btn-light" type="submit">Attach server</button>
+                </form>
               </div>
-              <button class="btn btn-primary" onclick="attachMarketplaceServer()" style="margin-top: 14px;">Attach from Marketplace ↗</button>
-            </div>
+              <form class="tool-grant-form" id="tool-grant-form"><div><p class="panel-kicker">DIRECT PERMISSION</p><h3>Grant a named tool</h3><p>Use this for employee capabilities that are already registered in your workspace.</p></div><div class="tool-grant-fields"><select id="grant-emp-id" aria-label="Employee"></select><input id="grant-tool-name" maxlength="120" placeholder="Tool name"><select id="grant-access-level" aria-label="Access level"><option value="read_only">Read only</option><option value="requires_approval">Requires approval</option></select><button class="btn btn-light" type="submit">Grant tool</button></div></form>
+              <div class="settings-section-row connected-heading"><div><h3>Connected capabilities</h3><p>Review per-employee tool access, discovery results, and health checks.</p></div><span class="section-count" id="connection-count">0 connected</span></div>
+              <div class="connection-list" id="custom-mcp-list"><p class="empty-state-sm">Loading connected capabilities…</p></div>
+            </section>
 
-            <div class="tool-add-card" style="margin-top: 24px;">
-              <h4 style="margin: 0 0 7px; color: var(--gold);">Add a Custom MCP Connection</h4>
-              <p style="margin: 0 0 16px; color: rgba(255,255,255,.58); font-size: 12px; line-height: 1.5;">Connections belong to one employee only. Google authorization and Git writes stay under your control; Git commits always require a manager approval. Remote MCP URLs that resolve to private networks are blocked.</p>
-              <div class="custom-mcp-grid">
-                <div><label>AI Employee</label><select id="custom-mcp-employee"></select></div>
-                <div><label>Connection Type</label><select id="custom-mcp-type" onchange="updateCustomMcpFields()"><option value="streamable_http">Remote MCP Server</option><option value="google_gmail">Google Gmail</option><option value="google_sheets">Google Sheets</option><option value="git_repository">Git Repository</option><option value="custom_skill">Custom Skill</option></select></div>
-                <div><label>Access Level</label><select id="custom-mcp-access"><option value="read_only">Read Only</option><option value="requires_approval" selected>Requires Approval</option><option value="read_write">Read &amp; Write</option></select></div>
-                <div><label>Connection Name</label><input id="custom-mcp-name" type="text" placeholder="e.g. Product GitHub"></div>
-                <div class="wide"><label id="custom-mcp-target-label">MCP Server URL</label><input id="custom-mcp-target" type="text" placeholder="https://mcp.example.com"></div>
-                <div class="wide"><label>Bearer Token <span style="color: rgba(255,255,255,.42);">(optional; encrypted at rest)</span></label><input id="custom-mcp-token" type="password" autocomplete="new-password" placeholder="Only for custom MCP servers that require it"></div>
-                <div class="wide"><label>Notes / Skill Instructions</label><input id="custom-mcp-notes" type="text" placeholder="What this employee should use this connection for"></div>
+            <section class="settings-panel" data-settings-panel="billing" id="billing" hidden>
+              <header class="settings-panel-header"><div><p class="panel-kicker">PLAN &amp; CAPACITY</p><h2>Keep your workforce growing</h2><p>Review your plan and choose the capacity that matches your organization.</p></div><span class="section-status billing-status" id="billing-status">LOADING</span></header>
+              <div class="billing-summary" id="billing-summary"><p class="empty-state-sm">Loading billing details…</p></div>
+              <div class="plans-grid" aria-label="Caveworkers plans">
+                <article class="plan-card"><p>STARTER</p><h3>₹1,999<span>/mo</span></h3><ul><li>Core AI workforce</li><li>Tenant-isolated workroom</li><li>Approval gates</li></ul><button class="btn btn-light" type="button" data-plan="starter">Choose Starter</button></article>
+                <article class="plan-card featured"><span class="plan-tag">POPULAR</span><p>GROWTH</p><h3>₹6,999<span>/mo</span></h3><ul><li>Expanded team capacity</li><li>Workspace connectors</li><li>Company collaboration</li></ul><button class="btn btn-primary" type="button" data-plan="growth">Choose Growth</button></article>
+                <article class="plan-card"><p>ENTERPRISE</p><h3>₹14,999<span>/mo</span></h3><ul><li>Full workforce capacity</li><li>Priority operations</li><li>Advanced controls</li></ul><button class="btn btn-light" type="button" data-plan="enterprise">Choose Enterprise</button></article>
               </div>
-              <button class="btn btn-primary" onclick="addCustomMcpConnection()" style="margin-top: 14px;">Add employee connection ↗</button>
-            </div>
-            <h4 style="color: #fff; margin-top: 24px;">Custom Employee Connections</h4>
-            <div id="custom-mcp-list">Loading custom connections...</div>
-          </div>
-
-          <!-- Tab 2: Employees -->
-          <div id="tab-employees" style="display: none;">
-            <h3>Configure AI Employees</h3>
-            <p style="color: rgba(255,255,255,0.6); font-size: 14px; margin-bottom: 20px;">
-              Add or remove AI employees from your active team.
-            </p>
-            <div id="catalog-list">Loading catalog...</div>
-          </div>
-
-          <!-- Tab 3: Company Profile -->
-          <div id="tab-company" style="display: none;">
-            <h3>Company Profile &amp; Subscription</h3>
-            <div class="tool-add-card">
-              <div class="form-group">
-                <label>Company Name</label>
-                <input type="text" id="setting-company-name">
-              </div>
-              <div class="form-group">
-                <label>Industry</label>
-                <input type="text" id="setting-industry">
-              </div>
-              <button class="btn btn-primary" onclick="saveCompanySettings()">Update Profile</button>
-            </div>
-
-            <h4 style="color: var(--gold); margin-top: 24px;">Subscription Status</h4>
-            <div id="billing-summary" style="color: rgba(255,255,255,0.8); line-height: 1.8;">Loading billing details...</div>
-
-            <div class="tool-add-card" style="margin-top: 22px;">
-              <h4 style="margin: 0; color: var(--aqua);">Keep your crew working</h4>
-              <p style="color: rgba(255,255,255,.6); font-size: 13px; line-height: 1.5; margin: 8px 0 0;">Choose a paid plan to continue after your trial or give your AI workforce more capacity.</p>
-              <div class="upgrade-grid">
-                <% Object.keys(plans || {}).forEach(function(tier_key) { var plan = plans[tier_key]; if (tier_key !== 'free_trial') { %>
-                <div class="upgrade-card">
-                  <h5><%= plan.name %></h5>
-                  <div class="upgrade-price">$<%= plan.price %><span style="font: 11px 'DM Sans', sans-serif; color: rgba(255,255,255,.5);"> / mo</span></div>
-                  <p><%= plan.max_employees %> AI employees · <%= plan.description %></p>
-                  <button class="btn btn-primary" onclick="startUpgrade('<%= tier_key %>')">Choose <%= plan.name %></button>
-                </div>
-                <% } }); %>
-              </div>
-            </div>
+              <p class="billing-footnote">All payments are initiated through Razorpay and verified server-side before a plan is applied.</p>
+            </section>
           </div>
         </div>
       </div>
-    </div>
+    </main>
   </div>
-
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
   <script src="/static/csrf.js"></script>
-  <script>
-    function showTab(tabId) {
-      document.querySelectorAll(".settings-panel > div").forEach(d => d.style.display = "none");
-      document.getElementById(tabId).style.display = "block";
-      document.querySelectorAll(".settings-nav button").forEach(b => b.classList.remove("active"));
-      event.target.classList.add("active");
-    }
-
-    function escapeHtml(value) {
-      return String(value ?? '').replace(/[&<>'"]/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char]));
-    }
-
-    async function loadData() {
-      const [empRes, billRes, catRes, compRes, connectorRes, marketRes] = await Promise.all([
-        fetch("/api/employees"),
-        fetch("/api/billing"),
-        fetch("/api/employee-catalog"),
-        fetch("/api/company"),
-        fetch("/api/mcp-connectors"),
-        fetch("/api/mcp/marketplace")
-      ]);
-
-      const employees = await empRes.json();
-      const billing = await billRes.json();
-      const catalog = await catRes.json();
-      const company = await compRes.json();
-      const connectors = await connectorRes.json();
-      const marketplace = (await marketRes.json()).servers || [];
-
-      document.getElementById("mcp-connectors").innerHTML = connectors.map(c => `<option value="${escapeHtml(c.name)}">${escapeHtml(c.server)} · ${escapeHtml(c.description)}</option>`).join("");
-
-      // Populate employee selects (grant + custom + marketplace)
-      const select = document.getElementById("grant-emp-id");
-      select.innerHTML = employees.map(e => `<option value="${e.id}">${e.name} (${e.role})</option>`).join("");
-      const customSelect = document.getElementById("custom-mcp-employee");
-      customSelect.innerHTML = employees.map(e => `<option value="${e.id}">${e.name} (${e.role})</option>`).join("");
-      const marketSelect = document.getElementById("marketplace-employee");
-      marketSelect.innerHTML = employees.map(e => `<option value="${e.id}">${e.name} (${e.role})</option>`).join("");
-      document.getElementById("marketplace-server").innerHTML = marketplace.map(s => `<option value="${s.id}">${s.icon} ${s.name} — ${s.category}</option>`).join("");
-
-      // Render employee tools
-      const toolsList = document.getElementById("employee-tools-list");
-      toolsList.innerHTML = employees.map(e => `
-        <div style="background: rgba(255,255,255,0.03); border-radius: 12px; padding: 16px; margin-bottom: 12px;">
-          <h5 style="margin: 0 0 10px; color: ${e.color}; font-size: 16px;">${e.name} — ${e.role}</h5>
-          ${(e.permissions || []).map(p => `
-            <div class="employee-tool-item">
-              <span>🔧 <strong>${p.tool_name}</strong></span>
-              <div>
-                <span class="badge-access">${p.access_level}</span>
-                <button class="btn-danger" onclick="revokeTool('${e.id}', '${p.tool_name}')">Revoke</button>
-              </div>
-            </div>
-          `).join("") || '<p style="font-size: 12px; color: rgba(255,255,255,0.4);">No tool permissions granted.</p>'}
-        </div>
-      `).join("");
-
-      const customConnections = await Promise.all(employees.map(async e => ({
-        employee: e,
-        connections: await fetch(`/api/employees/${e.id}/mcp-connections`).then(r => r.ok ? r.json() : [])
-      })));
-      document.getElementById("custom-mcp-list").innerHTML = customConnections.map(({ employee, connections }) => connections.length ? `
-        <div style="background: rgba(255,255,255,.03); border-radius: 12px; padding: 16px; margin-bottom: 12px;">
-          <h5 style="margin: 0 0 7px; color: ${employee.color}; font-size: 15px;">${employee.name}'s connections</h5>
-          ${connections.map(c => `<div class="connection-row"><strong>${c.name}</strong> <span class="badge-access">${c.access_level}</span><div class="connection-meta">${c.connection_type} · ${c.server_url || c.config.repo_path || 'employee skill'} · ${c.status}</div>
-          ${c.connection_type === 'streamable_http' ? renderToolGrants(employee.id, c) : ''}
-          <div style="margin-top: 8px;">${(c.connection_type === 'google_gmail' || c.connection_type === 'google_sheets') && c.status !== 'connected' ? `<a class="btn btn-primary" style="padding: 5px 9px; font-size: 11px;" href="/api/employees/${employee.id}/mcp-connections/${c.id}/google/start?service=${encodeURIComponent(c.connection_type)}">Connect ${c.connection_type === 'google_sheets' ? 'Google Sheets' : 'Gmail'}</a> ` : ''}${c.connection_type === 'git_repository' ? `<button class="btn btn-primary" style="padding: 5px 9px; font-size: 11px;" onclick="requestGitCommit('${employee.id}', ${c.id})">Request commit</button> ` : ''}${c.connection_type === 'streamable_http' ? `<button class="btn btn-primary" style="padding: 5px 9px; font-size: 11px;" onclick="discoverTools('${employee.id}', ${c.id})">${c.discovered_tools && c.discovered_tools.length ? 'Refresh tools' : 'Discover tools'}</button> ` : ''}<button class="btn btn-light" style="padding: 5px 9px; font-size: 11px;" onclick="testCustomMcp('${employee.id}', ${c.id})">Test safely</button> <button class="btn-danger" onclick="removeCustomMcp('${employee.id}', ${c.id})">Remove</button></div></div>`).join("")}
-        </div>` : "").join("") || '<p style="font-size: 12px; color: rgba(255,255,255,.45);">No custom connections yet.</p>';
-
-      // Render catalog
-      const activeIds = employees.map(e => e.id);
-      document.getElementById("catalog-list").innerHTML = catalog.map(c => `
-        <div class="employee-tool-item" style="padding: 16px 0;">
-          <div>
-            <strong style="color: ${c.color}; font-size: 16px;"><span class="catalog-avatar">${c.icon || c.name?.[0] || 'AI'}</span>${c.name} (${c.role})</strong>
-            <p style="margin: 4px 0 0; font-size: 12px; color: rgba(255,255,255,0.6);">${c.description || c.system_prompt || c.department || 'AI workforce specialist'}</p>
-          </div>
-          <div>
-            ${activeIds.includes(c.id) 
-              ? `<button class="btn-danger" onclick="toggleEmp('${c.id}', 'remove')">Remove from Org</button>`
-              : `<button class="btn btn-primary" onclick="toggleEmp('${c.id}', 'add')">Add to Org</button>`
-            }
-          </div>
-        </div>
-      `).join("");
-
-      // Render company
-      if (company && company.name) {
-        document.getElementById("setting-company-name").value = company.name || "";
-        document.getElementById("setting-industry").value = company.industry || "";
-      }
-      document.getElementById("billing-summary").innerHTML = `
-        <p><strong>Plan Tier:</strong> ${billing.tier_name || 'Growth Plan'}</p>
-        <p><strong>Active Employees:</strong> ${billing.active_employees} / ${billing.max_employees}</p>
-        <p><strong>Quota Remaining:</strong> ${billing.quota_remaining} slots</p>
-      `;
-    }
-
-    async function submitToolGrant() {
-      const empId = document.getElementById("grant-emp-id").value;
-      const toolName = document.getElementById("grant-tool-name").value.trim();
-      const accessLevel = document.getElementById("grant-access-level").value;
-
-      if (!toolName) return alert("Enter a tool name.");
-
-      const res = await fetch(`/api/employees/${empId}/tools`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tool_name: toolName, action: "add", access_level: accessLevel })
-      });
-
-      if (res.ok) {
-        document.getElementById("grant-tool-name").value = "";
-        loadData();
-      } else {
-        alert("Failed to grant tool.");
-      }
-    }
-
-    function updateCustomMcpFields() {
-      const type = document.getElementById("custom-mcp-type").value;
-      const label = document.getElementById("custom-mcp-target-label");
-      const target = document.getElementById("custom-mcp-target");
-      const name = document.getElementById("custom-mcp-name");
-      target.disabled = false;
-      if (type === "google_gmail" || type === "google_sheets") {
-        label.textContent = "Google Account (connected through OAuth)";
-        target.value = "Google OAuth required after saving";
-        target.disabled = true;
-        if (!name.value) name.value = type === "google_sheets" ? "Google Sheets" : "Google Gmail";
-      } else if (type === "git_repository") {
-        label.textContent = "Absolute Git Repository Path";
-        target.placeholder = "C:\\Projects\\your-repository";
-        if (!name.value) name.value = "Git repository";
-      } else if (type === "custom_skill") {
-        label.textContent = "No endpoint required";
-        target.value = "";
-        target.disabled = true;
-        if (!name.value) name.value = "Custom skill";
-      } else {
-        label.textContent = "MCP Server URL";
-        target.placeholder = "https://mcp.example.com";
-      }
-    }
-
-    async function addCustomMcpConnection() {
-      const employeeId = document.getElementById("custom-mcp-employee").value;
-      const connectionType = document.getElementById("custom-mcp-type").value;
-      const name = document.getElementById("custom-mcp-name").value.trim();
-      const target = document.getElementById("custom-mcp-target").value.trim();
-      const notes = document.getElementById("custom-mcp-notes").value.trim();
-      const authToken = document.getElementById("custom-mcp-token").value.trim();
-      const accessLevel = document.getElementById("custom-mcp-access").value;
-      if (!name) return alert("Give this employee connection a name.");
-      const config = { notes };
-      if (connectionType === "git_repository") config.repo_path = target;
-      const res = await fetch(`/api/employees/${employeeId}/mcp-connections`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, connection_type: connectionType, server_url: connectionType === "streamable_http" ? target : null, auth_token: authToken || undefined, config, access_level: accessLevel })
-      });
-      const data = await res.json();
-      if (!res.ok) return alert(data.error || "Could not add the connection.");
-      document.getElementById("custom-mcp-name").value = "";
-      document.getElementById("custom-mcp-target").value = "";
-      document.getElementById("custom-mcp-token").value = "";
-      document.getElementById("custom-mcp-notes").value = "";
-      updateCustomMcpFields();
-      loadData();
-    }
-
-    async function attachMarketplaceServer() {
-      const employeeId = document.getElementById("marketplace-employee").value;
-      const serverId = document.getElementById("marketplace-server").value;
-      const accessLevel = document.getElementById("marketplace-access").value;
-      const name = document.getElementById("marketplace-name").value.trim();
-      if (!employeeId || !serverId) return alert("Choose an employee and a marketplace server.");
-      const res = await fetch(`/api/employees/${employeeId}/mcp-connections`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ marketplace_id: serverId, access_level: accessLevel, name: name })
-      });
-      const data = await res.json();
-      if (!res.ok) return alert(data.error || "Could not attach the marketplace server.");
-      alert("Attached. Discover its tools and grant them per-tool below.");
-      loadData();
-    }
-
-    function renderToolGrants(employeeId, connection) {
-      const grants = connection.tool_grants || [];
-      if (!connection.discovered_tools || connection.discovered_tools.length === 0) {
-        return '<div style="margin-top: 6px; font-size: 11px; color: rgba(255,255,255,.4);">No tools discovered yet. Click &quot;Discover tools&quot;.</div>';
-      }
-      const safeEmployeeId = encodeURIComponent(employeeId);
-      return `<div style="margin-top: 8px; padding: 8px; background: rgba(0,0,0,.25); border-radius: 8px;">
-        <div style="font-size: 11px; color: rgba(255,255,255,.5); margin-bottom: 6px;">Discovered MCP tools (${connection.discovered_tools.length})</div>
-        ${connection.discovered_tools.map(t => {
-          const toolName = String(t.name || '');
-          const encodedTool = encodeURIComponent(toolName);
-          const grant = grants.find(g => String(g.tool_name || '').toLowerCase() === toolName.toLowerCase());
-          const level = grant ? grant.access_level : '—';
-          const grantButtonArgs = `decodeURIComponent('${safeEmployeeId}'), ${Number(connection.id)}, decodeURIComponent('${encodedTool}')`;
-          return `<div style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:4px 0; border-bottom:1px solid rgba(255,255,255,.06);">
-            <span style="font-size:12px;">&#128296; <strong>${escapeHtml(toolName)}</strong></span>
-            <div style="display:flex; align-items:center; gap:6px;">
-              <span class="badge-access">${escapeHtml(level)}</span>
-              <button class="btn btn-light" style="padding:3px 7px; font-size:11px;" onclick="grantTool(${grantButtonArgs}, 'read_only')">Grant RO</button>
-              <button class="btn btn-light" style="padding:3px 7px; font-size:11px;" onclick="grantTool(${grantButtonArgs}, 'requires_approval')">Grant HITL</button>
-              ${grant ? `<button class="btn-danger" onclick="revokeToolGrant(${grantButtonArgs})">Revoke</button>` : ''}
-            </div>
-          </div>`;
-        }).join("")}
-      </div>`;
-    }
-
-    async function discoverTools(employeeId, connectionId) {
-      const res = await fetch(`/api/employees/${employeeId}/mcp-connections/${connectionId}/tools?refresh=1`);
-      const data = await res.json();
-      if (!res.ok) return alert(data.error || "Could not refresh tools.");
-      alert(`Found ${data.discovered.length} tools. Grant them below.`);
-      loadData();
-    }
-
-    async function grantTool(employeeId, connectionId, toolName, accessLevel) {
-      const res = await fetch(`/api/employees/${employeeId}/mcp-connections/${connectionId}/tools/${encodeURIComponent(toolName)}`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ access_level: accessLevel })
-      });
-      const data = await res.json();
-      if (!res.ok) return alert(data.error || "Could not grant the tool.");
-      loadData();
-    }
-
-    async function revokeToolGrant(employeeId, connectionId, toolName) {
-      if (!confirm(`Revoke this MCP tool from the employee?`)) return;
-      const res = await fetch(`/api/employees/${employeeId}/mcp-connections/${connectionId}/tools/${encodeURIComponent(toolName)}`, { method: "DELETE" });
-      if (!res.ok) return alert("Could not revoke the tool.");
-      loadData();
-    }
-
-    async function testCustomMcp(employeeId, connectionId) {
-      const res = await fetch(`/api/employees/${employeeId}/mcp-connections/${connectionId}/test`, { method: "POST" });
-      const data = await res.json();
-      alert(data.message || (data.ok ? "Connection is healthy." : "Connection check failed."));
-    }
-
-    async function removeCustomMcp(employeeId, connectionId) {
-      if (!confirm("Remove this employee-scoped connection?")) return;
-      const res = await fetch(`/api/employees/${employeeId}/mcp-connections/${connectionId}`, { method: "DELETE" });
-      if (!res.ok) return alert("Could not remove the connection.");
-      loadData();
-    }
-
-    async function requestGitCommit(employeeId, connectionId) {
-      const message = prompt("Commit message (the manager must approve before Git writes):");
-      if (!message?.trim()) return;
-      const res = await fetch(`/api/employees/${employeeId}/mcp-connections/${connectionId}/git-commit-request`, {
-        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ message: message.trim() })
-      });
-      const data = await res.json();
-      alert(data.message || data.error || "Commit request created.");
-    }
-
-    async function revokeTool(empId, toolName) {
-      if (!confirm(`Revoke ${toolName} from employee?`)) return;
-      await fetch(`/api/employees/${empId}/tools`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ tool_name: toolName, action: "remove" })
-      });
-      loadData();
-    }
-
-    async function toggleEmp(empId, action) {
-      const res = await fetch("/api/employees/configure", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ employee_id: empId, action: action })
-      });
-      const data = await res.json();
-      if (!res.ok) return alert(data.error || "Action failed");
-      loadData();
-    }
-
-    async function saveCompanySettings() {
-      const name = document.getElementById("setting-company-name").value.trim();
-      const ind = document.getElementById("setting-industry").value.trim();
-      await fetch("/api/company", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name, industry: ind })
-      });
-      alert("Company profile updated!");
-    }
-
-    async function startUpgrade(tier) {
-      try {
-        const selected = await fetch("/api/onboarding/select-plan", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tier })
-        });
-        const selectedData = await selected.json();
-        if (!selected.ok) throw new Error(selectedData.error || "Could not select this plan.");
-
-        const orderResponse = await fetch("/api/payments/create-order", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ tier })
-        });
-        const order = await orderResponse.json();
-        if (!orderResponse.ok) throw new Error(order.error || "Could not create a payment order.");
-
-        const verifyAndApply = async (paymentDetails = {}) => {
-          try {
-            const verification = await fetch("/api/payments/verify", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                razorpay_order_id: paymentDetails.razorpay_order_id || order.order_id,
-                razorpay_payment_id: paymentDetails.razorpay_payment_id || `pay_upg_${Date.now()}`,
-                razorpay_signature: paymentDetails.razorpay_signature || "verified_upgrade"
-              })
-            });
-            const result = await verification.json();
-            if (!verification.ok || result.status !== "verified") throw new Error("Payment verification failed.");
-            await loadData();
-            alert(`🎉 Success! Your Caveworkers workspace is now active on the ${tier.toUpperCase()} plan.`);
-          } catch (error) {
-            alert(error.message || "Payment verification failed.");
-          }
-        };
-
-        if (typeof Razorpay !== "undefined") {
-          try {
-            const checkout = new Razorpay({
-              key: order.key_id,
-              amount: order.amount,
-              currency: order.currency,
-              name: "Caveworkers OS",
-              description: `${tier} plan subscription upgrade`,
-              order_id: order.order_id,
-              handler: verifyAndApply,
-              theme: { color: "#c5f36a" }
-            });
-            checkout.on("payment.failed", function () {
-              verifyAndApply();
-            });
-            checkout.open();
-          } catch (e) {
-            await verifyAndApply();
-          }
-        } else {
-          await verifyAndApply();
-        }
-      } catch (error) {
-        alert(error.message || "Could not start checkout.");
-      }
-    }
-
-    document.getElementById("logout-btn")?.addEventListener("click", async (e) => {
-      e.preventDefault();
-      try {
-        if (window.firebaseAuth && window.firebaseAuth.signOut) {
-          await window.firebaseAuth.signOut();
-        }
-      } catch (e) { console.warn("Firebase signout note:", e); }
-      try {
-        await fetch("/api/session-logout", { method: "POST" });
-      } catch (e) { console.warn("Logout fetch note:", e); }
-      window.location.replace("/login");
-    });
-
-    document.addEventListener("DOMContentLoaded", loadData);
-    document.addEventListener("DOMContentLoaded", updateCustomMcpFields);
-  </script>
+  <script src="/static/settings.js"></script>
 </body>
 </html>

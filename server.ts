@@ -2284,6 +2284,9 @@ function selectCollaborativeTeam(question: string, companyId: string, preferredE
   const winner = scored.sort((a, b) => b.score - a.score)[0];
   const preferredLead = workforce.find((employee) => employee.id === preferredEmployeeId);
   const lead = preferredLead || workforce.find((employee) => employee.id === (winner?.score ? winner.employeeId : 'alex')) || workforce[0];
+  if (preferredEmployeeId === '__whole_team__') {
+    return { lead, collaborators: workforce.filter((employee) => employee.id !== lead.id), workforce };
+  }
   const leadPeers = (lead.collaborates_with || []).map((id: string) => workforce.find((employee) => employee.id === id)).filter(Boolean) as any[];
   const explicitMatches = scored.filter((domain) => domain.score > 0 && domain.employeeId !== lead.id).map((domain) => workforce.find((employee) => employee.id === domain.employeeId)).filter(Boolean) as any[];
   const collaborators: any[] = [];

@@ -3,115 +3,99 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#0c100e">
-  <meta name="description" content="Caveworkers workspace dashboard — direct your AI workforce.">
-  <title>Caveworkers — Workspace dashboard</title>
+  <meta name="theme-color" content="#070b1a">
+  <meta name="description" content="Caveworkers company room — direct your AI workforce in one realtime group conversation.">
+  <title>Caveworkers — Company room</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/command.css">
 </head>
-<body class="command-body">
-  <div class="app-shell">
-    <aside class="side-rail" aria-label="Workspace navigation">
-      <a class="brand" href="/"><img class="brand-logo" src="/static/logo.jpeg" alt=""><span>Caveworkers</span></a>
+<body class="command-body room-body">
+  <div class="app-shell room-app-shell">
+    <aside class="side-rail room-rail" aria-label="Workspace navigation">
+      <a class="brand" href="/command"><img class="brand-logo" src="/static/logo.jpeg" alt=""><span>Caveworkers</span></a>
       <div class="rail-label">WORKSPACE</div>
-      <a class="rail-link active" href="#command"><i></i>Overview</a>
-      <a class="rail-link" href="/analyst"><i></i>David's data lab <span class="rail-badge analyst-nav-badge">NEW</span></a>
-      <a class="rail-link" href="#new-task"><i></i>New task</a>
-      <a class="rail-link" href="#team"><i></i>AI team</a>
-      <a class="rail-link" href="#company-workroom"><i></i>Company workroom <span class="rail-badge workroom-nav-badge">LIVE</span></a>
-      <a class="rail-link" href="#approvals-section"><i></i>Approvals <span class="rail-badge" id="approval-count-badge">0</span></a>
-      <a class="rail-link" href="#task-dashboard-section"><i></i>Tasks <span class="rail-badge" id="task-count-badge">0</span></a>
+      <a class="rail-link active" href="#company-room"><i></i>Company room <span class="rail-badge workroom-nav-badge">LIVE</span></a>
+      <a class="rail-link" href="/analyst"><i></i>David’s data lab</a>
+      <a class="rail-link" href="#team-status"><i></i>Team status <span class="rail-badge" id="task-count-badge">0</span></a>
+      <a class="rail-link" href="#approval-queue"><i></i>Approvals <span class="rail-badge" id="approval-count-badge">0</span></a>
       <div class="rail-label rail-gap">MANAGE</div>
-      <a class="rail-link" href="#workspace-tools"><i></i>Tools &amp; knowledge</a>
-      <a class="rail-link" href="/settings"><i></i>Workspace settings</a>
-      <div class="rail-footer"><span class="system-dot"></span><div><b id="rail-system-status">Systems standby</b><small>Health refreshes on load</small></div></div>
+      <a class="rail-link" href="/settings"><i></i>Settings</a>
+      <div class="rail-footer"><span class="system-dot"></span><div><b id="rail-system-status">Connecting</b><small id="rail-system-detail">Checking workspace services</small></div></div>
     </aside>
 
-    <main class="command-main" id="command">
-      <header class="app-topbar">
+    <main class="command-main room-main" id="company-room">
+      <header class="app-topbar room-topbar">
         <button class="menu-button" id="menuButton" aria-label="Open navigation">☰</button>
-        <div class="workspace-name"><span class="status-dot"></span><span><%= (user && user.company_name) || "Your workspace" %></span><small>WORKSPACE</small></div>
-        <div class="top-actions"><a class="settings-link" href="/settings">Settings <span>↗</span></a><a id="logout-btn" href="/logout" class="logout-button" style="text-decoration:none; display:inline-flex; align-items:center;">Sign out</a></div>
+        <div class="workspace-name"><span class="status-dot"></span><span><%= (user && user.company_name) || "Your workspace" %></span><small>COMPANY ROOM</small></div>
+        <div class="top-actions"><a class="settings-link" href="/settings">Settings <span>↗</span></a><a id="logout-btn" href="/logout" class="logout-button">Sign out</a></div>
       </header>
 
-      <div class="command-wrap">
-        <section class="trial-banner" id="trial-banner" hidden aria-live="polite">
+      <div class="room-wrap">
+        <section class="trial-banner room-trial-banner" id="trial-banner" hidden aria-live="polite">
           <div><span class="trial-banner-kicker">WORKSPACE ACCESS</span><strong id="trial-banner-text">Your free trial is active.</strong><small id="trial-banner-detail">Loading trial status…</small></div>
-          <a href="/settings" class="trial-banner-action">Upgrade workspace ↗</a>
+          <a href="/settings#billing" class="trial-banner-action">Upgrade workspace ↗</a>
         </section>
 
-        <section class="command-intro">
-          <div><p class="eyebrow">WORKSPACE OVERVIEW</p><h1>Your AI workforce,<br><em>under control.</em></h1></div>
-          <p>Assign work, review important actions, and talk directly with your AI employees from one clear workspace.</p>
+        <section class="room-intro">
+          <div><p class="eyebrow">REALTIME COMPANY ROOM</p><h1>One conversation.<br><em>Your whole workforce.</em></h1></div>
+          <p>Assign work, watch your employees collaborate, and approve consequential actions from one clear shared room.</p>
         </section>
 
-        <section class="composer" id="new-task" aria-labelledby="new-task-heading">
-          <div class="composer-meta"><span class="composer-kicker">NEW TASK</span><span class="secure-tag">● HUMAN REVIEW ON</span></div>
-          <h2 id="new-task-heading">What would you like your team to do?</h2>
-          <div class="input-shell"><textarea id="request" rows="3" placeholder="Example: Prepare a weekly operations summary from our approved business data."></textarea><button class="run-button" id="run">Create task <span>↗</span></button></div>
-          <div class="composer-foot"><span><i class="signal-dot"></i> Caveworkers chooses the right employee and records the work.</span><span>Consequential actions wait for your approval.</span></div>
-        </section>
+        <div class="room-layout">
+          <section class="room-panel" aria-labelledby="room-heading">
+            <header class="room-header">
+              <div class="room-heading"><span class="room-mark">#</span><div><p class="panel-kicker">TEAM CHANNEL</p><h2 id="room-heading">Company room</h2><p id="room-connection-copy">Loading the latest company activity…</p></div></div>
+              <div class="room-header-actions"><div class="avatar-stack" id="room-avatar-stack" aria-label="Active AI employees"></div><span class="live-pill" id="workroom-status">CONNECTING…</span></div>
+            </header>
 
-        <section class="signal-strip" aria-label="Workspace status">
-          <div><span>WORKFORCE</span><b id="signal-workforce">Checking…</b></div>
-          <div><span>SYSTEMS</span><b id="signal-systems">Checking…</b></div>
-          <div><span>PAYMENT ACCESS</span><b id="signal-access">Checking…</b></div>
-          <div><span>APPROVALS</span><b id="signal-review">Checking…</b></div>
-        </section>
+            <div class="room-feed" id="workroom-thread" aria-live="polite" aria-label="Realtime employee conversation">
+              <div class="room-loading"><span></span><p>Opening the company room…</p></div>
+            </div>
 
-        <div class="content-grid primary-grid conversation-grid">
-          <article class="panel-block team-panel" id="team">
-            <div class="panel-head"><div><p class="panel-kicker">AI TEAM</p><h2>Talk to an employee</h2></div><a href="/settings" class="panel-link">Manage team ↗</a></div>
-            <p class="section-help">Choose an employee to ask a question, give an instruction, or request an update.</p>
-            <div class="conversation-workspace"><aside class="conversation-roster" id="conversation-employees"><p class="empty-state-sm">Loading your AI team…</p></aside><section class="conversation-thread"><div class="thread-head"><div class="avatar thread-avatar" id="chat-employee-avatar">AI</div><div><h3 id="chat-employee-name">Select an employee</h3><p id="chat-employee-role">Choose someone from your team to start a conversation.</p></div><a href="/settings" class="thread-tools-link">Manage skills ↗</a></div><div class="thread-context" id="chat-employee-tools">No employee selected</div><div class="conversation-messages" id="conversation-messages"><p class="empty-state-sm">Select an AI employee to open a conversation.</p></div><form class="conversation-form" id="conversation-form"><textarea id="conversation-input" rows="2" placeholder="Message your employee…" disabled></textarea><button type="submit" id="conversation-send" disabled>Send ↗</button></form></section></div>
-          </article>
+            <div class="room-jump-wrap"><button class="room-jump" id="jump-to-latest" type="button" hidden>Jump to latest ↓</button></div>
 
-          <article class="panel-block approvals-panel" id="approvals-section">
-            <div class="panel-head"><div><p class="panel-kicker">NEEDS YOUR ATTENTION</p><h2>Approvals</h2></div><span class="pending-label" id="approvals-status-text">Checking queue</span></div>
-            <p class="section-help">Review consequential actions before your team carries them out.</p>
-            <div id="approvals-list" class="approvals-list"><p class="empty-state-sm">Checking for actions that need your approval…</p></div>
-          </article>
+            <form class="room-composer" id="room-composer">
+              <div class="room-composer-top"><label for="request">Assign work</label><span><i class="signal-dot"></i> Approval gates stay on</span></div>
+              <textarea id="request" rows="3" maxlength="6000" placeholder="Ask your employee or team to take on a task…"></textarea>
+              <div class="room-composer-bottom">
+                <label class="assignment-control" for="task-assignee"><span>Route to</span><select id="task-assignee" aria-label="Choose who should lead this task"><option value="">Auto-route the best team</option><option value="__whole_team__">Whole team</option></select></label>
+                <div class="composer-actions"><span class="composer-hint">Press Ctrl + Enter to send</span><button class="run-button" id="run" type="submit">Assign work <span>↗</span></button></div>
+              </div>
+            </form>
+            <p class="room-notice" id="room-notice" role="status" aria-live="polite"></p>
+          </section>
+
+          <aside class="room-context" aria-label="Company room context">
+            <section class="context-card" id="team-status">
+              <div class="context-heading"><div><p class="panel-kicker">PRESENT NOW</p><h2>Team status</h2></div><span id="room-team-count" class="context-count">0</span></div>
+              <div class="workroom-presence compact-presence" id="workroom-presence"><p class="empty-state-sm">Loading employee presence…</p></div>
+              <a href="/settings#team" class="context-link">Manage team ↗</a>
+            </section>
+
+            <section class="context-card" id="approval-queue">
+              <div class="context-heading"><div><p class="panel-kicker">HUMAN REVIEW</p><h2>Approvals</h2></div><span class="pending-label" id="approvals-status-text">Checking</span></div>
+              <div id="approvals-list" class="approvals-list compact-approvals"><p class="empty-state-sm">Checking for approval requests…</p></div>
+            </section>
+
+            <section class="context-card task-context-card" id="task-summary">
+              <div class="context-heading"><div><p class="panel-kicker">WORK IN MOTION</p><h2>Recent tasks</h2></div><button class="context-refresh" id="refresh-tasks" type="button" aria-label="Refresh recent tasks">↻</button></div>
+              <div class="task-summary-list" id="task-dashboard-grid"><p class="empty-state-sm">Loading tasks…</p></div>
+            </section>
+          </aside>
         </div>
-
-        <article class="panel-block workroom-panel" id="company-workroom">
-          <div class="panel-head"><div><p class="panel-kicker">COMPANY WORKROOM</p><h2>Live employee floor</h2></div><span class="live-pill" id="workroom-status">CONNECTING…</span></div>
-          <p class="section-help">Watch your employees coordinate, research, and progress company work. Every message is recorded inside this workspace.</p>
-          <div class="workroom-presence" id="workroom-presence"><p class="empty-state-sm">Loading employee presence…</p></div>
-          <div class="workroom-thread" id="workroom-thread"><p class="empty-state-sm">The workroom will show employee updates when the worker is active.</p></div>
-        </article>
-
-        <article class="panel-block task-dashboard-panel" id="task-dashboard-section">
-          <div class="panel-head"><div><p class="panel-kicker">WORK QUEUE</p><h2>Tasks</h2></div><span class="live-pill" id="task-metrics-summary">0 TOTAL TASKS</span></div>
-          <p class="section-help">See what your AI team is working on, what is complete, and what needs your review.</p>
-          <div class="dashboard-controls"><div class="search-input-box"><input type="text" id="task-search-input" placeholder="Search tasks, employees, or outputs…" onkeyup="filterTaskDashboard()" aria-label="Search tasks"></div><div class="dashboard-filter-tabs"><button class="filter-tab active" data-filter="all" onclick="setTaskFilter('all', this)">All <span id="count-all">0</span></button><button class="filter-tab" data-filter="completed" onclick="setTaskFilter('completed', this)">Completed <span id="count-completed">0</span></button><button class="filter-tab" data-filter="pending_approval" onclick="setTaskFilter('pending_approval', this)">Needs approval <span id="count-pending">0</span></button></div></div>
-          <div id="task-dashboard-grid" class="task-grid"><p class="empty-state-sm">Loading tasks…</p></div>
-        </article>
-
-        <details class="workspace-tools-panel" id="workspace-tools">
-          <summary><span><strong>Tools &amp; knowledge</strong><small>Manage the supporting context your team can use.</small></span><b>Open</b></summary>
-          <div class="content-grid secondary-grid workspace-tools-grid">
-            <article class="panel-block" id="tools-section"><div class="panel-head"><div><p class="panel-kicker">CONNECTORS</p><h2>Employee tools</h2></div><a href="/settings" class="panel-link">Manage ↗</a></div><p class="section-help">Permissioned tools available to your AI employees.</p><div id="tools-catalog" class="tools-catalog"></div></article>
-            <article class="panel-block knowledge-panel" id="knowledge-section"><div class="panel-head"><div><p class="panel-kicker">SHARED CONTEXT</p><h2>Knowledge base</h2></div><span class="pending-label">PRIVATE</span></div><p class="section-help">Add policies, processes, or internal context your team should know.</p><form id="knowledge-form" class="knowledge-form"><input type="text" id="knowledge-title" placeholder="Document name" required><textarea id="knowledge-content" rows="2" placeholder="Add a policy, process, brief, or internal context…" required></textarea><button type="submit" class="text-button">Add document <span>↗</span></button></form><div id="knowledge-list" class="knowledge-list"></div></article>
-          </div>
-        </details>
-
-        <details class="activity-panel" id="activity-panel">
-          <summary><span><strong>Workspace activity</strong><small>Review the latest task and employee events.</small></span><b>Open</b></summary>
-          <div id="activity" class="event-feed activity-feed"><p class="empty-state">No activity yet. Your work will appear here as your team gets started.</p></div>
-        </details>
-
-        <section class="results-block" id="results" hidden aria-live="polite"><div class="result-top"><div><p class="panel-kicker">TASK RESULT</p><h2 id="result-title">Task complete</h2></div><span class="complete-tag">✓ COMPLETE</span></div><p class="result-body" id="result-answer"></p><div class="trace-box"><p class="panel-kicker">EXECUTION TRACE</p><div id="trace-steps" class="trace-steps"></div></div><p class="disclaimer">Caveworkers records the real state of every action. If a tool or service is unreachable, that is reported — never fabricated.</p></section>
       </div>
     </main>
   </div>
   <script src="/static/csrf.js"></script>
   <script src="/static/command.js"></script>
   <script>
-    document.getElementById('logout-btn')?.addEventListener('click', async () => {
-      await fetch('/api/session-logout', { method: 'POST' });
-      window.location.href = '/login';
+    document.getElementById('logout-btn')?.addEventListener('click', async (event) => {
+      event.preventDefault();
+      try { if (window.firebaseAuth?.signOut) await window.firebaseAuth.signOut(); } catch (_) {}
+      try { await fetch('/api/session-logout', { method: 'POST' }); } catch (_) {}
+      window.location.replace('/login');
     });
   </script>
 </body>

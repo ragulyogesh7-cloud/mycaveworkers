@@ -28,6 +28,8 @@ function seedTenants() {
   db.analystRuns.clear();
   db.knowledge.clear();
   db.activity.clear();
+  db.workforceQueue.clear();
+  db.employeePresence.clear();
   pendingPaymentOrders.clear();
 
   db.users.set('user-a', {
@@ -102,6 +104,28 @@ describe('Caveworkers security invariants', () => {
     expect(Array.from(db.tasks.values()).some((task: any) => task.company_id === 'company-a' && task.question === 'Run an operations review')).toBe(false);
     expect(isTrialExpired('free_trial', expired)).toBe(true);
     expect(isTrialExpired('growth', expired)).toBe(false);
+  });
+
+  it('queues the explicit whole-team assignment only for active employees in the authenticated tenant', async () => {
+    db.orgEmployees.set('company-a', [
+      { id: 'alex', name: 'Alex', role: 'Operations Lead', department: 'Operations', status: 'active', tools: [], permissions: [] },
+      { id: 'emma', name: 'Emma', role: 'Finance Controller', department: 'Finance', status: 'active', tools: [], permissions: [] },
+      { id: 'david', name: 'David', role: 'Data Analyst', department: 'Analytics', status: 'active', tools: [], permissions: [] }
+    ]);
+    db.orgEmployees.set('company-b', [
+      { id: 'iris', name: 'Iris', role: 'Security Analyst', department: 'Security', status: 'active', tools: [], permissions: [] }
+    ]);
+
+    const response = await csrfRequest('user-a', 'post', '/api/tasks')
+      .send({ request: 'Prepare the weekly cross-functional operations brief', preferred_employee_id: '__whole_team__' })
+      .expect(202);
+
+    expect(response.body.company_id).toBe('company-a');
+    expect(response.body.participants).toEqual(expect.arrayContaining(['Manager', 'Alex', 'Emma', 'David']));
+    expect(response.body.participants).not.toContain('Iris');
+    const queued = Array.from(db.tasks.values()).find((task: any) => task.id === response.body.id) as any;
+    expect(queued).toMatchObject({ company_id: 'company-a', status: 'queued' });
+    expect(queued.participants).toEqual(expect.arrayContaining(['Alex', 'Emma', 'David']));
   });
 
   it('returns only the authenticated tenant’s tasks and approvals', async () => {

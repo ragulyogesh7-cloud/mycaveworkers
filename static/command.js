@@ -1,6 +1,13 @@
 const $ = (selector) => document.querySelector(selector);
+
 let employees = [];
-let activeEmployeeId = null;
+let workroomSource = null;
+let workroomMessages = [];
+let workroomPresence = [];
+let workroomTasks = [];
+let taskSummaries = [];
+let pendingMessages = [];
+let trialCountdownTimer = null;
 
 function safe(value) {
   const node = document.createElement('span');
@@ -13,9 +20,19 @@ function formatTime(iso) {
   return Number.isNaN(date.getTime()) ? 'Now' : date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function relativeTime(iso) {
+  const timestamp = new Date(iso).getTime();
+  if (!Number.isFinite(timestamp)) return 'Now';
+  const minutes = Math.max(0, Math.round((Date.now() - timestamp) / 60000));
+  if (minutes < 1) return 'Now';
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  return hours < 24 ? `${hours}h ago` : `${Math.floor(hours / 24)}d ago`;
+}
+
 async function responseJson(url, options) {
   const response = await fetch(url, options);
-  const data = await response.json();
+  const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     const error = new Error(data.error || 'The request could not be completed.');
     error.upgradeRequired = Boolean(data.upgrade_required);
@@ -24,7 +41,31 @@ async function responseJson(url, options) {
   return data;
 }
 
-let trialCountdownTimer = null;
+function setRoomNotice(message = '', kind = '') {
+  const notice = $('#room-notice');
+  if (!notice) return;
+  notice.textContent = message;
+  notice.className = `room-notice ${kind}`.trim();
+}
+
+function roomAtLatest() {
+  const feed = $('#workroom-thread');
+  return !feed || feed.scrollHeight - feed.scrollTop - feed.clientHeight < 96;
+}
+
+function updateJumpButton() {
+  const jump = $('#jump-to-latest');
+  if (!jump) return;
+  jump.hidden = roomAtLatest();
+}
+
+function jumpToLatest() {
+  const feed = $('#workroom-thread');
+  if (!feed) return;
+  feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' });
+  updateJumpButton();
+}
+
 function renderTrialBanner(billing) {
   const banner = $('#trial-banner');
   const title = $('#trial-banner-text');
@@ -33,7 +74,6 @@ function renderTrialBanner(billing) {
   if (trialCountdownTimer) window.clearInterval(trialCountdownTimer);
   const isTrial = billing.tier_key === 'free_trial' && billing.trial_ends_at;
   if (!isTrial) { banner.hidden = true; return; }
-
   banner.hidden = false;
   const endsAt = new Date(billing.trial_ends_at).getTime();
   const render = () => {
@@ -41,15 +81,14 @@ function renderTrialBanner(billing) {
     if (remaining <= 0) {
       banner.classList.add('expired');
       title.textContent = 'Your free trial has ended.';
-      detail.textContent = 'Workspace actions are paused until you upgrade.';
+      detail.textContent = 'Task assignment is paused until you upgrade.';
       return;
     }
     banner.classList.remove('expired');
-    const totalHours = Math.ceil(remaining / (60 * 60 * 1000));
-    const days = Math.floor(totalHours / 24);
-    const hours = totalHours % 24;
-    title.textContent = days > 0 ? `${days} day${days === 1 ? '' : 's'} left on your free trial.` : `${hours} hour${hours === 1 ? '' : 's'} left on your free trial.`;
-    detail.textContent = `Trial access ends ${new Date(endsAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}.`;
+    const hours = Math.ceil(remaining / (60 * 60 * 1000));
+    const days = Math.floor(hours / 24);
+    title.textContent = days ? `${days} day${days === 1 ? '' : 's'} left on your free trial.` : `${hours} hour${hours === 1 ? '' : 's'} left on your free trial.`;
+    detail.textContent = `Access ends ${new Date(endsAt).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}.`;
   };
   render();
   trialCountdownTimer = window.setInterval(render, 60 * 1000);
@@ -61,270 +100,161 @@ async function loadBilling() {
     const workspace = $('.workspace-name > span:nth-child(2)');
     if (workspace && billing.company_name) workspace.textContent = billing.company_name;
     renderTrialBanner(billing);
-  } catch (error) { console.error('Unable to load subscription details:', error); }
-}
-
-const SIGNAL_LABELS = {
-  healthy: 'Nominal',
-  degraded: 'Degraded',
-  down: 'Offline',
-};
-
-function signalClass(status) {
-  return status === 'healthy' ? 'signal-ok' : status === 'degraded' ? 'signal-warn' : 'signal-down';
+  } catch (error) {
+    console.error('Unable to load subscription details:', error);
+  }
 }
 
 async function loadHealth() {
-  const workforce = $('#signal-workforce');
-  const systems = $('#signal-systems');
-  const access = $('#signal-access');
-  if (!workforce || !systems || !access) return;
+  const railStatus = $('#rail-system-status');
+  const railDetail = $('#rail-system-detail');
   try {
-    const health = await fetch('/api/health').then((r) => r.json());
-    const overall = health.status || 'unknown';
-    workforce.textContent = SIGNAL_LABELS[overall] || overall;
-    workforce.className = signalClass(overall);
-    const db = health.components?.database?.status || 'unknown';
-    const payments = health.components?.payments?.status || 'unconfigured';
-    systems.textContent = db === 'up' ? 'Connected' : db === 'down' ? 'Offline' : 'Checking…';
-    systems.className = db === 'up' ? 'signal-ok' : db === 'down' ? 'signal-down' : 'signal-warn';
-    access.textContent = payments === 'configured' ? 'Configured' : 'Not configured';
-    access.className = payments === 'configured' ? 'signal-ok' : 'signal-warn';
+    const health = await responseJson('/api/health');
+    const database = health.components?.database?.status || 'unknown';
+    if (railStatus) railStatus.textContent = health.status === 'healthy' ? 'Systems nominal' : 'Systems need review';
+    if (railDetail) railDetail.textContent = database === 'up' ? 'Workspace services connected' : 'Service check incomplete';
   } catch (error) {
-    [workforce, systems, access].forEach((el) => { if (el) { el.textContent = 'Unavailable'; el.className = 'signal-down'; } });
+    if (railStatus) railStatus.textContent = 'Connection unavailable';
+    if (railDetail) railDetail.textContent = 'Retrying service check';
   }
 }
 
-function activeEmployee() {
-  return employees.find((employee) => employee.id === activeEmployeeId);
+function employeeById(employeeId) {
+  return employees.find((employee) => employee.id === employeeId);
+}
+
+function renderAssignmentOptions() {
+  const select = $('#task-assignee');
+  if (!select) return;
+  const current = select.value;
+  select.innerHTML = `<option value="">Auto-route the best team</option><option value="__whole_team__">Whole team</option>${employees.map((employee) => `<option value="${safe(employee.id)}">${safe(employee.name)} · ${safe(employee.role)}</option>`).join('')}`;
+  select.value = Array.from(select.options).some((option) => option.value === current) ? current : '';
+}
+
+function renderAvatarStack() {
+  const container = $('#room-avatar-stack');
+  if (!container) return;
+  const visible = employees.slice(0, 5);
+  container.innerHTML = visible.map((employee) => `<a href="/employee/${encodeURIComponent(employee.id)}" class="stack-avatar" title="${safe(employee.name)} · ${safe(employee.role)}" style="--avatar-color:${safe(employee.color || '#7ee8ff')}">${safe(employee.name?.[0] || 'A')}</a>`).join('') + (employees.length > visible.length ? `<span class="stack-avatar overflow">+${employees.length - visible.length}</span>` : '');
 }
 
 async function loadEmployees() {
-  const roster = $('#conversation-employees');
   try {
     employees = await responseJson('/api/employees');
-    if (!employees.length) {
-      roster.innerHTML = '<p class="empty-state-sm">Your crew is empty. Add employees in Workspace Settings.</p>';
-      return;
-    }
-    roster.innerHTML = employees.map((employee) => `
-      <button class="conversation-person" data-employee-id="${safe(employee.id)}" type="button">
-        <span class="avatar" style="--color:${safe(employee.color)}">${safe(employee.name?.[0] || 'AI')}</span>
-        <span><b>${safe(employee.name)}</b><small>${safe(employee.role)}</small></span><i class="person-status" aria-label="Available"></i>
-      </button>`).join('');
-    const preferred = employees.some((employee) => employee.id === activeEmployeeId) ? activeEmployeeId : employees[0].id;
-    await selectEmployee(preferred);
+    renderAssignmentOptions();
+    renderAvatarStack();
+    renderWorkroomPresence();
   } catch (error) {
     console.error('Unable to load employees:', error);
-    roster.innerHTML = '<p class="empty-state-sm">Your crew could not be loaded right now.</p>';
+    setRoomNotice('Your employee list could not be loaded. Reconnect and try again.', 'error');
   }
 }
 
-async function selectEmployee(employeeId) {
-  activeEmployeeId = employeeId;
-  const employee = activeEmployee();
-  if (!employee) return;
-  document.querySelectorAll('.conversation-person').forEach((item) => item.classList.toggle('active', item.dataset.employeeId === employeeId));
-  const avatar = $('#chat-employee-avatar');
-  avatar.textContent = employee.name?.slice(0, 2).toUpperCase() || 'AI';
-  avatar.style.setProperty('--color', employee.color || '#c5f36a');
-  $('#chat-employee-name').textContent = employee.name;
-  $('#chat-employee-role').textContent = `${employee.role} · ${employee.department}`;
-  const permissions = employee.permissions || [];
-  $('#chat-employee-tools').innerHTML = permissions.length
-    ? permissions.map((permission) => `<span class="chat-tool">${safe(permission.tool_name)} · ${safe(String(permission.access_level).replace('_', ' '))}</span>`).join('')
-    : 'No MCP-style connectors attached yet';
-  $('#conversation-input').disabled = false;
-  $('#conversation-send').disabled = false;
-  $('#conversation-input').placeholder = `Message ${employee.name}…`;
-  await loadConversation();
-}
-
-function renderConversation(messages) {
-  const container = $('#conversation-messages');
-  if (!messages.length) {
-    const employee = activeEmployee();
-    container.innerHTML = `<p class="empty-state-sm">Start a direct line with ${safe(employee?.name || 'your employee')}. They will respond here and retain the conversation context.</p>`;
-    return;
-  }
-  container.innerHTML = messages.map((message) => `
-    <div class="chat-message ${message.sender === 'manager' ? 'manager' : 'employee'}">${safe(message.body)}<time>${message.sender === 'manager' ? 'You' : safe(activeEmployee()?.name || 'Employee')} · ${formatTime(message.created_at)}</time></div>`).join('');
-  container.scrollTop = container.scrollHeight;
-}
-
-async function loadConversation() {
-  if (!activeEmployeeId) return;
-  const container = $('#conversation-messages');
-  container.innerHTML = '<p class="chat-typing">Opening direct line…</p>';
-  try {
-    const conversation = await responseJson(`/api/employees/${encodeURIComponent(activeEmployeeId)}/conversation`);
-    renderConversation(conversation.messages || []);
-  } catch (error) {
-    container.innerHTML = `<p class="empty-state-sm">${safe(error.message)}</p>`;
-  }
-}
-
-async function sendConversation(event) {
-  event.preventDefault();
-  const input = $('#conversation-input');
-  const message = input.value.trim();
-  if (!message || !activeEmployeeId) return;
-  const button = $('#conversation-send');
-  button.disabled = true;
-  input.disabled = true;
-  const container = $('#conversation-messages');
-  container.insertAdjacentHTML('beforeend', `<div class="chat-message manager">${safe(message)}<time>You · Now</time></div><p class="chat-typing">${safe(activeEmployee()?.name || 'Employee')} is working…</p>`);
-  container.scrollTop = container.scrollHeight;
-  input.value = '';
-  try {
-    const result = await responseJson(`/api/employees/${encodeURIComponent(activeEmployeeId)}/conversation`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message })
-    });
-    const typing = $('.chat-typing');
-    if (typing) typing.remove();
-    container.insertAdjacentHTML('beforeend', `<div class="chat-message employee">${safe(result.employee_message.body)}<time>${safe(activeEmployee()?.name || 'Employee')} · Now</time></div>`);
-    container.scrollTop = container.scrollHeight;
-    loadActivity();
-  } catch (error) {
-    const typing = $('.chat-typing');
-    if (typing) typing.textContent = error.upgradeRequired ? `${error.message} Open Workspace Settings to upgrade.` : error.message;
-    else container.insertAdjacentHTML('beforeend', `<p class="empty-state-sm">${safe(error.message)}</p>`);
-  } finally {
-    button.disabled = false;
-    input.disabled = false;
-    input.focus();
-  }
-}
-
-async function loadApprovals() {
-  const countBadge = $('#approval-count-badge'); const statusText = $('#approvals-status-text'); const container = $('#approvals-list');
-  try {
-    const approvals = await responseJson('/api/approvals');
-    countBadge.textContent = approvals.length;
-    statusText.textContent = approvals.length ? `${approvals.length} waiting for review` : 'Queue clear';
-    const reviewSignal = $('#signal-review');
-    if (reviewSignal) {
-      reviewSignal.textContent = approvals.length ? `${approvals.length} waiting` : 'Queue clear';
-      reviewSignal.className = approvals.length ? 'signal-warn' : 'signal-ok';
-    }
-    container.innerHTML = approvals.length ? approvals.map((approval) => `<div class="approval-item"><div class="approval-top"><span class="approval-tool">${safe(approval.tool_name)}</span><span class="live-pill">REVIEW NEEDED</span></div><p class="approval-summary">${safe(approval.action_summary)}</p><div class="approval-actions"><button class="btn-sm btn-approve" data-approval-id="${approval.id}" data-approval-status="approved">Approve ✓</button><button class="btn-sm btn-reject" data-approval-id="${approval.id}" data-approval-status="rejected">Reject</button></div></div>`).join('') : '<p class="empty-state-sm">Nothing needs your approval. Caveworkers will always pause consequential actions.</p>';
-  } catch (error) { console.error('Unable to load approvals:', error); statusText.textContent = 'Queue unavailable'; }
-}
-
-async function resolveApproval(id, status) {
-  try { await responseJson(`/api/approvals/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) }); await Promise.all([loadApprovals(), loadActivity()]); } catch (error) { alert(error.message); }
-}
-
-async function loadTools() {
-  const container = $('#tools-catalog');
-  try {
-    const connectors = await responseJson('/api/mcp-connectors');
-    container.innerHTML = connectors.length ? connectors.map((connector) => `<div class="tool-card"><div class="tool-card-title"><span>${safe(connector.name.toUpperCase())}</span><span class="live-pill">MCP READY</span></div><p class="tool-card-desc">${safe(connector.description)}</p><span class="tool-server">${safe(connector.server)} · ${safe(String(connector.default_access_level).replace('_', ' '))}</span></div>`).join('') : '<p class="empty-state-sm">No connectors are available.</p>';
-  } catch (error) { console.error('Unable to load connectors:', error); }
-}
-
-async function loadKnowledge() {
-  const container = $('#knowledge-list');
-  try { const documents = await responseJson('/api/knowledge'); container.innerHTML = documents.length ? documents.map((document) => `<div class="knowledge-item"><b>[${safe(String(document.category).toUpperCase())}] ${safe(document.title)}</b><span>${safe(String(document.content).slice(0, 90))}${document.content.length > 90 ? '…' : ''}</span></div>`).join('') : '<p class="empty-state-sm">No context has been added yet.</p>'; } catch (error) { console.error('Unable to load knowledge:', error); }
-}
-
-async function loadOfficeStatus() {
-  const roster = $('#digital-office-roster');
-  const countTag = $('#office-count-tag');
-  if (!roster) return;
-  try {
-    const data = await responseJson('/api/office/status');
-    if (countTag) countTag.textContent = `${data.total_active_employees} EMPLOYEES ACTIVE`;
-    roster.innerHTML = (data.office || []).map((emp) => `
-      <div class="office-card">
-        <div class="office-card-top">
-          <div class="office-card-name">
-            <span class="avatar" style="--color:${safe(emp.color)}">${safe(emp.name?.[0] || 'AI')}</span>
-            <div><b>${safe(emp.name)}</b><small>${safe(emp.role)}</small></div>
-          </div>
-          <span class="office-status-pill ${safe(emp.status)}">${safe(emp.status.replace('_', ' ').toUpperCase())}</span>
-        </div>
-        <div class="office-task-desc">${safe(emp.current_task)}</div>
-        <div class="office-meta">
-          <span>${emp.collaborating_with ? `🤝 ${safe(emp.collaborating_with)}` : `Tools: ${safe((emp.tools || []).join(', '))}`}</span>
-          <span class="office-autonomy">${safe(emp.autonomy_level)}</span>
-        </div>
-      </div>`).join('');
-  } catch (err) {
-    console.error('Unable to load office status:', err);
-  }
-}
-
-async function loadRoiMetrics() {
-  try {
-    const roi = await responseJson('/api/roi');
-    if ($('#roi-human-cost')) $('#roi-human-cost').textContent = roi.human_equivalent_monthly_cost;
-    if ($('#roi-ai-cost')) $('#roi-ai-cost').textContent = roi.caveworkers_subscription_cost;
-    if ($('#roi-net-savings')) $('#roi-net-savings').textContent = roi.net_monthly_savings;
-    if ($('#roi-annual-projection')) $('#roi-annual-projection').textContent = `Projected Annual: ${roi.annual_projected_savings}`;
-    if ($('#roi-multiplier-tag')) $('#roi-multiplier-tag').textContent = `${roi.roi_multiplier} ROI SAVINGS`;
-  } catch (err) {
-    console.error('Unable to load ROI metrics:', err);
-  }
-}
-
-let workroomSource = null;
-let workroomMessages = [];
-let workroomPresence = [];
-let workroomTasks = [];
-
-function renderWorkroomPresence(presence = workroomPresence) {
+function renderWorkroomPresence() {
   const container = $('#workroom-presence');
+  const count = $('#room-team-count');
   if (!container) return;
-  container.innerHTML = presence.length ? presence.map((entry) => {
-    const employee = employees.find((item) => item.id === entry.employee_id) || {};
+  const roster = workroomPresence.length ? workroomPresence : employees.map((employee) => ({ employee_id: employee.id, status: 'idle' }));
+  const priority = { working: 0, coordinating: 1, reviewing: 2, idle: 3, offline: 4 };
+  roster.sort((a, b) => (priority[a.status] ?? 9) - (priority[b.status] ?? 9));
+  if (count) count.textContent = String(roster.length);
+  container.innerHTML = roster.length ? roster.map((entry, index) => {
+    const employee = employeeById(entry.employee_id) || {};
     const status = entry.status || 'idle';
-    return `<div class="workroom-presence-card"><span class="presence-avatar" style="color:${safe(employee.color || '#8ee6ff')}; border-color:${safe(employee.color || '#8ee6ff')}66; background:${safe(employee.color || '#8ee6ff')}18">${safe((employee.name || entry.employee_id || 'AI').charAt(0))}</span><div><b>${safe(employee.name || entry.employee_id || 'AI employee')}</b><small>${safe(employee.role || 'Specialist')} · <span class="presence-status ${safe(status)}">${safe(status)}</span></small></div></div>`;
+    return `<a class="presence-row" href="/employee/${encodeURIComponent(entry.employee_id || '')}" style="--presence-delay:${Math.min(index, 8) * 35}ms"><span class="presence-avatar" style="--avatar-color:${safe(employee.color || '#7ee8ff')}">${safe(employee.name?.[0] || entry.employee_id?.[0] || 'A')}</span><span class="presence-copy"><b>${safe(employee.name || 'AI employee')}</b><small>${safe(employee.role || 'Specialist')} · <span class="presence-status ${safe(status)}">${safe(status.replace('_', ' '))}</span></small></span></a>`;
   }).join('') : '<p class="empty-state-sm">No active employees are available yet.</p>';
 }
 
-function renderWorkroomMessages() {
+function messageKey(message) {
+  return `${message.task_id || 'room'}:${message.created_at || ''}:${message.sender || ''}:${message.receiver || ''}:${message.body || ''}`;
+}
+
+function messageTone(kind) {
+  if (kind === 'approval_required') return 'approval';
+  if (kind === 'completed') return 'complete';
+  if (kind === 'received') return 'manager';
+  if (kind === 'task_update') return 'system';
+  return 'employee';
+}
+
+function messageInitial(message) {
+  if (message.kind === 'received' || message.sender === 'Manager') return 'YO';
+  if (message.sender === 'Caveworkers coordinator') return 'CW';
+  return String(message.sender || 'AI').split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'AI';
+}
+
+function renderRoomFeed(shouldFollow = roomAtLatest()) {
   const container = $('#workroom-thread');
   if (!container) return;
-  container.innerHTML = workroomMessages.length ? workroomMessages.slice(-40).reverse().map((message) => `<div class="workroom-message"><span class="workroom-message-avatar">${safe(String(message.sender || 'AI').charAt(0))}</span><div><div class="workroom-message-meta"><b>${safe(message.sender || 'Caveworkers')}</b><span>to ${safe(message.receiver || 'Company')}</span><time>${formatTime(message.created_at)}</time></div><p>${safe(message.body || '')}</p>${message.task_id ? `<small class="workroom-task-ref">Task #${safe(message.task_id)}</small>` : ''}</div></div>`).join('') : '<p class="empty-state-sm">The workroom will show employee updates when the worker is active.</p>';
+  const all = [...workroomMessages, ...pendingMessages].sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()).slice(-140);
+  if (!all.length) {
+    container.innerHTML = `<div class="room-empty"><span class="room-empty-mark">✦</span><h3>Your company room is ready.</h3><p>Assign a task below and your team’s routing, collaboration, and review steps will appear here in realtime.</p></div>`;
+    return;
+  }
+  const fragment = document.createDocumentFragment();
+  all.forEach((message, index) => {
+    const article = document.createElement('article');
+    const tone = messageTone(message.kind);
+    article.className = `room-message ${tone}${message.pending ? ' pending' : ''}`;
+    article.style.setProperty('--message-delay', `${Math.min(index, 10) * 35}ms`);
+    const taskReference = message.task_id ? `<button class="message-task" data-task-id="${safe(message.task_id)}" type="button">Task #${safe(message.task_id)}</button>` : '';
+    const approvalAction = message.approval_id ? `<button class="message-approval" data-approval-id="${safe(message.approval_id)}" data-approval-status="approved" type="button">Approve</button>` : '';
+    article.innerHTML = `<span class="message-avatar">${safe(messageInitial(message))}</span><div class="message-body"><div class="message-meta"><b>${safe(message.sender || 'Caveworkers')}</b>${message.receiver ? `<span>to ${safe(message.receiver)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}</div><p>${safe(message.body || '')}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
+    fragment.append(article);
+  });
+  container.replaceChildren(fragment);
+  if (shouldFollow) container.scrollTop = container.scrollHeight;
+  updateJumpButton();
 }
 
 function rebuildWorkroomMessages() {
-  const messages = [];
+  const source = [];
   workroomTasks.forEach((task) => (task.trace || []).forEach((step) => {
-    if (!step || !step.body) return;
-    messages.push({ ...step, task_id: task.id });
+    if (step?.body) source.push({ ...step, task_id: task.id });
   }));
   const seen = new Set();
-  workroomMessages = messages.filter((message) => {
-    const key = `${message.task_id}:${message.created_at}:${message.sender}:${message.receiver}:${message.body}`;
+  workroomMessages = source.filter((message) => {
+    const key = messageKey(message);
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
-  }).sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()).slice(-100);
-  renderWorkroomMessages();
+  }).sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()).slice(-120);
+  const keys = new Set(workroomMessages.map(messageKey));
+  pendingMessages = pendingMessages.filter((message) => !keys.has(messageKey(message)) && Date.now() - new Date(message.created_at).getTime() < 45000);
+  renderRoomFeed();
 }
 
 function upsertWorkroomPresence(entry) {
-  if (!entry || !entry.employee_id) return;
-  const existing = workroomPresence.findIndex((item) => item.employee_id === entry.employee_id);
-  if (existing >= 0) workroomPresence[existing] = { ...workroomPresence[existing], ...entry };
+  if (!entry?.employee_id) return;
+  const index = workroomPresence.findIndex((item) => item.employee_id === entry.employee_id);
+  if (index >= 0) workroomPresence[index] = { ...workroomPresence[index], ...entry };
   else workroomPresence.push(entry);
   renderWorkroomPresence();
 }
 
+function setRoomConnection(status, detail) {
+  const pill = $('#workroom-status');
+  const copy = $('#room-connection-copy');
+  if (pill) { pill.textContent = status; pill.classList.toggle('signal-ok', status === 'LIVE'); }
+  if (copy) copy.textContent = detail;
+}
+
 function applyWorkroomEvent(event) {
   if (!event) return;
+  const follow = roomAtLatest();
   if (event.type === 'presence' && event.presence) upsertWorkroomPresence(event.presence);
-  if (event.type === 'message' && event.message) { workroomMessages.push(event.message); renderWorkroomMessages(); }
+  if (event.type === 'message' && event.message) {
+    const key = messageKey(event.message);
+    if (!workroomMessages.some((message) => messageKey(message) === key)) workroomMessages.push(event.message);
+    renderRoomFeed(follow);
+  }
   if (event.type === 'task_update' && event.task) {
     const index = workroomTasks.findIndex((task) => task.id === event.task.id);
     if (index >= 0) workroomTasks[index] = event.task; else workroomTasks.push(event.task);
     rebuildWorkroomMessages();
-    loadTaskDashboard();
+    void Promise.all([loadTaskSummaries(), loadApprovals()]);
   }
-  const status = $('#workroom-status');
-  if (status) { status.textContent = 'LIVE'; status.classList.add('signal-ok'); }
+  setRoomConnection('LIVE', 'Realtime updates are flowing from your workforce.');
 }
 
 async function loadWorkroomSnapshot() {
@@ -334,237 +264,146 @@ async function loadWorkroomSnapshot() {
     workroomTasks = snapshot.tasks || [];
     renderWorkroomPresence();
     rebuildWorkroomMessages();
-    const status = $('#workroom-status');
-    if (status) { status.textContent = 'LIVE'; status.classList.add('signal-ok'); }
+    setRoomConnection('LIVE', 'Realtime updates are flowing from your workforce.');
   } catch (error) {
-    const status = $('#workroom-status');
-    if (status) status.textContent = 'UNAVAILABLE';
     console.error('Unable to load company workroom:', error);
+    setRoomConnection('UNAVAILABLE', 'The room is temporarily unavailable. Retrying when the connection returns.');
   }
 }
 
 function connectWorkroom() {
-  if (!window.EventSource) return;
-  if (workroomSource) workroomSource.close();
+  if (!window.EventSource) {
+    setRoomConnection('POLLING', 'Your browser does not support live updates. Refresh to see new activity.');
+    return;
+  }
+  workroomSource?.close();
   workroomSource = new EventSource('/api/workforce/stream');
-  const handleEvent = (event) => { try { applyWorkroomEvent(JSON.parse(event.data)); } catch (error) { console.warn('Invalid workroom update:', error); } };
-  workroomSource.onopen = () => { const status = $('#workroom-status'); if (status) { status.textContent = 'LIVE'; status.classList.add('signal-ok'); } };
-  workroomSource.onmessage = handleEvent;
-  workroomSource.addEventListener('connected', handleEvent);
-  workroomSource.addEventListener('presence', handleEvent);
-  workroomSource.addEventListener('task_update', handleEvent);
-  workroomSource.onerror = () => { const status = $('#workroom-status'); if (status) status.textContent = 'RECONNECTING…'; };
+  const receive = (event) => { try { applyWorkroomEvent(JSON.parse(event.data)); } catch (error) { console.warn('Invalid workroom update:', error); } };
+  workroomSource.onopen = () => setRoomConnection('LIVE', 'Realtime updates are flowing from your workforce.');
+  workroomSource.onmessage = receive;
+  ['connected', 'presence', 'message', 'task_update'].forEach((type) => workroomSource.addEventListener(type, receive));
+  workroomSource.onerror = () => setRoomConnection('RECONNECTING…', 'Reconnecting to your workforce activity stream…');
+}
+
+async function loadApprovals() {
+  const container = $('#approvals-list');
+  const status = $('#approvals-status-text');
+  const badge = $('#approval-count-badge');
+  if (!container) return;
+  try {
+    const approvals = await responseJson('/api/approvals');
+    if (badge) badge.textContent = String(approvals.length);
+    if (status) status.textContent = approvals.length ? `${approvals.length} waiting` : 'Queue clear';
+    container.innerHTML = approvals.length ? approvals.slice(0, 4).map((approval) => `<article class="approval-item"><div class="approval-top"><span class="approval-tool">${safe(approval.tool_name)}</span><span class="live-pill">REVIEW</span></div><p class="approval-summary">${safe(approval.action_summary)}</p><div class="approval-actions"><button class="btn-sm btn-approve" data-approval-id="${safe(approval.id)}" data-approval-status="approved">Approve</button><button class="btn-sm btn-reject" data-approval-id="${safe(approval.id)}" data-approval-status="rejected">Reject</button></div></article>`).join('') : '<p class="empty-state-sm">Nothing needs your approval. Your team will always pause consequential actions.</p>';
+  } catch (error) {
+    console.error('Unable to load approvals:', error);
+    if (status) status.textContent = 'Unavailable';
+    container.innerHTML = '<p class="empty-state-sm">The approval queue could not be loaded.</p>';
+  }
+}
+
+async function resolveApproval(id, status) {
+  try {
+    await responseJson(`/api/approvals/${encodeURIComponent(id)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status }) });
+    setRoomNotice(status === 'approved' ? 'Approval recorded. Your employee can continue the approved action.' : 'Approval request rejected. The team has been notified.', 'success');
+    await Promise.all([loadApprovals(), loadTaskSummaries(), loadWorkroomSnapshot()]);
+  } catch (error) {
+    setRoomNotice(error.message || 'The approval could not be updated.', 'error');
+  }
+}
+
+function taskStatusLabel(status) {
+  if (status === 'pending_approval') return 'Needs review';
+  if (status === 'completed') return 'Complete';
+  if (status === 'failed') return 'Needs retry';
+  return 'In progress';
+}
+
+async function loadTaskSummaries() {
+  const container = $('#task-dashboard-grid');
+  const badge = $('#task-count-badge');
+  if (!container) return;
+  try {
+    const data = await responseJson('/api/tasks');
+    taskSummaries = data.tasks || [];
+    if (badge) badge.textContent = String(data.total_count || taskSummaries.length);
+    container.innerHTML = taskSummaries.length ? taskSummaries.slice(0, 5).map((task) => `<button class="task-summary" data-task-id="${safe(task.id)}" type="button"><span class="task-summary-icon">${safe(task.owner_info?.name?.[0] || 'AI')}</span><span><b>${safe(task.question || 'Untitled task')}</b><small>${safe(task.owner_info?.name || 'Caveworkers')} · ${relativeTime(task.created_at)}</small></span><em class="task-summary-status ${safe(task.status)}">${safe(taskStatusLabel(task.status))}</em></button>`).join('') : '<p class="empty-state-sm">No tasks yet. Assign the first one in the company room.</p>';
+  } catch (error) {
+    console.error('Unable to load tasks:', error);
+    container.innerHTML = '<p class="empty-state-sm">Recent tasks are unavailable right now.</p>';
+  }
+}
+
+function renderTaskInRoom(taskId) {
+  const task = taskSummaries.find((entry) => String(entry.id) === String(taskId)) || workroomTasks.find((entry) => String(entry.id) === String(taskId));
+  if (!task) return;
+  const trace = task.trace || [];
+  if (trace.length) {
+    const taskMessages = trace.filter((step) => step?.body).map((step) => ({ ...step, task_id: task.id }));
+    const existingKeys = new Set(workroomMessages.map(messageKey));
+    taskMessages.forEach((message) => { if (!existingKeys.has(messageKey(message))) workroomMessages.push(message); });
+    renderRoomFeed(false);
+  }
+  const first = [...document.querySelectorAll('.message-task')].find((button) => button.dataset.taskId === String(taskId));
+  first?.closest('.room-message')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+}
+
+async function submitTask(event) {
+  event.preventDefault();
+  const input = $('#request');
+  const select = $('#task-assignee');
+  const button = $('#run');
+  const request = input?.value.trim();
+  if (!request) { input?.focus(); return; }
+  const preferred = select?.value || '';
+  const target = preferred === '__whole_team__' ? 'the whole team' : employeeById(preferred)?.name || 'the best available team';
+  const pending = { kind: 'received', sender: 'You', receiver: target, body: request, created_at: new Date().toISOString(), pending: true };
+  pendingMessages.push(pending);
+  renderRoomFeed(true);
+  input.value = '';
+  button.disabled = true;
+  button.innerHTML = 'Assigning…';
+  setRoomNotice(`Routing this task to ${target}.`, '');
+  try {
+    const task = await responseJson('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request, preferred_employee_id: preferred || undefined }) });
+    pending.pending = false;
+    pending.task_id = task.id;
+    pending.receiver = (task.participants || []).slice(1).join(', ') || target;
+    setRoomNotice(`Task #${task.id} is in the company room. The team will post updates here.`, 'success');
+    await Promise.all([loadTaskSummaries(), loadWorkroomSnapshot()]);
+  } catch (error) {
+    pendingMessages = pendingMessages.filter((entry) => entry !== pending);
+    renderRoomFeed();
+    setRoomNotice(error.upgradeRequired ? `${error.message} Open Settings to choose a paid plan.` : error.message, 'error');
+  } finally {
+    button.disabled = false;
+    button.innerHTML = 'Assign work <span>↗</span>';
+    input.focus();
+  }
+}
+
+function bindRoomInteractions() {
+  $('#room-composer')?.addEventListener('submit', submitTask);
+  $('#request')?.addEventListener('keydown', (event) => {
+    if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') $('#room-composer')?.requestSubmit();
+  });
+  $('#workroom-thread')?.addEventListener('scroll', updateJumpButton);
+  $('#jump-to-latest')?.addEventListener('click', jumpToLatest);
+  $('#refresh-tasks')?.addEventListener('click', () => Promise.all([loadTaskSummaries(), loadApprovals(), loadWorkroomSnapshot()]));
+  $('#menuButton')?.addEventListener('click', () => document.querySelector('.side-rail')?.classList.toggle('is-open'));
+  document.addEventListener('click', (event) => {
+    const approval = event.target.closest('[data-approval-id]');
+    if (approval) resolveApproval(approval.dataset.approvalId, approval.dataset.approvalStatus);
+    const task = event.target.closest('[data-task-id]');
+    if (task) renderTaskInRoom(task.dataset.taskId);
+  });
+}
+
+async function initializeRoom() {
+  bindRoomInteractions();
+  await Promise.all([loadEmployees(), loadBilling(), loadHealth(), loadWorkroomSnapshot(), loadApprovals(), loadTaskSummaries()]);
+  connectWorkroom();
 }
 
 window.addEventListener('beforeunload', () => workroomSource?.close());
-
-let allTasksCache = [];
-let currentTaskFilter = 'all';
-
-async function loadTaskDashboard() {
-  const grid = $('#task-dashboard-grid');
-  const summary = $('#task-metrics-summary');
-  const badge = $('#task-count-badge');
-  if (!grid) return;
-
-  try {
-    const res = await responseJson('/api/tasks');
-    allTasksCache = res.tasks || [];
-    if (badge) badge.textContent = res.total_count || allTasksCache.length;
-    if (summary) summary.textContent = `${res.total_count || 0} TOTAL TASKS`;
-
-    if ($('#count-all')) $('#count-all').textContent = res.total_count || 0;
-    if ($('#count-completed')) $('#count-completed').textContent = res.completed_count || 0;
-    if ($('#count-pending')) $('#count-pending').textContent = res.pending_approval_count || 0;
-
-    renderFilteredTasks();
-  } catch (err) {
-    console.error('Unable to load Task Dashboard:', err);
-    grid.innerHTML = '<p class="empty-state-sm">Unable to load tasks at this time.</p>';
-  }
-}
-
-function setTaskFilter(filter, btn) {
-  currentTaskFilter = filter;
-  document.querySelectorAll('.filter-tab').forEach((t) => t.classList.remove('active'));
-  if (btn) btn.classList.add('active');
-  renderFilteredTasks();
-}
-
-function filterTaskDashboard() {
-  renderFilteredTasks();
-}
-
-function renderFilteredTasks() {
-  const grid = $('#task-dashboard-grid');
-  if (!grid) return;
-
-  const searchQuery = ($('#task-search-input')?.value || '').toLowerCase().trim();
-
-  let filtered = allTasksCache.filter((t) => {
-    if (currentTaskFilter !== 'all' && t.status !== currentTaskFilter) return false;
-    if (searchQuery) {
-      const matchQ = (t.question || '').toLowerCase().includes(searchQuery);
-      const matchA = (t.answer || '').toLowerCase().includes(searchQuery);
-      const matchO = (t.owner_info?.name || '').toLowerCase().includes(searchQuery);
-      if (!matchQ && !matchA && !matchO) return false;
-    }
-    return true;
-  });
-
-  if (!filtered.length) {
-    grid.innerHTML = '<p class="empty-state-sm">No tasks match the selected filter.</p>';
-    return;
-  }
-
-  grid.innerHTML = filtered.map((t) => {
-    const owner = t.owner_info || {};
-    const statusText = t.status === 'pending_approval' ? 'Awaiting Sign-off' : t.status === 'completed' ? 'Completed' : 'In Progress';
-
-    return `
-      <div class="task-card" id="task-card-${t.id}">
-        <div class="task-card-top">
-          <div class="task-owner-info">
-            <span class="task-owner-avatar" style="background:${owner.color || '#3b82f6'}22; color:${owner.color || '#3b82f6'}; border:1px solid ${owner.color || '#3b82f6'}55">
-              ${safe(owner.name?.[0] || 'A')}
-            </span>
-            <div class="task-owner-name">
-              <b>${safe(owner.name || 'AI Employee')}</b>
-              <small>${safe(owner.role || 'AI Specialist')} · ${safe(owner.employee_code || 'CW_EMP')}</small>
-            </div>
-          </div>
-          <span class="task-status-pill ${safe(t.status)}">${safe(statusText)}</span>
-        </div>
-
-        <div class="task-question">Task #${t.id}: ${safe(t.question)}</div>
-
-        ${t.plan ? `<div class="task-plan-box"><b>EXECUTION PLAN:</b> ${safe(t.plan)}</div>` : ''}
-        ${t.participants?.length ? `<div class="task-team-line"><b>GROUP:</b> ${safe(t.participants.join(' · '))}</div>` : ''}
-
-        <div class="task-answer-box">${safe(t.answer || 'Processing task execution...')}</div>
-
-        <div class="task-actions">
-          <span class="task-time">Created: ${formatTime(t.created_at)}</span>
-          <div class="task-btn-group">
-            ${t.has_pending_approval ? `<button class="btn-sm btn-approve" onclick="resolveApproval(${t.approval_id}, 'approved')">Approve HITL Action ✓</button>` : ''}
-            <button class="btn-sm text-button group-chat-button" onclick="toggleTaskGroupChat(${t.id})">Open AI group chat ↗</button>
-            <button class="btn-sm text-button" onclick="toggleTaskTrace(${t.id})">Inspect Full Trace ▾</button>
-          </div>
-        </div>
-
-        <div class="task-group-chat-drawer" id="group-chat-drawer-${t.id}">
-          <div class="group-chat-head"><div><p class="panel-kicker">AI GROUP CHAT</p><b>Visible collaboration room</b></div><span>${safe((t.participants || []).length ? `${t.participants.length} participants` : 'Task activity')}</span></div>
-          <p class="group-chat-help">This is the manager-visible record of how the team delegated and consolidated the work. Tool writes remain paused until approval.</p>
-          <div class="task-group-messages">
-            ${(t.trace || []).filter((step) => ['received', 'team_context', 'group_message', 'approval_required', 'completed'].includes(step.kind)).map((step) => `
-              <div class="task-group-message ${safe(step.kind)}">
-                <span class="group-message-avatar">${safe(String(step.sender || 'AI').charAt(0))}</span>
-                <div><div class="group-message-meta"><b>${safe(step.sender)}</b><span>to ${safe(step.receiver)}</span><time>${formatTime(step.created_at)}</time></div><p>${safe(step.body)}</p></div>
-              </div>`).join('') || '<p class="empty-state-sm">No group messages were recorded for this task.</p>'}
-          </div>
-        </div>
-
-        <div class="task-trace-drawer" id="trace-drawer-${t.id}">
-          <p class="panel-kicker" style="margin-bottom:8px;">AGENT INTERFACE &amp; EXECUTION STEPS</p>
-          <div class="trace-steps">
-            ${(t.trace || []).map((step) => `
-              <div class="trace-step ${safe(step.kind)}">
-                <div class="trace-step-top">
-                  <span class="trace-badge">${safe(step.kind)}</span>
-                  <b>${safe(step.sender)}</b> → <b>${safe(step.receiver)}</b>
-                  <time>${formatTime(step.created_at)}</time>
-                </div>
-                <div>${safe(step.body)}</div>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      </div>
-    `;
-  }).join('');
-}
-
-function toggleTaskTrace(taskId) {
-  const drawer = document.getElementById(`trace-drawer-${taskId}`);
-  if (drawer) {
-    drawer.style.display = drawer.style.display === 'block' ? 'none' : 'block';
-  }
-}
-
-function toggleTaskGroupChat(taskId) {
-  const drawer = document.getElementById(`group-chat-drawer-${taskId}`);
-  if (drawer) {
-    const shouldOpen = drawer.style.display !== 'block';
-    drawer.style.display = shouldOpen ? 'block' : 'none';
-    if (shouldOpen) drawer.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  }
-}
-
-async function loadActivity() {
-  const container = $('#activity');
-  try { const activity = await responseJson('/api/activity'); const messages = activity.messages || []; container.innerHTML = messages.length ? messages.map((message) => `<div class="event"><time>${formatTime(message.created_at)}</time><b>${safe(message.sender)}</b> → <b>${safe(message.receiver)}</b><span> · ${safe(message.kind)}</span> — ${safe(message.body)}</div>`).join('') : '<p class="empty-state">No activity yet. Your work will appear here as your crew gets started.</p>'; } catch (error) { console.error('Unable to load activity:', error); }
-}
-
-function renderTrace(trace) { const container = $('#trace-steps'); container.innerHTML = trace?.length ? trace.map((step) => `<div class="trace-step ${safe(step.kind)}"><div class="trace-step-top"><span class="trace-badge">${safe(step.kind)}</span><b>${safe(step.sender)}</b> → <b>${safe(step.receiver)}</b><time>${formatTime(step.created_at)}</time></div><div>${safe(step.body)}</div></div>`).join('') : '<p class="empty-state-sm">No execution trace was recorded.</p>'; }
-
-$('#conversation-form')?.addEventListener('submit', sendConversation);
-$('#knowledge-form')?.addEventListener('submit', async (event) => { event.preventDefault(); const title = $('#knowledge-title').value.trim(); const content = $('#knowledge-content').value.trim(); if (!title || !content) return; try { await responseJson('/api/knowledge', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ title, content, category: 'policy' }) }); $('#knowledge-title').value = ''; $('#knowledge-content').value = ''; await loadKnowledge(); } catch (error) { alert(error.message); } });
-$('#run')?.addEventListener('click', async () => { const request = $('#request').value.trim(); if (!request) return $('#request').focus(); const button = $('#run'); button.disabled = true; button.textContent = 'Routing task…'; try { const task = await responseJson('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request }) }); $('#results').hidden = false; $('#result-title').textContent = `Task #${task.id} · ${task.participants.join(' → ')}`; $('#result-answer').textContent = task.answer; renderTrace(task.trace); $('#results').scrollIntoView({ behavior: 'smooth', block: 'start' }); await Promise.all([loadApprovals(), loadActivity(), loadTaskDashboard()]); } catch (error) { $('#results').hidden = false; $('#result-title').textContent = error.upgradeRequired ? 'Trial ended' : 'Task could not run'; $('#result-answer').textContent = error.upgradeRequired ? `${error.message} Open Workspace Settings to choose a paid plan.` : error.message; } finally { button.disabled = false; button.innerHTML = 'Route task <span>↗</span>'; } });
-document.addEventListener('click', (event) => { const person = event.target.closest('.conversation-person'); if (person) selectEmployee(person.dataset.employeeId); const approval = event.target.closest('[data-approval-id]'); if (approval) resolveApproval(approval.dataset.approvalId, approval.dataset.approvalStatus); });
-$('#refresh')?.addEventListener('click', () => Promise.all([loadBilling(), loadEmployees(), loadApprovals(), loadTools(), loadKnowledge(), loadActivity(), loadHealth(), loadTaskDashboard()]));
-$('#menuButton')?.addEventListener('click', () => document.querySelector('.side-rail')?.classList.toggle('is-open'));
-$('#logout-btn')?.addEventListener('click', async (e) => {
-  e.preventDefault();
-  try {
-    if (window.firebaseAuth && window.firebaseAuth.signOut) {
-      await window.firebaseAuth.signOut();
-    }
-  } catch (err) { console.warn('Firebase signout note:', err); }
-  try {
-    await fetch('/api/session-logout', { method: 'POST' });
-  } catch (err) { console.warn('Logout fetch note:', err); }
-  window.location.replace('/login');
-});
-
-(async () => { await Promise.all([loadBilling(), loadApprovals(), loadTools(), loadKnowledge(), loadActivity(), loadHealth(), loadTaskDashboard()]); await loadEmployees(); await loadWorkroomSnapshot(); connectWorkroom(); })();
-
-
-// Liquid-glass interaction polish. This is progressive enhancement only; all core task flows above remain independent of motion.
-(function initialiseLiquidGlassMotion() {
-  const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  const revealTargets = document.querySelectorAll('.command-intro, .composer, .signal-strip, .panel-block, .results-block');
-
-  revealTargets.forEach((element, index) => {
-    element.classList.add('reveal');
-    element.style.setProperty('--reveal-delay', `${Math.min(index * 35, 180)}ms`);
-  });
-
-  if (reducedMotion || !('IntersectionObserver' in window)) {
-    revealTargets.forEach((element) => element.classList.add('is-visible'));
-  } else {
-    const revealObserver = new IntersectionObserver((entries, observer) => {
-      entries.forEach((entry) => {
-        if (entry.isIntersecting) {
-          entry.target.classList.add('is-visible');
-          observer.unobserve(entry.target);
-        }
-      });
-    }, { threshold: 0.08 });
-    revealTargets.forEach((element) => revealObserver.observe(element));
-  }
-
-  document.addEventListener('pointermove', (event) => {
-    const surface = event.target.closest('.composer, .panel-block, .results-block');
-    if (!surface) return;
-    const bounds = surface.getBoundingClientRect();
-    surface.style.setProperty('--pointer-x', `${event.clientX - bounds.left}px`);
-    surface.style.setProperty('--pointer-y', `${event.clientY - bounds.top}px`);
-  }, { passive: true });
-
-  document.addEventListener('pointerleave', (event) => {
-    const surface = event.target.closest?.('.composer, .panel-block, .results-block');
-    if (!surface) return;
-    surface.style.removeProperty('--pointer-x');
-    surface.style.removeProperty('--pointer-y');
-  }, true);
-})();
+window.addEventListener('DOMContentLoaded', initializeRoom);
