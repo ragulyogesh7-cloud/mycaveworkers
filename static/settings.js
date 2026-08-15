@@ -50,7 +50,9 @@ function renderEmployeeTools() {
   if (activeCount) activeCount.textContent = `${employees.length} active`;
   container.innerHTML = employees.length ? employees.map((employee) => {
     const permissions = employee.permissions || [];
-    return `<article class="employee-settings-card"><div class="employee-settings-top"><div class="employee-avatar" style="--employee-color:${safe(employee.color || '#7ee8ff')}">${safe(employee.icon || employee.name?.[0] || 'AI')}</div><div><h4>${safe(employee.name)} <span>${safe(employee.role)}</span></h4><p>${safe(employee.department || 'AI workforce')} · ${permissions.length ? `${permissions.length} granted tool${permissions.length === 1 ? '' : 's'}` : 'No direct tool grants'}</p></div><div class="employee-card-actions"><a class="mini-link" href="/employee/${encodeURIComponent(employee.id)}">Open room ↗</a><button class="mini-danger" type="button" data-action="remove-employee" data-employee-id="${safe(employee.id)}">Remove</button></div></div>${permissions.length ? `<div class="permission-chips">${permissions.map((permission) => `<span class="permission-chip"><b>${safe(permission.tool_name)}</b><em>${safe(permission.access_level)}</em><button type="button" aria-label="Revoke ${safe(permission.tool_name)}" data-action="revoke-direct-tool" data-employee-id="${safe(employee.id)}" data-tool-name="${safe(permission.tool_name)}">×</button></span>`).join('')}</div>` : '<p class="employee-empty">No direct permissions. Connections and tool grants will appear here when configured.</p>'}</article>`;
+    const autonomy = employee.autonomy_mode || 'autopilot';
+    const highImpact = employee.high_impact_action_policy || 'review';
+    return `<article class="employee-settings-card agent-card"><div class="employee-settings-top"><div class="employee-avatar" style="--employee-color:${safe(employee.color || '#7ee8ff')}">${safe(employee.icon || employee.name?.[0] || 'AI')}</div><div><h4>${safe(employee.name)} <span>${safe(employee.role)}</span></h4><p>${safe(employee.department || 'AI workforce')} · ${safe(employee.description || 'Specialist AI employee')}</p></div><div class="employee-card-actions"><span class="agent-mode-badge ${autonomy}">${autonomy === 'autopilot' ? 'AUTOPILOT' : 'COPILOT'}</span><a class="mini-link" href="/employee/${encodeURIComponent(employee.id)}">Open room ↗</a><button class="mini-danger" type="button" data-action="remove-employee" data-employee-id="${safe(employee.id)}">Remove</button></div></div><div class="agent-policy-row"><label><span>Everyday work</span><select data-action="set-employee-autonomy" data-employee-id="${safe(employee.id)}" aria-label="${safe(employee.name)} everyday autonomy"><option value="autopilot" ${autonomy === 'autopilot' ? 'selected' : ''}>Run automatically</option><option value="copilot" ${autonomy === 'copilot' ? 'selected' : ''}>Ask me first</option></select></label><label><span>High-impact actions</span><select data-action="set-employee-impact-policy" data-employee-id="${safe(employee.id)}" aria-label="${safe(employee.name)} high impact policy"><option value="review" ${highImpact === 'review' ? 'selected' : ''}>Review required</option><option value="autopilot" ${highImpact === 'autopilot' ? 'selected' : ''}>Run automatically</option></select></label></div>${permissions.length ? `<div class="permission-chips tool-belt-chips">${permissions.map((permission) => `<span class="permission-chip"><b>${safe(permission.tool_name)}</b><em>${safe(permission.access_level)}</em><button type="button" aria-label="Revoke ${safe(permission.tool_name)}" data-action="revoke-direct-tool" data-employee-id="${safe(employee.id)}" data-tool-name="${safe(permission.tool_name)}">×</button></span>`).join('')}</div>` : '<p class="employee-empty">No direct tool grants yet. Connect an app below and assign its tool belt to this employee.</p>'}</article>`;
   }).join('') : '<p class="empty-state-sm">No employees are currently active in this workspace.</p>';
 }
 
@@ -65,10 +67,11 @@ function renderToolGrants(employeeId, connection) {
   const tools = connection.discovered_tools || [];
   if (!tools.length) return '<p class="connection-empty">No tools have been discovered yet. Run a safe discovery before granting access.</p>';
   const grants = connection.tool_grants || [];
-  return `<div class="discovered-tools"><p>Discovered tools · ${tools.length}</p>${tools.map((tool) => {
+    return `<div class="discovered-tools"><p>Discovered tools · ${tools.length}</p>${tools.map((tool) => {
     const name = String(tool.name || 'Unnamed tool');
     const grant = grants.find((entry) => String(entry.tool_name || '').toLowerCase() === name.toLowerCase());
-    return `<div class="discovered-tool"><span><b>${safe(name)}</b>${tool.description ? `<small>${safe(tool.description)}</small>` : ''}</span><div>${grant ? `<em>${safe(grant.access_level)}</em><button class="text-mini danger" type="button" data-action="revoke-mcp-tool" data-employee-id="${safe(employeeId)}" data-connection-id="${safe(connection.id)}" data-tool-name="${safe(name)}">Revoke</button>` : `<button class="text-mini" type="button" data-action="grant-mcp-tool" data-access="read_only" data-employee-id="${safe(employeeId)}" data-connection-id="${safe(connection.id)}" data-tool-name="${safe(name)}">Read only</button><button class="text-mini" type="button" data-action="grant-mcp-tool" data-access="requires_approval" data-employee-id="${safe(employeeId)}" data-connection-id="${safe(connection.id)}" data-tool-name="${safe(name)}">Approval</button>`}</div></div>`;
+    const currentAccess = grant?.access_level || 'read_only';
+    return `<div class="discovered-tool"><span><b>${safe(name)}</b>${tool.description ? `<small>${safe(tool.description)}</small>` : ''}</span><div class="tool-access-actions">${grant ? `<em>${safe(currentAccess)}</em><button class="text-mini" type="button" data-action="set-mcp-tool-access" data-access="${currentAccess === 'read_write' ? 'read_only' : 'read_write'}" data-employee-id="${safe(employeeId)}" data-connection-id="${safe(connection.id)}" data-tool-name="${safe(name)}">${currentAccess === 'read_write' ? 'Make review-gated' : 'Run automatically'}</button><button class="text-mini danger" type="button" data-action="revoke-mcp-tool" data-employee-id="${safe(employeeId)}" data-connection-id="${safe(connection.id)}" data-tool-name="${safe(name)}">Revoke</button>` : `<button class="text-mini" type="button" data-action="grant-mcp-tool" data-access="read_only" data-employee-id="${safe(employeeId)}" data-connection-id="${safe(connection.id)}" data-tool-name="${safe(name)}">Read only</button><button class="text-mini" type="button" data-action="grant-mcp-tool" data-access="read_write" data-employee-id="${safe(employeeId)}" data-connection-id="${safe(connection.id)}" data-tool-name="${safe(name)}">Run automatically</button>`}</div></div>`;
   }).join('')}</div>`;
 }
 
@@ -85,7 +88,8 @@ function renderConnections(connectionSets) {
     const employeeGmailGovernance = connection.connection_type === 'google_gmail'
       ? `<p class="connection-governance ${connection.config?.gmail_send_enabled ? 'enabled' : 'disabled'}">${connection.config?.gmail_send_enabled ? `Send after manager approval is enabled for ${safe(employee.name)}. Reconnect Google if the send permission has not yet been granted.` : `Read access only. Enable “Allow ${safe(employee.name)} to send after approval” when adding a new Gmail connection to permit approval-gated delivery.`}</p>`
       : '';
-    return `<article class="connection-card"><div class="connection-card-top"><div><p class="connection-owner"><span style="--employee-color:${safe(employee.color || '#7ee8ff')}">${safe(employee.name?.[0] || 'AI')}</span>${safe(employee.name)}’s connection</p><h4>${safe(connection.name)} <em class="connection-status ${safe(connection.status || 'unknown')}">${safe(connection.status || 'unknown')}</em></h4><p class="connection-source">${safe(typeLabel)} · ${safe(source)}</p>${employeeGmailGovernance}</div><div class="connection-actions">${needsOauth ? `<a class="btn btn-primary compact-button" href="/api/employees/${encodeURIComponent(employee.id)}/mcp-connections/${encodeURIComponent(connection.id)}/google/start?service=${encodeURIComponent(connection.connection_type)}">Connect Google</a>` : ''}<button class="text-mini" type="button" data-action="test-mcp" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Test safely</button><button class="text-mini danger" type="button" data-action="remove-mcp" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Remove</button></div></div>${connection.connection_type === 'streamable_http' ? `<div class="connection-tools-header"><span>Tool controls</span><button class="btn btn-light compact-button" type="button" data-action="discover-tools" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">${connection.discovered_tools?.length ? 'Refresh tools' : 'Discover tools'}</button></div>${renderToolGrants(employee.id, connection)}` : ''}${connection.connection_type === 'git_repository' ? `<div class="connection-tools-header"><span>Repository changes require approval.</span><button class="btn btn-light compact-button" type="button" data-action="request-git-commit" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Request commit</button></div>` : ''}</article>`;
+    const connectionAutonomy = connection.autonomy_mode || 'autopilot';
+    return `<article class="connection-card agent-connector-card"><div class="connection-card-top"><div><p class="connection-owner"><span style="--employee-color:${safe(employee.color || '#7ee8ff')}">${safe(employee.name?.[0] || 'AI')}</span>${safe(employee.name)}’s tool belt</p><h4>${safe(connection.name)} <em class="connection-status ${safe(connection.status || 'unknown')}">${safe(connection.status || 'unknown')}</em></h4><p class="connection-source">${safe(typeLabel)} · ${safe(source)}</p>${employeeGmailGovernance}</div><div class="connection-actions"><label class="connector-autonomy"><span>Agent mode</span><select data-action="set-connector-autonomy" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}" aria-label="${safe(connection.name)} agent mode"><option value="autopilot" ${connectionAutonomy === 'autopilot' ? 'selected' : ''}>Autopilot</option><option value="copilot" ${connectionAutonomy === 'copilot' ? 'selected' : ''}>Copilot</option></select></label>${needsOauth ? `<a class="btn btn-primary compact-button" href="/api/employees/${encodeURIComponent(employee.id)}/mcp-connections/${encodeURIComponent(connection.id)}/google/start?service=${encodeURIComponent(connection.connection_type)}">Connect Google</a>` : ''}<button class="text-mini" type="button" data-action="test-mcp" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Test safely</button><button class="text-mini danger" type="button" data-action="remove-mcp" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Remove</button></div></div>${connection.connection_type === 'streamable_http' ? `<div class="connection-tools-header"><span>Choose the tools this employee can run</span><button class="btn btn-light compact-button" type="button" data-action="discover-tools" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">${connection.discovered_tools?.length ? 'Refresh tools' : 'Discover tools'}</button></div>${renderToolGrants(employee.id, connection)}` : ''}${connection.connection_type === 'git_repository' ? `<div class="connection-tools-header"><span>Repository changes follow the employee policy.</span><button class="btn btn-light compact-button" type="button" data-action="request-git-commit" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Request commit</button></div>` : ''}</article>`;
   }).join('') : '<p class="empty-state-sm">No employee-scoped connections yet. Add only the tools your team needs.</p>';
 }
 
@@ -303,6 +307,33 @@ async function submitToolGrant(event) {
   } catch (error) { notify(error.message || 'The tool could not be granted.', 'error'); }
 }
 
+async function updateEmployeeAutonomy(employeeId, payload) {
+  try {
+    await requestJson(`/api/employees/${encodeURIComponent(employeeId)}/autonomy`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    notify('Employee autonomy policy saved.', 'success');
+    await loadData();
+    activateTab('team', false);
+  } catch (error) { notify(error.message || 'Employee autonomy could not be updated.', 'error'); }
+}
+
+async function updateConnectorAutonomy(employeeId, connectionId, autonomyMode) {
+  try {
+    await requestJson(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections/${encodeURIComponent(connectionId)}/autonomy`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ autonomy_mode: autonomyMode }) });
+    notify(`Connector is now ${autonomyMode === 'autopilot' ? 'autonomous' : 'review-led'}.`, 'success');
+    await loadData();
+    activateTab('integrations', false);
+  } catch (error) { notify(error.message || 'Connector autonomy could not be updated.', 'error'); }
+}
+
+async function updateConnectorToolAccess(employeeId, connectionId, toolName, accessLevel) {
+  try {
+    await requestJson(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections/${encodeURIComponent(connectionId)}/autonomy`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tool_name: toolName, access_level: accessLevel }) });
+    notify(`${toolName} is ${accessLevel === 'read_write' ? 'available for automatic runs' : 'review-gated'}.`, 'success');
+    await loadData();
+    activateTab('integrations', false);
+  } catch (error) { notify(error.message || 'Tool autonomy could not be updated.', 'error'); }
+}
+
 async function configureEmployee(employeeId, action) {
   try {
     await requestJson('/api/employees/configure', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ employee_id: employeeId, action }) });
@@ -437,6 +468,14 @@ function bindEvents() {
   $('#custom-mcp-type')?.addEventListener('change', updateCustomMcpFields);
   $('#custom-mcp-employee')?.addEventListener('change', updateCustomMcpFields);
   $('#menuButton')?.addEventListener('click', () => document.querySelector('.settings-rail')?.classList.toggle('is-open'));
+  document.addEventListener('change', (event) => {
+    const target = event.target.closest('[data-action]');
+    if (!target) return;
+    const action = target.dataset.action;
+    if (action === 'set-connector-autonomy') updateConnectorAutonomy(target.dataset.employeeId, target.dataset.connectionId, target.value);
+    if (action === 'set-employee-autonomy') updateEmployeeAutonomy(target.dataset.employeeId, { autonomy_mode: target.value });
+    if (action === 'set-employee-impact-policy') updateEmployeeAutonomy(target.dataset.employeeId, { high_impact_action_policy: target.value });
+  });
   document.addEventListener('click', (event) => {
     const preset = event.target.closest('[data-connector-preset]');
     if (preset) { applyConnectorPreset(preset.dataset.connectorPreset); return; }
@@ -452,6 +491,7 @@ function bindEvents() {
     if (action === 'remove-mcp') removeMcp(employeeId, connectionId);
     if (action === 'discover-tools') discoverTools(employeeId, connectionId);
     if (action === 'grant-mcp-tool') grantMcpTool(employeeId, connectionId, toolName, access);
+    if (action === 'set-mcp-tool-access') updateConnectorToolAccess(employeeId, connectionId, toolName, access);
     if (action === 'revoke-mcp-tool') revokeMcpTool(employeeId, connectionId, toolName);
     if (action === 'request-git-commit') requestGitCommit(employeeId, connectionId);
     if (action === 'inspect-registry') inspectRegistryServer(target.dataset.registryName);

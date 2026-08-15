@@ -390,6 +390,11 @@ interface OrgEmployee {
   status: string;
   tools: string[];
   permissions: Array<{ tool_name: string; access_level: string }>;
+  /** Autopilot runs tenant-authorized tool work without a new approval for every task. */
+  autonomy_mode?: 'copilot' | 'autopilot';
+  /** High-impact writes remain review-gated unless the tenant explicitly opts in. */
+  high_impact_action_policy?: 'review' | 'autopilot';
+  connector_policy?: 'assigned_only' | 'workspace_shared';
 }
 
 interface WebResearchEvidence {
@@ -494,6 +499,8 @@ interface TenantConnector {
   connection_type: 'google_gmail' | 'google_sheets' | 'streamable_http' | 'git_repository' | 'custom_skill';
   server_url?: string;
   access_level: 'read_only' | 'requires_approval' | 'read_write';
+  /** Connector-level default for newly discovered tools; individual grants remain authoritative. */
+  autonomy_mode?: 'copilot' | 'autopilot';
   status: 'connected' | 'needs_configuration' | 'error';
   config: Record<string, any>;
   discovered_tools: Array<{ name: string; description?: string; inputSchema?: any; risk?: 'read' | 'write' }>;
@@ -638,6 +645,36 @@ function analystTenantCollection(companyId: string, collection: string) {
 
 function connectorCollection(companyId: string) {
   return analystTenantCollection(companyId, 'connectors');
+}
+
+function employeeCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'employees');
+}
+
+async function persistOrgEmployees(companyId: string, employees: OrgEmployee[]) {
+  db.orgEmployees.set(companyId, employees);
+  const collection = employeeCollection(companyId);
+  if (!collection) return;
+  await Promise.all(employees.map((employee) => collection.doc(employee.id).set(stripUndefined(employee), { merge: true })));
+}
+
+async function loadOrgEmployees(companyId: string): Promise<OrgEmployee[]> {
+  const cached = db.orgEmployees.get(companyId);
+  if (cached) return cached;
+  const collection = employeeCollection(companyId);
+  if (collection) {
+    try {
+      const snapshot = await collection.get();
+      const employees = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as OrgEmployee));
+      if (employees.length) {
+        db.orgEmployees.set(companyId, employees);
+        return employees;
+      }
+    } catch (error) {
+      reportOperationalFailure('employee.load', error, { tenant_hash: anonymizeIdentifier(companyId) });
+    }
+  }
+  return db.orgEmployees.get(DEFAULT_COMPANY_ID) || [];
 }
 
 function employeeMemoryKey(companyId: string, employeeId: string) {
@@ -831,6 +868,7 @@ async function loadQueuedJobs() {
 }
 
 async function enqueueWorkforceTask(companyId: string, question: string, preferredEmployeeId?: string, emailEmployeeId?: string) {
+  await loadOrgEmployees(companyId);
   await hydrateTenantTasks(companyId);
   const taskId = db.nextTaskId++;
   const now = new Date().toISOString();
@@ -1066,6 +1104,31 @@ async function loadMcpConnections(companyId: string, employeeId: string): Promis
   }
   db.mcpConnections.set(key, []);
   return [];
+}
+
+function employeeAutonomyPolicy(companyId: string, employeeId: string) {
+  const instance = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === employeeId);
+  return {
+    autonomy_mode: instance?.autonomy_mode === 'copilot' ? 'copilot' as const : 'autopilot' as const,
+    high_impact_action_policy: instance?.high_impact_action_policy === 'autopilot' ? 'autopilot' as const : 'review' as const,
+    connector_policy: instance?.connector_policy === 'workspace_shared' ? 'workspace_shared' as const : 'assigned_only' as const
+  };
+}
+
+async function autonomousActionAllowed(companyId: string, payload: any) {
+  const employeeId = String(payload?.employee_id || '');
+  if (!employeeId) return false;
+  const policy = employeeAutonomyPolicy(companyId, employeeId);
+  if (policy.autonomy_mode !== 'autopilot') return false;
+  const connections = await loadMcpConnections(companyId, employeeId);
+  const connection = connections.find((entry) => entry.id === Number(payload?.connection_id) && entry.status === 'connected');
+  if (!connection || connection.autonomy_mode === 'copilot') return false;
+  const grants = connection.tool_grants || [];
+  const toolName = String(payload?.tool_name || (payload?.action_type === 'gmail.send' ? 'gmail.send' : ''));
+  const grant = grants.find((entry) => entry.tool_name === toolName);
+  if (!grant || grant.access_level !== 'read_write') return false;
+  if (payload?.action_type === 'gmail.send' || payload?.provider === 'github') return policy.high_impact_action_policy === 'autopilot';
+  return true;
 }
 
 function isPrivateOrLocalHost(hostname: string) {
@@ -1347,13 +1410,13 @@ function emailDraftFromRequest(question: string, companyName: string, senderName
   return { recipients, subject, body };
 }
 
-function hasApprovalGatedGmailSend(connection: TenantConnector) {
+function hasEnabledGmailSend(connection: TenantConnector) {
   const grant = (connection.tool_grants || []).find((entry) => entry.tool_name === 'gmail.send');
   return connection.connection_type === 'google_gmail'
     && connection.status === 'connected'
     && connection.config?.gmail_send_enabled === true
     && (connection.auth_scopes || []).includes('https://www.googleapis.com/auth/gmail.send')
-    && grant?.access_level === 'requires_approval';
+    && ['requires_approval', 'read_write'].includes(String(grant?.access_level || ''));
 }
 
 async function prepareEmployeeEmailAction(companyId: string, question: string, taskId: number, requestedEmployeeId = 'sarah') {
@@ -1365,14 +1428,15 @@ async function prepareEmployeeEmailAction(companyId: string, question: string, t
   const draft = emailDraftFromRequest(question, company?.name || 'your workspace', employeeName);
   if (!draft.recipients.length) return { status: 'blocked' as const, summary: `${employeeName} prepared the work but cannot draft an executable email because no recipient address was included. Add a recipient such as name@company.com and try again.` };
   const connections = await loadMcpConnections(companyId, employeeId);
-  const gmailConnection = connections.find(hasApprovalGatedGmailSend);
+  const gmailConnection = connections.find(hasEnabledGmailSend);
   if (!gmailConnection) {
     const hasConfiguredGmail = connections.some((connection) => connection.connection_type === 'google_gmail' && connection.config?.gmail_send_enabled === true);
-    return { status: 'blocked' as const, summary: hasConfiguredGmail ? `${employeeName}’s Gmail connection needs to be reconnected with the Gmail send permission before an email can be sent.` : `${employeeName} has no approval-gated Gmail send connection. In Settings, connect Gmail to ${employeeName}, enable “Allow ${employeeName} to send after approval,” then complete Google OAuth.` };
+    return { status: 'blocked' as const, summary: hasConfiguredGmail ? `${employeeName}’s Gmail connection needs to be reconnected with the Gmail send permission before an email can be sent.` : `${employeeName} has no enabled Gmail send connection. In Settings, connect Gmail to ${employeeName}, enable sending, then complete Google OAuth.` };
   }
+  const gmailGrant = gmailConnection.tool_grants.find((grant) => grant.tool_name === 'gmail.send');
   return {
-    status: 'awaiting_approval' as const,
-    summary: `${employeeName} drafted an email to ${draft.recipients.join(', ')}. It will not be sent until you approve it.`,
+    status: gmailGrant?.access_level === 'read_write' ? 'processing' as const : 'awaiting_approval' as const,
+    summary: gmailGrant?.access_level === 'read_write' ? `${employeeName} drafted an email to ${draft.recipients.join(', ')} and is ready to send it under the tenant-authorized autopilot policy.` : `${employeeName} drafted an email to ${draft.recipients.join(', ')}. It will not be sent until you approve it.`,
     payload: { action_type: 'gmail.send', connection_id: gmailConnection.id, employee_id: employeeId, to: draft.recipients, subject: draft.subject, body: draft.body, execution_status: 'pending', idempotency_key: crypto.randomUUID() }
   };
 }
@@ -2204,11 +2268,14 @@ app.post('/api/onboarding/select-employees', async (req, res) => {
           color: cat.color,
           status: 'active',
           tools: [...cat.default_tools],
-          permissions: cat.default_tools.map((t) => ({ tool_name: t, access_level: t === 'Gmail' ? 'requires_approval' : 'read_write' }))
+          permissions: cat.default_tools.map((t) => ({ tool_name: t, access_level: t === 'Gmail' ? 'requires_approval' : 'read_write' })),
+          autonomy_mode: 'autopilot',
+          high_impact_action_policy: 'review',
+          connector_policy: 'assigned_only'
         });
       }
     });
-    db.orgEmployees.set(companyId, orgEmps);
+    await persistOrgEmployees(companyId, orgEmps);
     const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId);
     if (company) {
       company.selected_employees = employee_ids;
@@ -2286,10 +2353,10 @@ app.get('/api/employee-catalog', (_req, res) => {
   res.json(EMPLOYEE_CATALOG);
 });
 
-app.get('/api/employees', (req, res) => {
+app.get('/api/employees', async (req, res) => {
   const user = getAuthUser(req);
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const emps = db.orgEmployees.get(companyId) || db.orgEmployees.get(DEFAULT_COMPANY_ID) || [];
+  const emps = await loadOrgEmployees(companyId);
   res.json(emps);
 });
 
@@ -2317,15 +2384,36 @@ app.post('/api/employees/configure', async (req, res) => {
         color: cat.color,
         status: 'active',
         tools: [...cat.default_tools],
-        permissions: cat.default_tools.map((t) => ({ tool_name: t, access_level: t === 'Gmail' ? 'requires_approval' : 'read_write' }))
+        permissions: cat.default_tools.map((t) => ({ tool_name: t, access_level: t === 'Gmail' ? 'requires_approval' : 'read_write' })),
+        autonomy_mode: 'autopilot',
+        high_impact_action_policy: 'review',
+        connector_policy: 'assigned_only'
       });
     }
   } else if (action === 'remove') {
     emps = emps.filter((e) => e.id !== employee_id);
   }
-  db.orgEmployees.set(companyId, emps);
+  await persistOrgEmployees(companyId, emps);
 
   res.json({ ok: true, active_count: emps.length });
+});
+
+app.patch('/api/employees/:id/autonomy', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const emps = await loadOrgEmployees(companyId);
+  const employee = emps.find((entry) => entry.id === req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+  const autonomyMode = req.body?.autonomy_mode === 'copilot' ? 'copilot' : req.body?.autonomy_mode === 'autopilot' ? 'autopilot' : employee.autonomy_mode || 'autopilot';
+  const highImpactPolicy = req.body?.high_impact_action_policy === 'autopilot' ? 'autopilot' : req.body?.high_impact_action_policy === 'review' ? 'review' : employee.high_impact_action_policy || 'review';
+  const connectorPolicy = req.body?.connector_policy === 'workspace_shared' ? 'workspace_shared' : 'assigned_only';
+  employee.autonomy_mode = autonomyMode;
+  employee.high_impact_action_policy = highImpactPolicy;
+  employee.connector_policy = connectorPolicy;
+  await persistOrgEmployees(companyId, emps);
+  await persistActivityLog(companyId, { id: Date.now(), sender: 'Manager', receiver: employee.name, kind: 'employee.autonomy_updated', body: `${employee.name} autonomy is now ${autonomyMode}; high-impact actions are ${highImpactPolicy === 'autopilot' ? 'autonomous' : 'review-gated'}.`, created_at: new Date().toISOString() });
+  res.json({ ok: true, employee });
 });
 
 app.post('/api/employees/:id/tools', async (req, res) => {
@@ -2356,7 +2444,32 @@ app.post('/api/employees/:id/tools', async (req, res) => {
     }
   }
 
+  await persistOrgEmployees(companyId, emps);
   res.json({ ok: true, permissions: emp.permissions });
+});
+
+app.patch('/api/employees/:id/mcp-connections/:connectionId/autonomy', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const employeeId = req.params.id;
+  const connectionId = Number(req.params.connectionId);
+  const connections = await loadMcpConnections(companyId, employeeId);
+  const connection = connections.find((entry) => entry.id === connectionId);
+  if (!connection) return res.status(404).json({ error: 'Connector not found for this employee.' });
+  if (req.body?.autonomy_mode !== undefined) connection.autonomy_mode = req.body.autonomy_mode === 'copilot' ? 'copilot' : 'autopilot';
+  if (typeof req.body?.tool_name === 'string' && req.body.tool_name.trim()) {
+    const toolName = req.body.tool_name.trim().slice(0, 160);
+    const tool = (connection.discovered_tools || []).find((entry) => entry.name === toolName);
+    if (!tool) return res.status(404).json({ error: 'Tool was not discovered on this connector.' });
+    const requestedAccess = ['read_only', 'requires_approval', 'read_write'].includes(req.body?.access_level) ? req.body.access_level : 'read_only';
+    const existing = (connection.tool_grants || []).find((entry) => entry.tool_name === toolName);
+    if (existing) existing.access_level = requestedAccess;
+    else connection.tool_grants = [...(connection.tool_grants || []), { tool_name: toolName, access_level: requestedAccess }];
+  }
+  connection.updated_at = new Date().toISOString();
+  await persistMcpConnection(connection);
+  res.json({ ok: true, connection: connectorPublicView(connection) });
 });
 
 app.get('/api/employees/:id/profile', async (req, res) => {
@@ -2596,6 +2709,7 @@ function collaborationFinding(employee: any, question: string, context?: Workfor
 }
 
 async function handleTaskRoutingAsync(question: string, companyId: string, preferredEmployeeId?: string, existingTaskId?: number, emailEmployeeId?: string) {
+  await loadOrgEmployees(companyId);
   await hydrateTenantTasks(companyId);
   const taskId = existingTaskId || db.nextTaskId++;
   const existingTask = existingTaskId ? db.tasks.get(existingTaskId) : undefined;
@@ -2637,13 +2751,27 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   const isGitHubWriteAction = (lowerQ.includes('github') || lowerQ.includes('git repository') || lowerQ.includes('github repo')) && /\b(edit|update|create|write|push|commit|change|modify)\b/.test(lowerQ);
   const requiresApproval = isEmailAction || isGitHubWriteAction || ['send', 'commit', 'hire', 'publish', 'recruit', 'payment', 'invoice', 'access', 'delete', 'post', 'write'].some((term) => lowerQ.includes(term));
   let execution: TaskRecord['execution'] = { action_type: isEmailAction ? 'gmail.send' : requiresApproval ? 'external.action' : 'none', status: 'not_required', summary: 'No external action was requested.', updated_at: new Date().toISOString() };
+  let workforceApproval: ApprovalRecord | null = null;
+  let autoExecuteAction = false;
   if (requiresApproval) {
     const emailAction = isEmailAction ? await prepareEmployeeEmailAction(companyId, question, taskId, emailEmployeeId || 'sarah') : null;
     const mcpAction = !emailAction && isGitHubWriteAction ? await prepareEmployeeMcpWriteAction(companyId, question, taskId, preferredEmployeeId || lead.id) : null;
     execution = emailAction ? { action_type: 'gmail.send', status: emailAction.status, summary: emailAction.summary, updated_at: new Date().toISOString() } : mcpAction ? { action_type: 'mcp.tool', status: mcpAction.status, summary: mcpAction.summary, updated_at: new Date().toISOString() } : { action_type: 'external.action', status: 'awaiting_approval', summary: 'The requested external action is prepared and awaiting your approval. No external action has been performed.', updated_at: new Date().toISOString() };
     const approvalId = db.nextApprovalId++;
-    await persistApprovalRecord({ id: approvalId, company_id: companyId, task_id: taskId, employee_id: emailAction?.payload?.employee_id || mcpAction?.payload?.employee_id || manager.id, tool_name: isEmailAction ? 'Gmail send' : mcpAction?.payload?.tool_name || (lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action'), action_summary: emailAction?.summary || mcpAction?.summary || `${manager.name} requests manager sign-off for: "${question}"`, status: emailAction?.status === 'blocked' || mcpAction?.status === 'blocked' ? 'rejected' : 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', action_type: isEmailAction ? 'gmail.send' : mcpAction?.payload?.action_type || 'external.action', manager_id: manager.id, delivery_lead_id: lead.id, collaborators: collaborators.map((employee) => employee.id), ...(emailAction?.payload || {}), ...(mcpAction?.payload || {}) } });
-    trace.push({ kind: emailAction?.status === 'blocked' || mcpAction?.status === 'blocked' ? 'blocked' : 'approval_required', sender: manager.name, receiver: 'Manager approval queue', body: emailAction?.summary || mcpAction?.summary || 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
+    const approval: ApprovalRecord = { id: approvalId, company_id: companyId, task_id: taskId, employee_id: emailAction?.payload?.employee_id || mcpAction?.payload?.employee_id || manager.id, tool_name: isEmailAction ? 'Gmail send' : mcpAction?.payload?.tool_name || (lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action'), action_summary: emailAction?.summary || mcpAction?.summary || `${manager.name} requests manager sign-off for: "${question}"`, status: emailAction?.status === 'blocked' || mcpAction?.status === 'blocked' ? 'rejected' : 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', action_type: isEmailAction ? 'gmail.send' : mcpAction?.payload?.action_type || 'external.action', manager_id: manager.id, delivery_lead_id: lead.id, collaborators: collaborators.map((employee) => employee.id), ...(emailAction?.payload || {}), ...(mcpAction?.payload || {}) } };
+    await persistApprovalRecord(approval);
+    workforceApproval = approval;
+    autoExecuteAction = approval.status === 'pending' && ['gmail.send', 'mcp.tool'].includes(String(approval.payload?.action_type || '')) && await autonomousActionAllowed(companyId, approval.payload);
+    if (autoExecuteAction) {
+      approval.status = 'approved';
+      approval.decided_at = new Date().toISOString();
+      approval.payload = { ...(approval.payload || {}), authorization_mode: 'employee_autopilot', execution_status: 'processing' };
+      execution = { ...execution, status: 'processing', summary: `${lead.name} is executing the tenant-authorized ${approval.tool_name} action automatically. A verified result will be posted here.` };
+      await persistApprovalRecord(approval);
+      trace.push({ kind: 'autopilot_started', sender: lead.name, receiver: 'Company workroom', body: `${lead.name} is running ${approval.tool_name} under the employee and connector autopilot policy.`, created_at: new Date(Date.now() + 3100).toISOString() });
+    } else {
+      trace.push({ kind: approval.status === 'rejected' ? 'blocked' : 'approval_required', sender: manager.name, receiver: 'Manager approval queue', body: emailAction?.summary || mcpAction?.summary || 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
+    }
   }
   trace.push({ kind: 'group_message', sender: manager.name, receiver: 'Manager', body: `I reviewed ${lead.name}’s delivery. ${execution.summary}`, created_at: new Date(Date.now() + 3400).toISOString() });
   trace.push({ kind: 'completed', sender: manager.name, receiver: 'Task ledger', body: requiresApproval ? `Work product completed; execution state: ${execution.status}.` : 'Work product completed with a tenant-scoped audit trace.', created_at: new Date(Date.now() + 3600).toISOString() });
@@ -2651,8 +2779,23 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   const taskRecord: TaskRecord = { id: taskId, company_id: companyId, question, owner: manager.id, status: execution.status === 'awaiting_approval' ? 'pending_approval' : execution.status === 'blocked' ? 'blocked' : 'completed', answer, plan: `1. Sarah intake → 2. Delegate ${lead.name} → 3. Specialist delivery${collaborators.length ? ` (${collaborators.map((employee) => employee.name).join(', ')})` : ''} → 4. Permissioned evidence → 5. Sarah manager response → 6. Approval-gated external execution when requested`, created_at: now, trace, participants: ['Manager', manager.name, ...deliveryTeam.map((employee) => employee.name).filter((name, index, list) => list.indexOf(name) === index)], collaboration_summary: `${manager.name} managed ${lead.name}${collaborators.length ? ` with ${collaborators.length} supporting specialist${collaborators.length === 1 ? '' : 's'}` : ''}.`, live_tool_evidence: liveToolEvidence, web_research: webResearch, queued_at: existingTask?.queued_at, started_at: existingTask?.started_at || now, completed_at: new Date().toISOString(), execution };
   db.tasks.set(taskId, taskRecord);
   await persistTaskRecord(taskRecord);
+  if (autoExecuteAction && workforceApproval) {
+    try {
+      const result = workforceApproval.payload?.action_type === 'mcp.tool' ? await dispatchApprovedMcpTool(workforceApproval) : await dispatchApprovedEmployeeEmail(workforceApproval);
+      const employeeName = EMPLOYEE_CATALOG.find((employee) => employee.id === workforceApproval?.payload?.employee_id)?.name || lead.name;
+      const summary = result?.commit_sha ? `${employeeName} completed the autonomous MCP write. Commit SHA: ${result.commit_sha}.` : result?.message_id ? `${employeeName} completed the autonomous Gmail action. Gmail message ID: ${result.message_id}.` : `${employeeName} completed the autonomous ${workforceApproval.tool_name} action. The provider returned a successful result.`;
+      await recordWorkforceApprovalOutcome(workforceApproval, 'succeeded', summary, result || undefined);
+      execution = taskRecord.execution || execution;
+    } catch (error: any) {
+      const summary = `${lead.name} could not complete the autonomous ${workforceApproval.tool_name} action. ${String(error?.message || 'The connector action failed.').slice(0, 500)} No successful external result has been confirmed.`;
+      workforceApproval.payload = { ...(workforceApproval.payload || {}), execution_status: 'failed', execution_error: String(error?.message || 'Autonomous execution failed.').slice(0, 500) };
+      await persistApprovalRecord(workforceApproval);
+      await recordWorkforceApprovalOutcome(workforceApproval, 'failed', summary);
+      execution = taskRecord.execution || execution;
+    }
+  }
   await persistActivityLog(companyId, { id: Date.now(), sender: manager.name, receiver: lead.name, kind: 'task.managed', body: `Task #${taskId} was managed by Sarah with execution state ${execution.status}.`, created_at: now });
-  return { id: taskId, company_id: companyId, question, status: taskRecord.status, owner: manager.id, participants: taskRecord.participants, plan: taskRecord.plan, answer, execution, trace, live_tool_evidence: liveToolEvidence, web_research: webResearch, collaboration_summary: taskRecord.collaboration_summary, workforce_size: workforce.length };
+  return { id: taskId, company_id: companyId, question, status: taskRecord.status, owner: manager.id, participants: taskRecord.participants, plan: taskRecord.plan, answer, execution, trace: taskRecord.trace, live_tool_evidence: liveToolEvidence, web_research: webResearch, collaboration_summary: taskRecord.collaboration_summary, workforce_size: workforce.length };
 }
 
 // This is deliberately absent outside the test runtime. It lets regression tests
@@ -2992,7 +3135,7 @@ app.post('/api/mcp/registry/connect', async (req, res) => {
     const now = new Date().toISOString();
     const probe: TenantConnector = {
       id: Date.now(), company_id: companyId, employee_id: selectedEmployees[0].id, name: registryServer.name, connection_type: 'streamable_http', server_url: validatedUrl,
-      access_level: 'requires_approval', status: 'needs_configuration', config: sanitizeConnectorConfig({ registry_server_name: registryServer.name, registry_directory_url: registryServer.directory_url, registry_repository_url: registryServer.repository_url, registry_remote_type: advertisedRemote.type, auth_header_name: headerName, auth_header_prefix: headerPrefix }), discovered_tools: [], tool_grants: [], auth_token_encrypted: encryptedToken, created_at: now, updated_at: now
+      access_level: 'requires_approval', autonomy_mode: 'autopilot', status: 'needs_configuration', config: sanitizeConnectorConfig({ registry_server_name: registryServer.name, registry_directory_url: registryServer.directory_url, registry_repository_url: registryServer.repository_url, registry_remote_type: advertisedRemote.type, auth_header_name: headerName, auth_header_prefix: headerPrefix }), discovered_tools: [], tool_grants: [], auth_token_encrypted: encryptedToken, created_at: now, updated_at: now
     };
     const discoveredTools = await discoverMcpTools(probe);
     const grants = discoveredTools.map((tool) => ({ tool_name: tool.name, access_level: tool.risk === 'write' ? 'requires_approval' as const : 'read_only' as const }));
@@ -3051,6 +3194,7 @@ app.post('/api/employees/:id/mcp-connections', async (req, res) => {
   const connection: TenantConnector = {
     id: Date.now(), company_id: companyId, employee_id: empId, name, connection_type: connectionType,
     server_url: serverUrl, access_level: ['read_only', 'requires_approval', 'read_write'].includes(req.body?.access_level) ? req.body.access_level : 'requires_approval',
+    autonomy_mode: req.body?.autonomy_mode === 'copilot' ? 'copilot' : 'autopilot',
     status: marketplace ? 'connected' : 'needs_configuration',
     config: sanitizeConnectorConfig({ notes: req.body?.config?.notes, repo_path: req.body?.config?.repo_path, gmail_send_enabled: gmailSendEnabled, marketplace_id: req.body?.marketplace_id }),
     discovered_tools: marketplace?.tools || [], tool_grants: marketplace?.tools?.map((tool) => ({ tool_name: tool.name, access_level: req.body?.access_level === 'read_write' && tool.risk === 'read' ? 'read_write' : tool.risk === 'write' ? 'requires_approval' : 'read_only' })) || [], created_at: now, updated_at: now

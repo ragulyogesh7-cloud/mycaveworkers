@@ -244,3 +244,22 @@
 @media (prefers-reduced-motion: reduce) {
   .clean-settings-rail { transition: none; }
 }
+
+
+/* Connector-first AI workforce layer */
+.agent-card { position: relative; overflow: hidden; }
+.agent-card::after { content: ''; position: absolute; inset: 0 0 auto auto; width: 120px; height: 120px; background: radial-gradient(circle, color-mix(in srgb, var(--employee-color, #7ee8ff) 20%, transparent), transparent 68%); pointer-events: none; }
+.agent-mode-badge { display: inline-flex; align-items: center; min-height: 24px; padding: 4px 8px; border-radius: 999px; font: 700 10px/1 var(--mono, 'DM Mono', monospace); letter-spacing: .08em; }
+.agent-mode-badge.autopilot { color: #07121b; background: #8df4c4; }
+.agent-mode-badge.copilot { color: #1b1831; background: #f5d38a; }
+.agent-policy-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; margin: 16px 0 12px; padding: 12px; border: 1px solid rgba(145, 185, 218, .14); border-radius: 14px; background: rgba(9, 18, 34, .44); }
+.agent-policy-row label, .connector-autonomy { display: grid; gap: 6px; color: var(--muted, #9aabc0); font-size: 11px; font-weight: 600; }
+.agent-policy-row select, .connector-autonomy select { width: 100%; border: 1px solid rgba(145, 185, 218, .2); border-radius: 9px; background: rgba(8, 16, 31, .85); color: #f1f7ff; padding: 8px 10px; font: inherit; }
+.tool-belt-chips { margin-top: 4px; }
+.agent-connector-card .connection-actions { align-items: flex-end; }
+.connector-autonomy { min-width: 126px; }
+.connector-autonomy span { font: 700 9px/1 var(--mono, 'DM Mono', monospace); letter-spacing: .08em; text-transform: uppercase; }
+.tool-access-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.tool-access-actions em { color: #91f5c8; font: 700 10px/1 var(--mono, 'DM Mono', monospace); text-transform: uppercase; letter-spacing: .05em; }
+@media (max-width: 720px) { .agent-policy-row { grid-template-columns: 1fr; } .agent-connector-card .connection-actions { align-items: stretch; } .connector-autonomy { min-width: 0; } }
+@media (prefers-reduced-motion: reduce) { .agent-card::after { display: none; } }
