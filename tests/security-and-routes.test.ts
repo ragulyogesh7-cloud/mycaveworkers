@@ -360,6 +360,29 @@ describe('Caveworkers security invariants', () => {
     expect(priya.system_prompt).toBeUndefined();
   });
 
+  it('routes IT and security work to Iris and exposes only safe specialist metadata', async () => {
+    db.orgEmployees.set('company-a', [
+      { id: 'iris', name: 'Iris', role: 'IT & Security Operations Manager', department: 'IT & Security', status: 'active', tools: ['Identity provider MCP', 'ITSM MCP', 'Endpoint / security MCP', 'Gmail', 'Drive'], permissions: [] },
+      { id: 'sarah', name: 'Sarah', role: 'Talent & HR Manager', department: 'People Operations', status: 'active', tools: [], permissions: [] }
+    ]);
+
+    const result = await workforceTestHooks!.handleTaskRoutingAsync('Review a suspicious admin login, triage the phishing alert, verify MFA and endpoint patch status, and prepare an access-remediation plan before any account change', 'company-a');
+    expect(result.participants).toEqual(expect.arrayContaining(['Manager', 'Sarah', 'Iris']));
+    expect(result.plan).toContain('Iris');
+
+    const workforceResponse = await request(app)
+      .get('/api/workforce/workroom')
+      .set('x-caveworkers-test-user', 'user-a')
+      .expect(200);
+    const iris = workforceResponse.body.employees.find((employee: any) => employee.id === 'iris');
+    expect(iris).toMatchObject({
+      id: 'iris',
+      capability_summary: expect.stringContaining('least-privilege'),
+      avatar_url: '/static/assets/employee-avatars/iris.webp'
+    });
+    expect(iris.system_prompt).toBeUndefined();
+  });
+
   it('truthfully blocks Sarah email delivery until a tenant Gmail send capability is connected', async () => {
     const result = await workforceTestHooks!.handleTaskRoutingAsync('Send an email to ops@example.com confirming the weekly handoff', 'company-a', 'alex');
     expect(result).toMatchObject({ company_id: 'company-a', owner: 'sarah', status: 'blocked' });
