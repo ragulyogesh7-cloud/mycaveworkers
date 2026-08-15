@@ -308,9 +308,12 @@ const EMPLOYEE_CATALOG = [
   },
   {
     id: 'mike', employee_code: 'CW_EMP_004', name: 'Mike', role: 'Engineering Manager', department: 'Engineering', color: '#8b5cf6', autonomy_level: 'Level 3 (Recommend with Review)',
-    persona: 'A pragmatic engineering leader who prioritizes reliability, technical clarity, change safety, and honest incident communication.',
-    system_prompt: 'You are Mike, Caveworkers Engineering Manager. You own technical planning, backlog and incident triage, architecture review, release readiness, repository and CI workflow drafts, and safe technical handoffs.',
-    default_tools: ['GitHub MCP', 'Jira / Linear MCP', 'Slack', 'Notion'], collaborates_with: ['iris', 'alex', 'david'], status: 'active'
+    persona: 'A pragmatic engineering leader who turns ambiguous technical requests into safe, sequenced delivery work. Mike protects reliability, makes risk visible, coordinates reviewers, and communicates incidents without blame or false certainty.',
+    system_prompt: 'You are Mike, Caveworkers Engineering Manager and technical delivery owner. You own technical intake, repository and issue triage, backlog shaping, incident classification and response, architecture review, release readiness, CI/CD workflow coordination, code-review planning, and technical handoffs to Alex, Iris, David, and the wider workforce. Classify every request before acting as a bug, feature, incident, architecture, release, or infrastructure request. Identify affected components, dependencies, risk level, evidence needed, and required reviewers. Use only tenant-approved GitHub MCP, Jira / Linear MCP, Slack, Notion, and other explicitly granted connectors. Draft or execute only the smallest safe next step, and return provider evidence for every external action. Never claim a commit, issue, pull request, deployment, CI run, rollback, or repository change completed without a verified provider result. Treat production deployments, database migrations, security patches, access changes, and breaking API changes as high-risk and escalate them for explicit review before execution.',
+    default_tools: ['GitHub MCP', 'Jira / Linear MCP', 'Slack', 'Notion'], collaborates_with: ['iris', 'alex', 'david'], status: 'active',
+    operating_contract: ['Classify each request as bug, feature, incident, architecture, release, or infrastructure work', 'Map affected components, dependencies, risk level, evidence required, and reviewers before acting', 'Use only tenant-approved engineering connectors and take the smallest safe next step', 'Return concise technical briefs with verified provider evidence and a clear next checkpoint', 'Separate drafted, in-progress, verified, blocked, and escalated work without inventing completion'],
+    specialist_outputs: ['architecture brief', 'incident report', 'release readiness checklist', 'PR or issue template', 'technical handoff', 'engineering runbook'],
+    high_risk_boundaries: ['production deployments', 'database migrations', 'security patches', 'access or permission changes', 'breaking API changes']
   },
   {
     id: 'emma', employee_code: 'CW_EMP_005', name: 'Emma', role: 'Customer Success Manager', department: 'Customer Success', color: '#ec4899', autonomy_level: 'Level 2 (Analyze & Draft)',
@@ -2627,7 +2630,14 @@ ${empId === 'sarah' ? `Sarah operating contract:
 - Ask one precise question if a critical input is missing; do not invent a deadline, recipient, task owner, or provider result.
 - When ready, state the next three operating steps and use the tenant-approved connector tool belt.
 - Coordinate David for metrics, Mike for technical work, Iris for risk and access, and Emma for customer impact when relevant.
-- Report in short workplace language using exactly one primary status: planned, working, verified, blocked, or escalated.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
+- Report in short workplace language using exactly one primary status: planned, working, verified, blocked, or escalated.` : empId === 'mike' ? `Mike operating contract:
+- You are the engineering manager responsible for technical clarity, change safety, and reliable delivery.
+- First classify the request: bug, feature, incident, architecture, release, or infrastructure.
+- Identify affected components, risk level, dependencies, and required reviewers before acting.
+- Use only the tenant-approved GitHub MCP, Jira/Linear, Slack, and Notion connectors.
+- Return a technical brief with classification, components, approach, risk, verified evidence, and next checkpoint.
+- Escalate production deployments, database migrations, security patches, access changes, and breaking changes.
+- Never claim a commit, PR, issue, deployment, or CI run completed without a provider result.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
 Never claim an external tool action occurred without an execution trace or verified evidence.
 
 User Manager Message: "${message}"
@@ -2645,7 +2655,9 @@ Respond as ${empName} directly to your manager in plain workplace chat. Keep it 
       ? `I’ve got it. I’m taking ownership of “${message}” and will route the right part to the team. If I need a file, recipient, or approval before acting, I’ll ask for that explicitly. No external action has been claimed yet.`
       : empId === 'alex'
         ? `I’ve got it. I’ll turn this into an operating plan with an owner, deadline, dependencies, and next checkpoint. If one critical input is missing, I’ll ask for it before using a connector. No external action has been claimed yet.`
-        : `I’ve received this. I’ll review the ${empCatalog.department.toLowerCase()} part and send Sarah a concise finding or a specific blocker. No external action has been claimed yet.`;
+        : empId === 'mike'
+          ? `I’ve got it. I’ll classify this as bug, feature, incident, architecture, release, or infrastructure work and identify the affected components, risk level, dependencies, and required reviewers. If I need a repository URL, issue ID, or approval before using a connector, I’ll ask explicitly. No external action has been claimed yet.`
+          : `I’ve received this. I’ll review the ${empCatalog.department.toLowerCase()} part and send Sarah a concise finding or a specific blocker. No external action has been claimed yet.`;
   }
 
   const botMsg = { sender: empId, receiver: 'manager', body: botAnswer, created_at: new Date().toISOString() };
@@ -2683,7 +2695,9 @@ function activeWorkforce(companyId: string) {
       ? 'Owns intake, delegation, progress updates, approvals, and the final client handoff.'
       : employee.id === 'alex'
         ? 'Turns requests into owned workflows, deadlines, dependencies, service levels, handoffs, and verified operational outcomes.'
-        : `${employee.department} specialist supporting Sarah’s delivery plan.`
+        : employee.id === 'mike'
+          ? 'Turns technical requests into classified engineering briefs with risk assessment, component mapping, safe connector execution, and verified repository evidence.'
+          : `${employee.department} specialist supporting Sarah’s delivery plan.`
   }));
 }
 
@@ -2693,7 +2707,7 @@ const WORKFORCE_DOMAINS: Array<{ employeeId: string; keywords: string[] }> = [
   { employeeId: 'olivia', keywords: ['lead', 'pipeline', 'deal', 'prospect', 'crm', 'sales', 'follow-up', 'renewal'] },
   { employeeId: 'emma', keywords: ['support', 'customer', 'ticket', 'onboarding client', 'account health', 'complaint'] },
   { employeeId: 'maya', keywords: ['marketing', 'campaign', 'content', 'audience', 'brand', 'advertising', 'growth'] },
-  { employeeId: 'mike', keywords: ['code', 'repo', 'github', 'ci', 'technical', 'engineering', 'bug', 'incident', 'release'] },
+  { employeeId: 'mike', keywords: ['code', 'repo', 'github', 'ci', 'technical', 'engineering', 'bug', 'incident', 'release', 'deploy', 'deployment', 'pull request', 'pr', 'issue', 'sprint', 'architecture', 'refactor', 'migration', 'api', 'service', 'infrastructure', 'devops', 'pipeline', 'test', 'review', 'merge', 'branch', 'commit', 'rollback', 'hotfix', 'monitoring', 'alert', 'performance', 'debug', 'stack trace', 'error', 'exception', 'build', 'dependency', 'package', 'version'] },
   { employeeId: 'iris', keywords: ['security', 'access', 'identity', 'compliance', 'it ', 'device', 'vulnerability', 'risk review'] },
   { employeeId: 'sarah', keywords: ['hire', 'recruit', 'candidate', 'interview', 'job description', 'talent', 'staffing'] },
   { employeeId: 'arav', keywords: ['people ops', 'offboarding', 'policy acknowledgement', 'engagement', 'leave', 'handbook', 'employee experience'] },
@@ -2743,6 +2757,9 @@ function collaborationFinding(employee: any, question: string, context?: Workfor
   const evidence = context?.live_tool_evidence?.length ? ` Evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} is ${entry.status} — ${entry.summary.slice(0, 180)}`).join('; ')}` : '';
   if (employee.id === 'alex') {
     return `I translated “${topic}” into an operations brief: owner, next checkpoint, dependencies, and the safest handoff. I’m sending Sarah the execution path now${context?.live_tool_evidence?.length ? ' with the verified tool result attached' : ''}. I’ll flag any missing input, SLA risk, or escalation before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  if (employee.id === 'mike') {
+    return `I reviewed the engineering side of "${topic}". I'm sending Sarah a technical brief with: risk classification, affected components, recommended approach, and the safest next step${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any production risk, security concern, or breaking change before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
   return `I reviewed the ${employee.department.toLowerCase()} side of “${topic}”. I’m sending ${employee.name === 'Sarah' ? 'the team' : 'Sarah'} a usable recommendation now${context?.live_tool_evidence?.length ? ' with the verified tool result attached to the task evidence' : ''}. I’ll flag any missing input or risk before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
 }
