@@ -406,6 +406,7 @@ interface WorkforceQueueJob {
   company_id: string;
   question: string;
   preferred_employee_id?: string;
+  email_employee_id?: string;
   status: 'queued' | 'processing' | 'completed' | 'failed';
   claimed_by?: string;
   attempts: number;
@@ -829,10 +830,11 @@ async function loadQueuedJobs() {
   }
 }
 
-async function enqueueWorkforceTask(companyId: string, question: string, preferredEmployeeId?: string) {
+async function enqueueWorkforceTask(companyId: string, question: string, preferredEmployeeId?: string, emailEmployeeId?: string) {
   await hydrateTenantTasks(companyId);
   const taskId = db.nextTaskId++;
   const now = new Date().toISOString();
+  const validEmailEmployeeId = typeof emailEmployeeId === 'string' && activeWorkforce(companyId).some((employee) => employee.id === emailEmployeeId) ? emailEmployeeId : undefined;
   const { manager, lead, collaborators } = selectCollaborativeTeam(question || 'Operations review', companyId, preferredEmployeeId);
   const trace = [{ kind: 'queued', sender: 'Sarah', receiver: 'Company workroom', body: `I received this request and assigned ${lead.name} as delivery lead. I will return the final result and any execution blocker here.`, created_at: now }];
   const task: TaskRecord = {
@@ -854,7 +856,7 @@ async function enqueueWorkforceTask(companyId: string, question: string, preferr
   };
   db.tasks.set(taskId, task);
   await persistTaskRecord(task);
-  const job: WorkforceQueueJob = { id: `${companyId}:${taskId}`, task_id: taskId, company_id: companyId, question: task.question, preferred_employee_id: preferredEmployeeId, status: 'queued', attempts: 0, created_at: now, updated_at: now };
+  const job: WorkforceQueueJob = { id: `${companyId}:${taskId}`, task_id: taskId, company_id: companyId, question: task.question, preferred_employee_id: preferredEmployeeId, email_employee_id: validEmailEmployeeId, status: 'queued', attempts: 0, created_at: now, updated_at: now };
   await persistWorkforceJob(job);
   await persistActivityLog(companyId, { id: Date.now(), sender: 'Manager', receiver: 'Caveworkers worker', kind: 'task.queued', body: `Task #${taskId} entered the always-on employee queue.`, created_at: now });
   emitWorkroomEvent(companyId, taskId, { type: 'task_update', task: workroomSnapshot(task) });
@@ -918,7 +920,7 @@ async function processNextWorkforceJob() {
     workerEmployees.forEach((employeeId) => setEmployeePresence(job.company_id, employeeId, 'working', task.id));
     await updateQueuedTask(task, 'processing', `${manager.name} is managing this task. ${lead.name} and the assigned specialists are now working in the company room.`);
     try {
-      const completed = await handleTaskRoutingAsync(job.question, job.company_id, job.preferred_employee_id, task.id);
+      const completed = await handleTaskRoutingAsync(job.question, job.company_id, job.preferred_employee_id, task.id, job.email_employee_id);
       Object.assign(task, completed);
       task.status = completed.status || 'completed';
       task.started_at = task.started_at || new Date().toISOString();
@@ -1251,13 +1253,13 @@ async function searchGmail(companyId: string, connectionId: number, query: strin
 
 const EMAIL_ADDRESS_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
 
-function emailDraftFromRequest(question: string, companyName: string) {
+function emailDraftFromRequest(question: string, companyName: string, senderName = 'Sarah') {
   const recipients = Array.from(new Set((question.match(EMAIL_ADDRESS_PATTERN) || []).map((email) => email.toLowerCase()))).slice(0, 10);
   const safeLine = (value: string, limit: number) => value.replace(/[\r\n]+/g, ' ').trim().slice(0, limit);
   const subjectMatch = question.match(/(?:subject|re)\s*[:\-]\s*([^\n.]{3,160})/i);
   const bodyMatch = question.match(/(?:body|message|saying|say)\s*[:\-]?\s*([\s\S]{3,2200})/i);
   const subject = safeLine(subjectMatch?.[1] || `Update from ${companyName || 'your Caveworkers workspace'}`, 160);
-  const body = String(bodyMatch?.[1] || `Hello,\n\n${question}\n\nRegards,\nSarah\n${companyName || 'Caveworkers'}`).replace(/\r\n/g, '\n').slice(0, 3000);
+  const body = String(bodyMatch?.[1] || `Hello,\n\n${question}\n\nRegards,\n${senderName}\n${companyName || 'Caveworkers'}`).replace(/\r\n/g, '\n').slice(0, 3000);
   return { recipients, subject, body };
 }
 
@@ -1270,20 +1272,24 @@ function hasApprovalGatedGmailSend(connection: TenantConnector) {
     && grant?.access_level === 'requires_approval';
 }
 
-async function prepareSarahEmailAction(companyId: string, question: string, taskId: number) {
+async function prepareEmployeeEmailAction(companyId: string, question: string, taskId: number, requestedEmployeeId = 'sarah') {
+  const workforce = activeWorkforce(companyId);
+  const employee = workforce.find((entry) => entry.id === requestedEmployeeId) || workforce.find((entry) => entry.id === 'sarah') || EMPLOYEE_CATALOG.find((entry) => entry.id === 'sarah');
+  const employeeId = employee?.id || 'sarah';
+  const employeeName = employee?.name || 'Sarah';
   const company = db.companies.get(companyId);
-  const draft = emailDraftFromRequest(question, company?.name || 'your workspace');
-  if (!draft.recipients.length) return { status: 'blocked' as const, summary: 'Sarah prepared the work but cannot draft an executable email because no recipient address was included. Add a recipient such as name@company.com and try again.' };
-  const connections = await loadMcpConnections(companyId, 'sarah');
+  const draft = emailDraftFromRequest(question, company?.name || 'your workspace', employeeName);
+  if (!draft.recipients.length) return { status: 'blocked' as const, summary: `${employeeName} prepared the work but cannot draft an executable email because no recipient address was included. Add a recipient such as name@company.com and try again.` };
+  const connections = await loadMcpConnections(companyId, employeeId);
   const gmailConnection = connections.find(hasApprovalGatedGmailSend);
   if (!gmailConnection) {
     const hasConfiguredGmail = connections.some((connection) => connection.connection_type === 'google_gmail' && connection.config?.gmail_send_enabled === true);
-    return { status: 'blocked' as const, summary: hasConfiguredGmail ? 'Sarah’s Gmail connection needs to be reconnected with the Gmail send permission before an email can be sent.' : 'Sarah has no approval-gated Gmail send connection. In Settings, connect Gmail to Sarah, enable “Allow Sarah to send after approval,” then complete Google OAuth.' };
+    return { status: 'blocked' as const, summary: hasConfiguredGmail ? `${employeeName}’s Gmail connection needs to be reconnected with the Gmail send permission before an email can be sent.` : `${employeeName} has no approval-gated Gmail send connection. In Settings, connect Gmail to ${employeeName}, enable “Allow ${employeeName} to send after approval,” then complete Google OAuth.` };
   }
   return {
     status: 'awaiting_approval' as const,
-    summary: `Sarah drafted an email to ${draft.recipients.join(', ')}. It will not be sent until you approve it.`,
-    payload: { action_type: 'gmail.send', connection_id: gmailConnection.id, employee_id: 'sarah', to: draft.recipients, subject: draft.subject, body: draft.body, execution_status: 'pending', idempotency_key: crypto.randomUUID() }
+    summary: `${employeeName} drafted an email to ${draft.recipients.join(', ')}. It will not be sent until you approve it.`,
+    payload: { action_type: 'gmail.send', connection_id: gmailConnection.id, employee_id: employeeId, to: draft.recipients, subject: draft.subject, body: draft.body, execution_status: 'pending', idempotency_key: crypto.randomUUID() }
   };
 }
 
@@ -1293,7 +1299,7 @@ function gmailRawMessage(to: string[], subject: string, body: string) {
   return Buffer.from(`To: ${safeHeader(to.join(', '), 1200)}\r\nSubject: ${safeHeader(subject, 160)}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n${safeBody}`, 'utf8').toString('base64url');
 }
 
-async function dispatchApprovedSarahEmail(approval: ApprovalRecord) {
+async function dispatchApprovedEmployeeEmail(approval: ApprovalRecord) {
   const payload = approval.payload || {};
   if (payload.action_type !== 'gmail.send') return null;
   if (payload.execution_status === 'succeeded') return payload.execution_result || null;
@@ -1303,10 +1309,11 @@ async function dispatchApprovedSarahEmail(approval: ApprovalRecord) {
   if (!recipients.length || recipients.length > 10) throw new Error('The approved email has no valid recipients. Create a new draft with up to 10 valid email addresses.');
   approval.payload = { ...payload, execution_status: 'processing' };
   await persistApprovalRecord(approval);
-  const { oauth2 } = await getGoogleConnection(approval.company_id, 'sarah', Number(payload.connection_id), 'google_gmail');
+  const employeeId = typeof payload.employee_id === 'string' && EMPLOYEE_CATALOG.some((employee) => employee.id === payload.employee_id) ? payload.employee_id : approval.employee_id || 'sarah';
+  const { oauth2 } = await getGoogleConnection(approval.company_id, employeeId, Number(payload.connection_id), 'google_gmail');
   const gmail = google.gmail({ version: 'v1', auth: oauth2 });
   const sent = await gmail.users.messages.send({ userId: 'me', requestBody: { raw: gmailRawMessage(recipients, String(payload.subject || ''), String(payload.body || '')) } });
-  const result = { message_id: String(sent.data.id || ''), thread_id: String(sent.data.threadId || ''), recipients: recipients.join(', '), subject: String(payload.subject || '').slice(0, 160) };
+  const result = { employee_id: employeeId, message_id: String(sent.data.id || ''), thread_id: String(sent.data.threadId || ''), recipients: recipients.join(', '), subject: String(payload.subject || '').slice(0, 160) };
   approval.payload = { ...approval.payload, execution_status: 'succeeded', execution_result: result };
   approval.executed_at = new Date().toISOString();
   await persistApprovalRecord(approval);
@@ -1319,11 +1326,12 @@ async function recordWorkforceApprovalOutcome(approval: ApprovalRecord, status: 
   if (!task || task.company_id !== approval.company_id) return;
   task.execution = { action_type: String(approval.payload?.action_type || 'external.action'), status, summary: summary.slice(0, 1200), updated_at: new Date().toISOString(), result };
   task.status = status === 'succeeded' || status === 'cancelled' ? 'completed' : status === 'failed' ? 'failed' : status === 'blocked' ? 'blocked' : 'pending_approval';
-  task.trace = [...(task.trace || []), { kind: status === 'succeeded' ? 'action_completed' : status === 'cancelled' ? 'approval_declined' : status === 'failed' || status === 'blocked' ? 'action_failed' : 'action_update', sender: 'Sarah', receiver: 'Manager', body: summary.slice(0, 1200), created_at: new Date().toISOString() }];
+  const actor = EMPLOYEE_CATALOG.find((employee) => employee.id === approval.payload?.employee_id) || EMPLOYEE_CATALOG.find((employee) => employee.id === 'sarah');
+  task.trace = [...(task.trace || []), { kind: status === 'succeeded' ? 'action_completed' : status === 'cancelled' ? 'approval_declined' : status === 'failed' || status === 'blocked' ? 'action_failed' : 'action_update', sender: actor?.name || 'Sarah', receiver: 'Manager', body: summary.slice(0, 1200), created_at: new Date().toISOString() }];
   task.completed_at = new Date().toISOString();
   db.tasks.set(task.id, task);
   await persistTaskRecord(task);
-  await persistActivityLog(approval.company_id, { id: Date.now(), sender: 'Sarah', receiver: 'Manager', kind: `task.execution.${status}`, body: `Task #${task.id}: ${summary.slice(0, 900)}`, created_at: new Date().toISOString() });
+  await persistActivityLog(approval.company_id, { id: Date.now(), sender: actor?.name || 'Sarah', receiver: 'Manager', kind: `task.execution.${status}`, body: `Task #${task.id}: ${summary.slice(0, 900)}`, created_at: new Date().toISOString() });
   emitWorkroomEvent(approval.company_id, task.id, { type: 'task_update', task: workroomSnapshot(task) });
 }
 
@@ -2308,7 +2316,7 @@ app.post('/api/workforce/workroom', async (req, res) => {
   if (await enforceWorkspaceAccess(req, res)) return;
   const message = String(req.body?.message || '').trim().slice(0, 6000);
   if (!message) return res.status(400).json({ error: 'A company workroom message is required.' });
-  const result = await enqueueWorkforceTask(companyId, message, typeof req.body?.preferred_employee_id === 'string' ? req.body.preferred_employee_id : undefined);
+  const result = await enqueueWorkforceTask(companyId, message, typeof req.body?.preferred_employee_id === 'string' ? req.body.preferred_employee_id : undefined, typeof req.body?.email_employee_id === 'string' ? req.body.email_employee_id : undefined);
   res.status(202).json(result);
 });
 
@@ -2469,7 +2477,7 @@ function collaborationFinding(employee: any, question: string, context?: Workfor
   return `${employee.name} reviewed the ${employee.department.toLowerCase()} implications of “${topic}” and returned a permissioned recommendation for the lead’s decision brief.${toolNote}${connectorNote}${memoryNote}${evidenceNote}`;
 }
 
-async function handleTaskRoutingAsync(question: string, companyId: string, preferredEmployeeId?: string, existingTaskId?: number) {
+async function handleTaskRoutingAsync(question: string, companyId: string, preferredEmployeeId?: string, existingTaskId?: number, emailEmployeeId?: string) {
   await hydrateTenantTasks(companyId);
   const taskId = existingTaskId || db.nextTaskId++;
   const existingTask = existingTaskId ? db.tasks.get(existingTaskId) : undefined;
@@ -2511,10 +2519,10 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   const requiresApproval = isEmailAction || ['send', 'commit', 'hire', 'publish', 'recruit', 'payment', 'invoice', 'access', 'delete', 'post', 'write'].some((term) => lowerQ.includes(term));
   let execution: TaskRecord['execution'] = { action_type: isEmailAction ? 'gmail.send' : requiresApproval ? 'external.action' : 'none', status: 'not_required', summary: 'No external action was requested.', updated_at: new Date().toISOString() };
   if (requiresApproval) {
-    const emailAction = isEmailAction ? await prepareSarahEmailAction(companyId, question, taskId) : null;
+    const emailAction = isEmailAction ? await prepareEmployeeEmailAction(companyId, question, taskId, emailEmployeeId || 'sarah') : null;
     execution = emailAction ? { action_type: 'gmail.send', status: emailAction.status, summary: emailAction.summary, updated_at: new Date().toISOString() } : { action_type: 'external.action', status: 'awaiting_approval', summary: 'The requested external action is prepared and awaiting your approval. No external action has been performed.', updated_at: new Date().toISOString() };
     const approvalId = db.nextApprovalId++;
-    await persistApprovalRecord({ id: approvalId, company_id: companyId, task_id: taskId, employee_id: manager.id, tool_name: isEmailAction ? 'Gmail send' : lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action', action_summary: emailAction?.summary || `${manager.name} requests manager sign-off for: "${question}"`, status: emailAction?.status === 'blocked' ? 'rejected' : 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', action_type: isEmailAction ? 'gmail.send' : 'external.action', manager_id: manager.id, delivery_lead_id: lead.id, collaborators: collaborators.map((employee) => employee.id), ...(emailAction?.payload || {}) } });
+    await persistApprovalRecord({ id: approvalId, company_id: companyId, task_id: taskId, employee_id: emailAction?.payload?.employee_id || manager.id, tool_name: isEmailAction ? 'Gmail send' : lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action', action_summary: emailAction?.summary || `${manager.name} requests manager sign-off for: "${question}"`, status: emailAction?.status === 'blocked' ? 'rejected' : 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', action_type: isEmailAction ? 'gmail.send' : 'external.action', manager_id: manager.id, delivery_lead_id: lead.id, collaborators: collaborators.map((employee) => employee.id), ...(emailAction?.payload || {}) } });
     trace.push({ kind: emailAction?.status === 'blocked' ? 'blocked' : 'approval_required', sender: manager.name, receiver: 'Manager approval queue', body: emailAction?.summary || 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
   }
   trace.push({ kind: 'group_message', sender: manager.name, receiver: 'Manager', body: `I reviewed ${lead.name}’s delivery. ${execution.summary}`, created_at: new Date(Date.now() + 3400).toISOString() });
@@ -2530,7 +2538,7 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
 // This is deliberately absent outside the test runtime. It lets regression tests
 // exercise the actual worker completion path without creating an HTTP backdoor.
 export const workforceTestHooks = process.env.NODE_ENV === 'test'
-  ? { handleTaskRoutingAsync, selectCollaborativeTeam, resetRateLimits: () => rateLimitBuckets.clear() }
+  ? { handleTaskRoutingAsync, selectCollaborativeTeam, executeEmployeeReadTools, dispatchApprovedEmployeeEmail, resetRateLimits: () => rateLimitBuckets.clear() }
   : undefined;
 
 app.post('/api/task', async (req, res) => {
@@ -2538,10 +2546,10 @@ app.post('/api/task', async (req, res) => {
   if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   if (!ALWAYS_ON_WORKER_ENABLED && process.env.NODE_ENV !== 'test') return res.status(503).json({ error: 'The workforce worker is disabled. Enable ALWAYS_ON_WORKER_ENABLED before assigning tasks.', code: 'worker_disabled', retryable: false });
-  const { request: question, preferred_employee_id: preferredEmployeeId } = req.body || {};
+  const { request: question, preferred_employee_id: preferredEmployeeId, email_employee_id: emailEmployeeId } = req.body || {};
   const normalizedQuestion = String(question || 'Operations review').trim().slice(0, 6000);
   if (!normalizedQuestion) return res.status(400).json({ error: 'A task request is required.' });
-  const result = await enqueueWorkforceTask(companyId, normalizedQuestion, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined);
+  const result = await enqueueWorkforceTask(companyId, normalizedQuestion, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined, typeof emailEmployeeId === 'string' ? emailEmployeeId : undefined);
   res.status(202).json(result);
 });
 
@@ -2550,10 +2558,10 @@ app.post('/api/tasks', async (req, res) => {
   if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   if (!ALWAYS_ON_WORKER_ENABLED && process.env.NODE_ENV !== 'test') return res.status(503).json({ error: 'The workforce worker is disabled. Enable ALWAYS_ON_WORKER_ENABLED before assigning tasks.', code: 'worker_disabled', retryable: false });
-  const { request: question, preferred_employee_id: preferredEmployeeId } = req.body || {};
+  const { request: question, preferred_employee_id: preferredEmployeeId, email_employee_id: emailEmployeeId } = req.body || {};
   const normalizedQuestion = String(question || 'Operations review').trim().slice(0, 6000);
   if (!normalizedQuestion) return res.status(400).json({ error: 'A task request is required.' });
-  const result = await enqueueWorkforceTask(companyId, normalizedQuestion, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined);
+  const result = await enqueueWorkforceTask(companyId, normalizedQuestion, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined, typeof emailEmployeeId === 'string' ? emailEmployeeId : undefined);
   res.status(202).json(result);
 });
 
@@ -2626,15 +2634,17 @@ app.post('/api/approvals/:id', async (req, res) => {
     }
     if (approval.payload?.action_type === 'gmail.send') {
       try {
-        const result = await dispatchApprovedSarahEmail(approval);
-        const summary = result?.message_id ? `Sarah sent the approved email to ${result.recipients}. Gmail message ID: ${result.message_id}.` : 'Sarah could not confirm an email delivery result.';
+        const result = await dispatchApprovedEmployeeEmail(approval);
+        const senderName = EMPLOYEE_CATALOG.find((employee) => employee.id === approval.payload?.employee_id)?.name || 'The employee';
+        const summary = result?.message_id ? `${senderName} sent the approved email to ${result.recipients}. Gmail message ID: ${result.message_id}.` : `${senderName} could not confirm an email delivery result.`;
         await persistApprovalRecord(approval);
         await recordWorkforceApprovalOutcome(approval, result?.message_id ? 'succeeded' : 'failed', summary, result || undefined);
         return res.json({ ok: true, approval, execution: { status: result?.message_id ? 'succeeded' : 'failed', summary, result } });
       } catch (error: any) {
         approval.payload = { ...(approval.payload || {}), execution_status: 'failed', execution_error: String(error?.message || 'Gmail dispatch failed.').slice(0, 500) };
         await persistApprovalRecord(approval);
-        const summary = `Sarah could not send the approved email. ${String(error?.message || 'Gmail dispatch failed.').slice(0, 500)} No delivery has been confirmed.`;
+        const senderName = EMPLOYEE_CATALOG.find((employee) => employee.id === approval.payload?.employee_id)?.name || 'The employee';
+        const summary = `${senderName} could not send the approved email. ${String(error?.message || 'Gmail dispatch failed.').slice(0, 500)} No delivery has been confirmed.`;
         reportOperationalFailure('workforce.gmail_dispatch', error, { tenant_hash: anonymizeIdentifier(companyId), approval_id: approval.id, task_id: approval.task_id });
         await recordWorkforceApprovalOutcome(approval, 'failed', summary);
         return res.status(502).json({ error: summary, approval, execution: { status: 'failed', summary } });
@@ -2889,7 +2899,7 @@ app.post('/api/employees/:id/mcp-connections', async (req, res) => {
   if (!allowedTypes.includes(connectionType)) return res.status(400).json({ error: 'Unsupported connector type.' });
   const name = String(req.body?.name || marketplace?.name || 'Custom Connector').trim().slice(0, 120);
   if (!name) return res.status(400).json({ error: 'A connector name is required.' });
-  const gmailSendEnabled = connectionType === 'google_gmail' && empId === 'sarah' && req.body?.config?.gmail_send_enabled === true;
+  const gmailSendEnabled = connectionType === 'google_gmail' && req.body?.config?.gmail_send_enabled === true;
   let serverUrl: string | undefined;
   if (connectionType === 'streamable_http') {
     try { serverUrl = validateRemoteMcpUrl(req.body?.server_url); } catch (error: any) { return res.status(400).json({ error: error.message }); }
@@ -2910,7 +2920,7 @@ app.post('/api/employees/:id/mcp-connections', async (req, res) => {
   await persistMcpConnection(connection);
     const employeeName = employee.name || empId;
     const googleNotice = connectionType === 'google_gmail'
-      ? `Connector saved for ${employeeName}. Start Google OAuth${connection.config.gmail_send_enabled ? ' to grant read access and Sarah’s approval-gated Gmail send permission' : ' to grant read-only Gmail access'}.`
+      ? `Connector saved for ${employeeName}. Start Google OAuth${connection.config.gmail_send_enabled ? ` to grant read access and ${employeeName}'s approval-gated Gmail send permission` : ' to grant read-only Gmail access'}.`
       : connectionType === 'google_sheets' ? `Connector saved for ${employeeName}. Start Google OAuth to grant read-only Sheets access.` : '';
     res.status(201).json({ ok: true, connection: connectorPublicView(connection), tools_discovered: false, notice: googleNotice || 'Connector saved. Discover tools and grant them per-tool before this employee can use the server.' });
 });

@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { google } from 'googleapis';
 import request from 'supertest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { isTrialExpired, verifyRazorpayPaymentSignature, verifyRazorpayWebhookSignature } from '../security.js';
@@ -10,10 +11,20 @@ process.env.ALWAYS_ON_WORKER_ENABLED = 'false';
 process.env.RAZORPAY_KEY_SECRET = 'payment_test_secret';
 process.env.RAZORPAY_WEBHOOK_SECRET = 'webhook_test_secret';
 process.env.MCP_TOKEN_ENCRYPTION_KEY = 'mcp_test_encryption_key';
+process.env.GOOGLE_OAUTH_CLIENT_ID = 'test-google-client-id';
+process.env.GOOGLE_OAUTH_CLIENT_SECRET = 'test-google-client-secret';
 
 const { app, db, pendingPaymentOrders, workforceTestHooks } = await import('../server.js');
 
 const now = new Date().toISOString();
+
+function encryptTestCredentials(value: Record<string, any>) {
+  const key = crypto.createHash('sha256').update(process.env.MCP_TOKEN_ENCRYPTION_KEY || '').digest();
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value), 'utf8'), cipher.final()]);
+  return [iv.toString('base64url'), cipher.getAuthTag().toString('base64url'), ciphertext.toString('base64url')].join('.');
+}
 
 function seedTenants() {
   db.users.clear();
@@ -272,6 +283,115 @@ describe('Caveworkers security invariants', () => {
     ]));
     expect(fetchMock).toHaveBeenCalledTimes(3);
     expect((db.activity.get('company-a') || []).some((entry: any) => entry.kind === 'mcp.registry_connected')).toBe(true);
+  });
+
+  it('executes a granted read-only MCP tool for every active employee', async () => {
+    const employeeIds = ['sarah', 'david', 'alex', 'mike', 'emma', 'arav', 'olivia', 'maya', 'priya', 'iris'];
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input: any, init?: any) => {
+      const payload = JSON.parse(String(init?.body || '{}'));
+      const result = payload.method === 'initialize'
+        ? { protocolVersion: '2025-11-25', capabilities: {} }
+        : { content: [{ type: 'text', text: 'Synthetic tenant MCP read succeeded.' }] };
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: payload.id, result }), { status: 200, headers: { 'content-type': 'application/json', 'mcp-session-id': 'test-session' } });
+    });
+
+    employeeIds.forEach((employeeId, index) => {
+      const employee = (['Sarah', 'David', 'Alex', 'Mike', 'Emma', 'Arav', 'Olivia', 'Maya', 'Priya', 'Iris'] as string[])[index];
+      db.mcpConnections.set(`company-a:${employeeId}`, [{
+        id: 7000 + index,
+        company_id: 'company-a',
+        employee_id: employeeId,
+        name: `${employee} tenant tools`,
+        connection_type: 'streamable_http',
+        server_url: 'https://mcp.example.com/tools',
+        status: 'connected',
+        discovered_tools: [{ name: 'contacts.search', description: 'Read contacts', inputSchema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] }, risk: 'read' }],
+        tool_grants: [{ tool_name: 'contacts.search', access_level: 'read_only' }],
+        created_at: now,
+        updated_at: now
+      }]);
+    });
+
+    const evidence = await Promise.all(employeeIds.map((employeeId, index) => workforceTestHooks!.executeEmployeeReadTools!('company-a', { id: employeeId, name: (['Sarah', 'David', 'Alex', 'Mike', 'Emma', 'Arav', 'Olivia', 'Maya', 'Priya', 'Iris'] as string[])[index] }, 'Run the MCP connectivity check')));
+    const flattened = evidence.flat();
+    expect(flattened).toHaveLength(10);
+    expect(flattened.map((entry: any) => entry.employee_id)).toEqual(employeeIds);
+    expect(flattened.every((entry: any) => entry.status === 'executed')).toBe(true);
+    expect(flattened.every((entry: any) => entry.summary.includes('Synthetic tenant MCP read succeeded'))).toBe(true);
+    expect(fetchMock).toHaveBeenCalledTimes(20);
+  });
+
+  it('supports approval-gated Gmail preparation for every active employee', async () => {
+    const employeeIds = ['sarah', 'david', 'alex', 'mike', 'emma', 'arav', 'olivia', 'maya', 'priya', 'iris'];
+    employeeIds.forEach((employeeId, index) => {
+      db.mcpConnections.set(`company-a:${employeeId}`, [{
+        id: 8000 + index,
+        company_id: 'company-a',
+        employee_id: employeeId,
+        name: `${employeeId} Gmail`,
+        connection_type: 'google_gmail',
+        status: 'connected',
+        auth_token_encrypted: 'test-token-placeholder',
+        auth_scopes: ['https://www.googleapis.com/auth/gmail.send'],
+        config: { gmail_send_enabled: true },
+        discovered_tools: [{ name: 'gmail.send', description: 'Send email', risk: 'write' }],
+        tool_grants: [{ tool_name: 'gmail.send', access_level: 'requires_approval' }],
+        created_at: now,
+        updated_at: now
+      }]);
+    });
+
+    for (const employeeId of employeeIds) {
+      const result = await workforceTestHooks!.handleTaskRoutingAsync!(`Send an email to ragulyogesh7@gmail.com saying Hi from ${employeeId}`, 'company-a', employeeId, undefined, employeeId);
+      expect(result.execution).toMatchObject({ action_type: 'gmail.send', status: 'awaiting_approval' });
+      const approval = Array.from(db.approvals.values()).find((entry: any) => entry.task_id === result.id) as any;
+      expect(approval).toMatchObject({ company_id: 'company-a', employee_id: employeeId, tool_name: 'Gmail send', status: 'pending' });
+      expect(approval.payload).toMatchObject({ action_type: 'gmail.send', employee_id: employeeId, to: ['ragulyogesh7@gmail.com'] });
+    }
+  });
+
+  it('dispatches one approval-gated Gmail message for every active employee with verified results', async () => {
+    const employeeIds = ['sarah', 'david', 'alex', 'mike', 'emma', 'arav', 'olivia', 'maya', 'priya', 'iris'];
+    const sendMock = vi.fn(async ({ requestBody }: any) => ({ data: { id: `message-${sendMock.mock.calls.length}`, threadId: `thread-${sendMock.mock.calls.length}`, raw_size: String(requestBody?.raw || '').length } }));
+    const gmailSpy = vi.spyOn(google, 'gmail').mockReturnValue({ users: { messages: { send: sendMock } } } as any);
+
+    for (const [index, employeeId] of employeeIds.entries()) {
+      const connectionId = 9000 + index;
+      db.mcpConnections.set(`company-a:${employeeId}`, [{
+        id: connectionId,
+        company_id: 'company-a',
+        employee_id: employeeId,
+        name: `${employeeId} Gmail`,
+        connection_type: 'google_gmail',
+        status: 'connected',
+        auth_token_encrypted: encryptTestCredentials({ access_token: `test-access-${employeeId}` }),
+        auth_scopes: ['https://www.googleapis.com/auth/gmail.send'],
+        config: { gmail_send_enabled: true },
+        tool_grants: [{ tool_name: 'gmail.send', access_level: 'requires_approval' }],
+        created_at: now,
+        updated_at: now
+      }]);
+
+      const approval: any = {
+        id: 10000 + index,
+        company_id: 'company-a',
+        task_id: 11000 + index,
+        employee_id: employeeId,
+        tool_name: 'Gmail send',
+        action_summary: `Send a test email from ${employeeId}.`,
+        status: 'approved',
+        created_at: now,
+        payload: { action_type: 'gmail.send', connection_id: connectionId, employee_id: employeeId, to: ['ragulyogesh7@gmail.com'], subject: `Caveworkers ${employeeId} MCP test`, body: 'Hi', execution_status: 'pending' }
+      };
+      db.approvals.set(approval.id, approval);
+
+      const result = await workforceTestHooks!.dispatchApprovedEmployeeEmail!(approval);
+      expect(result).toMatchObject({ employee_id: employeeId, message_id: `message-${index + 1}`, recipients: 'ragulyogesh7@gmail.com' });
+      expect(approval.payload.execution_status).toBe('succeeded');
+    }
+
+    expect(gmailSpy).toHaveBeenCalledTimes(10);
+    expect(sendMock).toHaveBeenCalledTimes(10);
   });
 
   it('rate-limits Registry search requests for the same client', async () => {
