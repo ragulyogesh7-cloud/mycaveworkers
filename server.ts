@@ -239,7 +239,10 @@ if (!getApps().length) {
           privateKey: firebasePrivateKey
         })
       });
-    } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    } else if (IS_PRODUCTION || process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+      // Cloud Run and other Google-managed environments provide Application Default Credentials.
+      // Restrict implicit initialization to production or explicit ADC mode so local tests never
+      // contact a live Firebase project by accident.
       initializeApp();
     } else {
       console.warn('Firebase Admin SDK is not configured; Google sign-in will fail closed until Firebase credentials are provided.');
