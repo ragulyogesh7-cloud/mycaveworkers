@@ -33,20 +33,21 @@
       </header>
 
       <div class="room-wrap">
+        <div class="room-signal-line" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
         <section class="trial-banner room-trial-banner" id="trial-banner" hidden aria-live="polite">
           <div><span class="trial-banner-kicker">WORKSPACE ACCESS</span><strong id="trial-banner-text">Your free trial is active.</strong><small id="trial-banner-detail">Loading trial status…</small></div>
           <a href="/settings#billing" class="trial-banner-action">Upgrade workspace ↗</a>
         </section>
 
         <section class="room-intro">
-          <div><p class="eyebrow">REALTIME COMPANY ROOM</p><h1>One conversation.<br><em>Your whole workforce.</em></h1></div>
-          <p>Assign work, watch your employees collaborate, and approve consequential actions from one clear shared room.</p>
+          <div><p class="eyebrow">VERIFIED AI WORKFORCE</p><h1>Work moves here.<br><em>Proof comes with it.</em></h1></div>
+          <p>Give Sarah the outcome you want. Your AI employees coordinate in one room, use only the tools you approve, and show the external evidence when the work is actually done.</p>
         </section>
 
         <div class="room-layout">
           <section class="room-panel" aria-labelledby="room-heading">
             <header class="room-header">
-              <div class="room-heading"><span class="room-mark">#</span><div><p class="panel-kicker">TEAM CHANNEL</p><h2 id="room-heading">Company room</h2><p id="room-connection-copy">Loading the latest company activity…</p></div></div>
+              <div class="room-heading"><span class="room-mark">#</span><div><p class="panel-kicker">TEAM CHANNEL</p><h2 id="room-heading">Company room</h2><p id="room-connection-copy">Live coordination and verified execution in one shared room.</p></div></div>
               <div class="room-header-actions"><div class="avatar-stack" id="room-avatar-stack" aria-label="Active AI employees"></div><span class="live-pill" id="workroom-status">CONNECTING…</span></div>
             </header>
 
@@ -58,10 +59,10 @@
 
             <form class="room-composer" id="room-composer">
               <div class="room-composer-top"><label for="request">Assign work</label><span><i class="signal-dot"></i> Approval gates stay on</span></div>
-              <textarea id="request" rows="3" maxlength="6000" placeholder="Ask your employee or team to take on a task…"></textarea>
+              <textarea id="request" rows="3" maxlength="6000" placeholder="Tell Caveworkers the outcome you need… e.g. Create employee-names.txt in my GitHub repository with all ten employee names."></textarea>
               <div class="room-composer-bottom">
                 <label class="assignment-control" for="task-assignee"><span>Route to</span><select id="task-assignee" aria-label="Choose who should lead this task"><option value="">Auto-route the best team</option><option value="__whole_team__">Whole team</option></select></label>
-                <div class="composer-actions"><span class="composer-hint">Press Ctrl + Enter to send</span><button class="run-button" id="run" type="submit">Assign work <span>↗</span></button></div>
+                <div class="composer-actions"><span class="composer-hint"><i class="signal-dot"></i> Consequential writes pause for your approval</span><button class="run-button" id="run" type="submit">Start the work <span>↗</span></button></div>
               </div>
             </form>
             <p class="room-notice" id="room-notice" role="status" aria-live="polite"></p>
@@ -72,6 +73,11 @@
               <div class="context-heading"><div><p class="panel-kicker">PRESENT NOW</p><h2>Team status</h2></div><span id="room-team-count" class="context-count">0</span></div>
               <div class="workroom-presence compact-presence" id="workroom-presence"><p class="empty-state-sm">Loading employee presence…</p></div>
               <a href="/settings#team" class="context-link">Manage team ↗</a>
+            </section>
+
+            <section class="context-card execution-card" id="execution-rail">
+              <div class="context-heading"><div><p class="panel-kicker">TRUST LAYER</p><h2>Execution rail</h2></div><span class="secure-tag">VERIFIED</span></div>
+              <div class="execution-steps" aria-label="How Caveworkers executes work"><div class="execution-step active"><span>01</span><b>Understand</b><small>Sarah routes the outcome</small></div><div class="execution-step"><span>02</span><b>Collaborate</b><small>Specialists share context</small></div><div class="execution-step"><span>03</span><b>Use tools</b><small>Approved connectors only</small></div><div class="execution-step"><span>04</span><b>Prove it</b><small>Evidence, IDs, or failure</small></div></div>
             </section>
 
             <section class="context-card" id="approval-queue">

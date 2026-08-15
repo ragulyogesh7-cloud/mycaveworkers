@@ -215,10 +215,10 @@ function updateCustomMcpFields() {
   const name = $('#custom-mcp-name');
   const gmailSendOption = $('#gmail-send-option');
   const gmailSend = $('#custom-mcp-gmail-send');
-  const canEnableSarahSend = type === 'google_gmail' && employeeId === 'sarah';
-  gmailSendOption.hidden = !canEnableSarahSend;
-  gmailSend.disabled = !canEnableSarahSend;
-  if (!canEnableSarahSend) gmailSend.checked = false;
+  const canEnableEmployeeSend = type === 'google_gmail' && Boolean(employeeId);
+  gmailSendOption.hidden = !canEnableEmployeeSend;
+  gmailSend.disabled = !canEnableEmployeeSend;
+  if (!canEnableEmployeeSend) gmailSend.checked = false;
   label.firstChild.textContent = 'MCP Server URL';
   target.disabled = false;
   target.value = target.value === 'Google OAuth required after saving' ? '' : target.value;
@@ -265,7 +265,7 @@ async function addCustomMcpConnection(event) {
   try {
     const config = { notes };
     if (connectionType === 'git_repository') config.repo_path = target;
-    if (connectionType === 'google_gmail' && employeeId === 'sarah') config.gmail_send_enabled = $('#custom-mcp-gmail-send').checked;
+    if (connectionType === 'google_gmail' && employeeId) config.gmail_send_enabled = $('#custom-mcp-gmail-send').checked;
     await requestJson(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, connection_type: connectionType, server_url: connectionType === 'streamable_http' ? target : null, auth_token: authToken || undefined, config, access_level: accessLevel }) });
     $('#custom-mcp-form').reset();
     updateCustomMcpFields();
@@ -393,6 +393,34 @@ async function startUpgrade(tier) {
   } catch (error) { notify(error.message || 'Secure checkout could not be started.', 'error'); }
 }
 
+function applyConnectorPreset(preset) {
+  activateTab('integrations');
+  const type = $('#custom-mcp-type');
+  const name = $('#custom-mcp-name');
+  const target = $('#custom-mcp-target');
+  const access = $('#custom-mcp-access');
+  const token = $('#custom-mcp-token');
+  const notes = $('#custom-mcp-notes');
+  if (!type || !name || !target || !access || !token || !notes) return;
+  const presets = {
+    github: { type: 'streamable_http', name: 'GitHub workspace', target: 'https://api.githubcopilot.com/mcp/', access: 'requires_approval', tokenPlaceholder: 'Fine-grained PAT with Contents write', notes: 'Official GitHub MCP server. Limit the token to the repositories Caveworkers should use. Write tools stay approval-gated.' },
+    gmail: { type: 'google_gmail', name: 'Workspace Gmail', target: '', access: 'requires_approval', tokenPlaceholder: 'OAuth is completed after saving', notes: 'Drafts and sends are paused until a manager approves the exact message.' },
+    sheets: { type: 'google_sheets', name: 'Workspace Sheets', target: '', access: 'read_only', tokenPlaceholder: 'OAuth is completed after saving', notes: 'Use read-only access first. Add write permissions only when a workflow requires it.' },
+    custom: { type: 'streamable_http', name: 'Custom MCP server', target: 'https://', access: 'read_only', tokenPlaceholder: 'Stored encrypted', notes: 'Use a trusted HTTPS Streamable HTTP MCP endpoint. Discover tools before granting them to employees.' }
+  };
+  const selected = presets[preset] || presets.custom;
+  type.value = selected.type;
+  name.value = selected.name;
+  target.value = selected.target;
+  access.value = selected.access;
+  token.value = '';
+  token.placeholder = selected.tokenPlaceholder;
+  notes.value = selected.notes;
+  updateCustomMcpFields();
+  $('#custom-mcp-form')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  notify(`${selected.name} is ready. Choose the employee, review the access level, and save the connection.`, 'success');
+}
+
 function bindEvents() {
   document.querySelector('.settings-nav')?.addEventListener('click', (event) => {
     const button = event.target.closest('[data-settings-tab]');
@@ -410,6 +438,8 @@ function bindEvents() {
   $('#custom-mcp-employee')?.addEventListener('change', updateCustomMcpFields);
   $('#menuButton')?.addEventListener('click', () => document.querySelector('.settings-rail')?.classList.toggle('is-open'));
   document.addEventListener('click', (event) => {
+    const preset = event.target.closest('[data-connector-preset]');
+    if (preset) { applyConnectorPreset(preset.dataset.connectorPreset); return; }
     const target = event.target.closest('[data-action], [data-plan]');
     if (!target) return;
     const action = target.dataset.action;

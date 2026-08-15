@@ -394,6 +394,53 @@ describe('Caveworkers security invariants', () => {
     expect(sendMock).toHaveBeenCalledTimes(10);
   });
 
+  it('prepares and executes an approval-gated tenant GitHub MCP write with a verified commit SHA', async () => {
+    db.orgEmployees.set('company-a', [{ id: 'mike', name: 'Mike', role: 'Engineering Manager', department: 'Engineering', status: 'active', tools: ['GitHub MCP'], permissions: [] }]);
+    const connectionId = 12001;
+    db.mcpConnections.set('company-a:mike', [{
+      id: connectionId,
+      company_id: 'company-a',
+      employee_id: 'mike',
+      name: 'GitHub MCP',
+      connection_type: 'streamable_http',
+      server_url: 'https://api.githubcopilot.com/mcp/',
+      status: 'connected',
+      auth_token_encrypted: encryptTestCredentials({ access_token: 'tenant-github-token' }),
+      config: { registry_server_name: 'GitHub Official MCP Server' },
+      discovered_tools: [{
+        name: 'create_or_update_file',
+        description: 'Create or update a file in a GitHub repository.',
+        inputSchema: { type: 'object', properties: { owner: { type: 'string' }, repo: { type: 'string' }, path: { type: 'string' }, message: { type: 'string' }, content: { type: 'string' }, branch: { type: 'string' } }, required: ['owner', 'repo', 'path', 'message', 'content'] },
+        risk: 'write'
+      }],
+      tool_grants: [{ tool_name: 'create_or_update_file', access_level: 'requires_approval' }],
+      created_at: now,
+      updated_at: now
+    }]);
+
+    const prepared = await workforceTestHooks!.handleTaskRoutingAsync!('Edit the file employee-mcp-test.txt with a hello world message in my GitHub repo https://github.com/ragulyogesh7-cloud/caveworkers-employee-mcp-test.git', 'company-a', 'mike');
+    expect(prepared).toMatchObject({ company_id: 'company-a', status: 'pending_approval', owner: 'sarah', execution: { action_type: 'mcp.tool', status: 'awaiting_approval' } });
+    const approval = Array.from(db.approvals.values()).find((entry: any) => entry.task_id === prepared.id) as any;
+    expect(approval).toMatchObject({ company_id: 'company-a', employee_id: 'mike', tool_name: 'create_or_update_file', status: 'pending' });
+    expect(approval.payload).toMatchObject({ action_type: 'mcp.tool', connection_id: connectionId, employee_id: 'mike', tool_name: 'create_or_update_file', arguments: { owner: 'ragulyogesh7-cloud', repo: 'caveworkers-employee-mcp-test', path: 'employee-mcp-test.txt', content: 'Hello World' } });
+
+    const commitSha = '0123456789abcdef0123456789abcdef01234567';
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input: any, init?: any) => {
+      const payload = JSON.parse(String(init?.body || '{}'));
+      const result = payload.method === 'initialize'
+        ? { protocolVersion: '2025-11-25', capabilities: { tools: {} } }
+        : { content: [{ type: 'text', text: `Committed successfully. Commit ${commitSha}` }] };
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: payload.id, result }), { status: 200, headers: { 'content-type': 'application/json', 'mcp-session-id': 'github-test-session' } });
+    });
+
+    const dispatched = await workforceTestHooks!.dispatchApprovedMcpTool!(approval);
+    expect(dispatched).toMatchObject({ employee_id: 'mike', connector_name: 'GitHub MCP', tool_name: 'create_or_update_file', commit_sha: commitSha });
+    expect(approval.payload.execution_status).toBe('succeeded');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const callPayload = JSON.parse(String(fetchMock.mock.calls[1][1]?.body || '{}'));
+    expect(callPayload).toMatchObject({ method: 'tools/call', params: { name: 'create_or_update_file', arguments: expect.objectContaining({ owner: 'ragulyogesh7-cloud', repo: 'caveworkers-employee-mcp-test', path: 'employee-mcp-test.txt', content: 'Hello World' }) } });
+  });
+
   it('rate-limits Registry search requests for the same client', async () => {
     const fetchMock = mockRegistryAndMcpTransport();
     for (let attempt = 0; attempt < 20; attempt += 1) {

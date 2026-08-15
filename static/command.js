@@ -136,7 +136,7 @@ function renderAvatarStack() {
   const container = $('#room-avatar-stack');
   if (!container) return;
   const visible = employees.slice(0, 5);
-  container.innerHTML = visible.map((employee) => `<a href="/employee/${encodeURIComponent(employee.id)}" class="stack-avatar" title="${safe(employee.name)} · ${safe(employee.role)}" style="--avatar-color:${safe(employee.color || '#7ee8ff')}">${safe(employee.name?.[0] || 'A')}</a>`).join('') + (employees.length > visible.length ? `<span class="stack-avatar overflow">+${employees.length - visible.length}</span>` : '');
+  container.innerHTML = visible.map((employee) => `<a href="/employee/${encodeURIComponent(employee.id)}" class="stack-avatar employee-orb" title="${safe(employee.name)} · ${safe(employee.role)}" style="--avatar-color:${safe(employee.color || '#7ee8ff')}" data-employee-id="${safe(employee.id)}"><span class="orb-ears" aria-hidden="true"></span><span class="orb-face"><i></i><i></i><b>${safe(employee.name?.[0] || 'A')}</b></span></a>`).join('') + (employees.length > visible.length ? `<span class="stack-avatar overflow">+${employees.length - visible.length}</span>` : '');
 }
 
 async function loadEmployees() {
@@ -162,7 +162,7 @@ function renderWorkroomPresence() {
   container.innerHTML = roster.length ? roster.map((entry, index) => {
     const employee = employeeById(entry.employee_id) || {};
     const status = entry.status || 'idle';
-    return `<a class="presence-row" href="/employee/${encodeURIComponent(entry.employee_id || '')}" style="--presence-delay:${Math.min(index, 8) * 35}ms"><span class="presence-avatar" style="--avatar-color:${safe(employee.color || '#7ee8ff')}">${safe(employee.name?.[0] || entry.employee_id?.[0] || 'A')}</span><span class="presence-copy"><b>${safe(employee.name || 'AI employee')}</b><small>${safe(employee.role || 'Specialist')} · <span class="presence-status ${safe(status)}">${safe(status.replace('_', ' '))}</span></small></span></a>`;
+    return `<a class="presence-row" href="/employee/${encodeURIComponent(entry.employee_id || '')}" style="--presence-delay:${Math.min(index, 8) * 35}ms;--avatar-color:${safe(employee.color || '#7ee8ff')}" data-presence-status="${safe(status)}"><span class="presence-avatar employee-orb"><span class="orb-ears" aria-hidden="true"></span><span class="orb-face"><i></i><i></i><b>${safe(employee.name?.[0] || entry.employee_id?.[0] || 'A')}</b></span></span><span class="presence-copy"><b>${safe(employee.name || 'AI employee')}</b><small>${safe(employee.role || 'Specialist')} · <span class="presence-status ${safe(status)}">${safe(status.replace('_', ' '))}</span></small></span></a>`;
   }).join('') : '<p class="empty-state-sm">No active employees are available yet.</p>';
 }
 
@@ -198,11 +198,13 @@ function renderRoomFeed(shouldFollow = roomAtLatest()) {
   all.forEach((message, index) => {
     const article = document.createElement('article');
     const tone = messageTone(message.kind);
+    const senderEmployee = employees.find((employee) => employee.name === message.sender || employee.id === String(message.sender || '').toLowerCase());
     article.className = `room-message ${tone}${message.pending ? ' pending' : ''}`;
+    if (senderEmployee?.color) article.style.setProperty('--avatar-color', senderEmployee.color);
     article.style.setProperty('--message-delay', `${Math.min(index, 10) * 35}ms`);
     const taskReference = message.task_id ? `<button class="message-task" data-task-id="${safe(message.task_id)}" type="button">Task #${safe(message.task_id)}</button>` : '';
     const approvalAction = message.approval_id ? `<button class="message-approval" data-approval-id="${safe(message.approval_id)}" data-approval-status="approved" type="button">Approve</button>` : '';
-    article.innerHTML = `<span class="message-avatar">${safe(messageInitial(message))}</span><div class="message-body"><div class="message-meta"><b>${safe(message.sender || 'Caveworkers')}</b>${message.receiver ? `<span>to ${safe(message.receiver)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}</div>${tone === 'result' ? '<span class="final-answer-label">Sarah’s final answer</span>' : ''}<p>${safe(message.body || '')}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
+    article.innerHTML = `<span class="message-avatar employee-orb"><span class="orb-ears" aria-hidden="true"></span><span class="orb-face"><i></i><i></i><b>${safe(messageInitial(message))}</b></span></span><div class="message-body"><div class="message-meta"><b>${safe(message.sender || 'Caveworkers')}</b>${message.receiver ? `<span>to ${safe(message.receiver)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}</div>${tone === 'result' ? '<span class="final-answer-label">Sarah’s final answer</span>' : ''}<p>${safe(message.body || '')}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
     fragment.append(article);
   });
   container.replaceChildren(fragment);
@@ -375,7 +377,7 @@ async function submitTask(event) {
   renderRoomFeed(true);
   input.value = '';
   button.disabled = true;
-  button.innerHTML = 'Assigning…';
+    button.innerHTML = '<span class="button-spinner" aria-hidden="true"></span> Working…';
   setRoomNotice(`Routing this task to ${target}.`, '');
   try {
     const task = await responseJson('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request, preferred_employee_id: preferred || undefined }) });
@@ -390,7 +392,7 @@ async function submitTask(event) {
     setRoomNotice(error.upgradeRequired ? `${error.message} Open Settings to choose a paid plan.` : error.message, 'error');
   } finally {
     button.disabled = false;
-    button.innerHTML = 'Assign work <span>↗</span>';
+    button.innerHTML = 'Start the work <span>↗</span>';
     input.focus();
   }
 }

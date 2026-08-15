@@ -1179,6 +1179,90 @@ function buildReadToolArguments(tool: any, question: string): Record<string, any
   return required.every((key: string) => Object.prototype.hasOwnProperty.call(args, key)) ? args : null;
 }
 
+function extractGitHubRepository(question: string): { owner: string; repo: string } | null {
+  const match = String(question || '').match(/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:[/?#\s]|$)/i);
+  if (!match) return null;
+  const owner = match[1].replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 100);
+  const repo = match[2].replace(/[^A-Za-z0-9_.-]/g, '').replace(/\.git$/i, '').slice(0, 100);
+  return owner && repo ? { owner, repo } : null;
+}
+
+function extractRequestedFilePath(question: string): string | null {
+  const match = String(question || '').match(/(?:file|document)\s+(?:named|called)?\s*["'`]?([A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+)["'`]?/i);
+  if (!match) return null;
+  const value = match[1].replace(/^\/+/, '').replace(/\.\.\//g, '').slice(0, 240);
+  return value && !value.includes('://') ? value : null;
+}
+
+function extractRequestedFileContent(question: string): string {
+  const lower = String(question || '').toLowerCase();
+  if (lower.includes('hello world')) return 'Hello World';
+  const match = String(question || '').match(/(?:with|containing|content(?:\s+as)?|saying|message(?:\s+of)?|type)\s*[:\-]?\s*["'`]?(.{2,1200}?)["'`]?(?:\s+(?:in|to|on)\s+(?:my|the)\s+github|\s*$)/i);
+  return String(match?.[1] || 'Caveworkers update').replace(/[\r\n]+/g, '\n').trim().slice(0, 4000);
+}
+
+function selectMcpWriteTool(connection: TenantConnector, question: string) {
+  const lower = String(question || '').toLowerCase();
+  const tools = (connection.discovered_tools || []).filter((tool) => tool.risk === 'write' || isLikelyWriteTool(tool.name));
+  return tools.map((tool) => {
+    const haystack = `${tool.name} ${tool.description || ''}`.toLowerCase();
+    let score = 0;
+    if (/create_or_update_file|push_files|create_file|update_file/.test(tool.name.toLowerCase())) score += 20;
+    if (/file|repository|repo|content|commit/.test(haystack)) score += 8;
+    if (/github|git/.test(connection.name.toLowerCase()) || /github|git/.test(connection.server_url || '')) score += 5;
+    if (lower.includes('file') && /file/.test(haystack)) score += 5;
+    return { tool, score };
+  }).sort((a, b) => b.score - a.score)[0]?.tool || null;
+}
+
+function buildMcpWriteToolArguments(tool: any, input: { owner: string; repo: string; path: string; content: string; commitMessage: string }): Record<string, any> | null {
+  const properties = tool?.inputSchema?.properties && typeof tool.inputSchema.properties === 'object' ? tool.inputSchema.properties : {};
+  const args: Record<string, any> = {};
+  Object.keys(properties).forEach((key) => {
+    const normalized = key.toLowerCase().replace(/[-_]/g, '');
+    if (normalized === 'owner' || normalized === 'organization' || normalized === 'org') args[key] = input.owner;
+    else if (normalized === 'repo' || normalized === 'repository' || normalized === 'repositoryname') args[key] = input.repo;
+    else if (normalized === 'path' || normalized === 'filepath' || normalized === 'filename') args[key] = input.path;
+    else if (normalized === 'content' || normalized === 'filecontent' || normalized === 'text' || normalized === 'body') args[key] = input.content;
+    else if (normalized === 'message' || normalized === 'commitmessage' || normalized === 'title') args[key] = input.commitMessage;
+    else if (normalized === 'branch' || normalized === 'branchname') args[key] = 'main';
+    else if (normalized === 'files') args[key] = [{ path: input.path, content: input.content }];
+  });
+  const required = Array.isArray(tool?.inputSchema?.required) ? tool.inputSchema.required : [];
+  return required.every((key: string) => Object.prototype.hasOwnProperty.call(args, key)) ? args : null;
+}
+
+async function prepareEmployeeMcpWriteAction(companyId: string, question: string, taskId: number, requestedEmployeeId: string) {
+  const workforce = activeWorkforce(companyId);
+  const employee = workforce.find((entry) => entry.id === requestedEmployeeId) || workforce.find((entry) => entry.id === 'mike') || workforce[0];
+  const employeeId = employee?.id || 'mike';
+  const employeeName = employee?.name || 'The engineering employee';
+  const repository = extractGitHubRepository(question);
+  const filePath = extractRequestedFilePath(question);
+  if (!repository || !filePath) {
+    return { status: 'blocked' as const, summary: `${employeeName} needs an explicit GitHub repository URL and file path before Caveworkers can prepare a safe write approval.` };
+  }
+  const connections = await loadMcpConnections(companyId, employeeId);
+  const connection = connections.find((entry) => entry.connection_type === 'streamable_http' && entry.status === 'connected' && entry.auth_token_encrypted && (entry.config?.registry_server_name || '').toLowerCase().includes('github'))
+    || connections.find((entry) => entry.connection_type === 'streamable_http' && entry.status === 'connected' && entry.auth_token_encrypted && (entry.server_url || '').includes('githubcopilot.com'));
+  if (!connection) {
+    return { status: 'blocked' as const, summary: `${employeeName} cannot prepare the GitHub change because no connected tenant-owned GitHub MCP server is available for this employee. Add GitHub in Settings, choose the repository scope, and grant the write tool with approval required.` };
+  }
+  const tool = selectMcpWriteTool(connection, question);
+  if (!tool) {
+    return { status: 'blocked' as const, summary: `${employeeName} found the tenant GitHub connector but no discovered file-write tool. Refresh the connector tools and grant the provider’s file or push tool with approval required.` };
+  }
+  const argumentsValue = buildMcpWriteToolArguments(tool, { owner: repository.owner, repo: repository.repo, path: filePath, content: extractRequestedFileContent(question), commitMessage: `Caveworkers: update ${filePath}` });
+  if (!argumentsValue) {
+    return { status: 'blocked' as const, summary: `${employeeName} found ${tool.name}, but its required input schema needs fields Caveworkers could not safely infer. Open the approval composer and provide the missing tool arguments.` };
+  }
+  return {
+    status: 'awaiting_approval' as const,
+    summary: `${employeeName} prepared ${tool.name} for ${repository.owner}/${repository.repo}/${filePath}. The resolved arguments are ready for manager approval; no GitHub call has been made yet.`,
+    payload: { action_type: 'mcp.tool', provider: 'github', connection_id: connection.id, employee_id: employeeId, tool_name: tool.name, arguments: argumentsValue, execution_status: 'pending', idempotency_key: crypto.randomUUID() }
+  };
+}
+
 function summarizeMcpToolResult(value: any) {
   const result = value?.result || value;
   const content = Array.isArray(result?.content) ? result.content.map((entry: any) => typeof entry?.text === 'string' ? entry.text : JSON.stringify(entry)).join('\\n') : JSON.stringify(result);
@@ -1297,6 +1381,40 @@ function gmailRawMessage(to: string[], subject: string, body: string) {
   const safeHeader = (value: string, limit: number) => String(value || '').replace(/[\r\n]+/g, ' ').trim().slice(0, limit);
   const safeBody = String(body || '').replace(/\r\n/g, '\n').slice(0, 3000);
   return Buffer.from(`To: ${safeHeader(to.join(', '), 1200)}\r\nSubject: ${safeHeader(subject, 160)}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n${safeBody}`, 'utf8').toString('base64url');
+}
+
+async function dispatchApprovedMcpTool(approval: ApprovalRecord) {
+  const payload = approval.payload || {};
+  if (payload.action_type !== 'mcp.tool') return null;
+  if (payload.execution_status === 'succeeded') return payload.execution_result || null;
+  if (payload.execution_status === 'processing') throw new Error('This MCP action is already running. Check the task result before retrying.');
+  const employeeId = typeof payload.employee_id === 'string' && EMPLOYEE_CATALOG.some((employee) => employee.id === payload.employee_id) ? payload.employee_id : approval.employee_id;
+  const connections = await loadMcpConnections(approval.company_id, employeeId);
+  const connection = connections.find((entry) => entry.id === Number(payload.connection_id) && entry.connection_type === 'streamable_http' && entry.status === 'connected');
+  if (!connection) throw new Error('The approved MCP connector is no longer connected for this employee.');
+  const tool = (connection.discovered_tools || []).find((entry) => entry.name === payload.tool_name);
+  if (!tool) throw new Error('The approved MCP tool is no longer present. Refresh connector tools and create a new approval.');
+  if (tool.risk !== 'write' && !isLikelyWriteTool(tool.name)) throw new Error('The approved MCP action is not classified as a write tool.');
+  const grant = (connection.tool_grants || []).find((entry) => entry.tool_name === tool.name);
+  if (!grant || !['requires_approval', 'read_write'].includes(grant.access_level)) throw new Error('The approved MCP tool is no longer granted to this employee.');
+  const args = payload.arguments && typeof payload.arguments === 'object' ? payload.arguments : {};
+  const required = Array.isArray(tool.inputSchema?.required) ? tool.inputSchema.required : [];
+  if (!required.every((key: string) => Object.prototype.hasOwnProperty.call(args, key))) throw new Error('The approved MCP action is missing a required tool argument.');
+  approval.payload = { ...payload, execution_status: 'processing' };
+  await persistApprovalRecord(approval);
+  const initialized = await mcpRpc(connection, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'Caveworkers', version: '1.0.0' } });
+  const called = await mcpRpc(connection, 'tools/call', { name: tool.name, arguments: args }, initialized.sessionId);
+  const resultValue = called.data?.result;
+  if (called.data?.error) throw new Error(String(called.data.error.message || 'The MCP server returned a protocol error.').slice(0, 500));
+  if (resultValue?.isError === true) throw new Error(summarizeMcpToolResult(resultValue).slice(0, 500));
+  const summary = summarizeMcpToolResult(resultValue).slice(0, 1200);
+  const commitSha = summary.match(/\b[0-9a-f]{40}\b/i)?.[0] || '';
+  const result: Record<string, string> = { employee_id: employeeId, connector_name: connection.name, tool_name: tool.name, summary };
+  if (commitSha) result.commit_sha = commitSha;
+  approval.payload = { ...approval.payload, execution_status: 'succeeded', execution_result: result };
+  approval.executed_at = new Date().toISOString();
+  await persistApprovalRecord(approval);
+  return result;
 }
 
 async function dispatchApprovedEmployeeEmail(approval: ApprovalRecord) {
@@ -2516,14 +2634,16 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
     answer = `### Sarah’s manager update (Task #${taskId})\n\n**Your request:** ${question}\n\n**Delivery lead:** ${lead.name} — ${lead.role}\n\n**Work completed**\n${deliveryTeam.map((employee) => `- **${employee.name}:** ${employee.id === lead.id ? `assessed the primary ${employee.department.toLowerCase()} workstream and prepared the delivery response.` : collaborationFinding(employee, question, contextByEmployeeId.get(employee.id))}`).join('\n')}\n\n**Current result**\nThe request has been routed and recorded, but a production model response is unavailable for this task. I have not represented a simulated draft as completed work.\n\n**Next action**\nConfigure a valid OpenRouter or Gemini production model key, then rerun this task. Any external action will remain approval-gated and will report a verifiable outcome.`;
   }
   const isEmailAction = ['email', 'send email', 'gmail', 'mail '].some((term) => lowerQ.includes(term));
-  const requiresApproval = isEmailAction || ['send', 'commit', 'hire', 'publish', 'recruit', 'payment', 'invoice', 'access', 'delete', 'post', 'write'].some((term) => lowerQ.includes(term));
+  const isGitHubWriteAction = (lowerQ.includes('github') || lowerQ.includes('git repository') || lowerQ.includes('github repo')) && /\b(edit|update|create|write|push|commit|change|modify)\b/.test(lowerQ);
+  const requiresApproval = isEmailAction || isGitHubWriteAction || ['send', 'commit', 'hire', 'publish', 'recruit', 'payment', 'invoice', 'access', 'delete', 'post', 'write'].some((term) => lowerQ.includes(term));
   let execution: TaskRecord['execution'] = { action_type: isEmailAction ? 'gmail.send' : requiresApproval ? 'external.action' : 'none', status: 'not_required', summary: 'No external action was requested.', updated_at: new Date().toISOString() };
   if (requiresApproval) {
     const emailAction = isEmailAction ? await prepareEmployeeEmailAction(companyId, question, taskId, emailEmployeeId || 'sarah') : null;
-    execution = emailAction ? { action_type: 'gmail.send', status: emailAction.status, summary: emailAction.summary, updated_at: new Date().toISOString() } : { action_type: 'external.action', status: 'awaiting_approval', summary: 'The requested external action is prepared and awaiting your approval. No external action has been performed.', updated_at: new Date().toISOString() };
+    const mcpAction = !emailAction && isGitHubWriteAction ? await prepareEmployeeMcpWriteAction(companyId, question, taskId, preferredEmployeeId || lead.id) : null;
+    execution = emailAction ? { action_type: 'gmail.send', status: emailAction.status, summary: emailAction.summary, updated_at: new Date().toISOString() } : mcpAction ? { action_type: 'mcp.tool', status: mcpAction.status, summary: mcpAction.summary, updated_at: new Date().toISOString() } : { action_type: 'external.action', status: 'awaiting_approval', summary: 'The requested external action is prepared and awaiting your approval. No external action has been performed.', updated_at: new Date().toISOString() };
     const approvalId = db.nextApprovalId++;
-    await persistApprovalRecord({ id: approvalId, company_id: companyId, task_id: taskId, employee_id: emailAction?.payload?.employee_id || manager.id, tool_name: isEmailAction ? 'Gmail send' : lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action', action_summary: emailAction?.summary || `${manager.name} requests manager sign-off for: "${question}"`, status: emailAction?.status === 'blocked' ? 'rejected' : 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', action_type: isEmailAction ? 'gmail.send' : 'external.action', manager_id: manager.id, delivery_lead_id: lead.id, collaborators: collaborators.map((employee) => employee.id), ...(emailAction?.payload || {}) } });
-    trace.push({ kind: emailAction?.status === 'blocked' ? 'blocked' : 'approval_required', sender: manager.name, receiver: 'Manager approval queue', body: emailAction?.summary || 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
+    await persistApprovalRecord({ id: approvalId, company_id: companyId, task_id: taskId, employee_id: emailAction?.payload?.employee_id || mcpAction?.payload?.employee_id || manager.id, tool_name: isEmailAction ? 'Gmail send' : mcpAction?.payload?.tool_name || (lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action'), action_summary: emailAction?.summary || mcpAction?.summary || `${manager.name} requests manager sign-off for: "${question}"`, status: emailAction?.status === 'blocked' || mcpAction?.status === 'blocked' ? 'rejected' : 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', action_type: isEmailAction ? 'gmail.send' : mcpAction?.payload?.action_type || 'external.action', manager_id: manager.id, delivery_lead_id: lead.id, collaborators: collaborators.map((employee) => employee.id), ...(emailAction?.payload || {}), ...(mcpAction?.payload || {}) } });
+    trace.push({ kind: emailAction?.status === 'blocked' || mcpAction?.status === 'blocked' ? 'blocked' : 'approval_required', sender: manager.name, receiver: 'Manager approval queue', body: emailAction?.summary || mcpAction?.summary || 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
   }
   trace.push({ kind: 'group_message', sender: manager.name, receiver: 'Manager', body: `I reviewed ${lead.name}’s delivery. ${execution.summary}`, created_at: new Date(Date.now() + 3400).toISOString() });
   trace.push({ kind: 'completed', sender: manager.name, receiver: 'Task ledger', body: requiresApproval ? `Work product completed; execution state: ${execution.status}.` : 'Work product completed with a tenant-scoped audit trace.', created_at: new Date(Date.now() + 3600).toISOString() });
@@ -2538,7 +2658,7 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
 // This is deliberately absent outside the test runtime. It lets regression tests
 // exercise the actual worker completion path without creating an HTTP backdoor.
 export const workforceTestHooks = process.env.NODE_ENV === 'test'
-  ? { handleTaskRoutingAsync, selectCollaborativeTeam, executeEmployeeReadTools, dispatchApprovedEmployeeEmail, resetRateLimits: () => rateLimitBuckets.clear() }
+  ? { handleTaskRoutingAsync, selectCollaborativeTeam, executeEmployeeReadTools, dispatchApprovedEmployeeEmail, dispatchApprovedMcpTool, resetRateLimits: () => rateLimitBuckets.clear() }
   : undefined;
 
 app.post('/api/task', async (req, res) => {
@@ -2631,6 +2751,24 @@ app.post('/api/approvals/:id', async (req, res) => {
       const summary = 'You declined this external action. Sarah kept the work product and did not perform any external change.';
       await recordWorkforceApprovalOutcome(approval, 'cancelled', summary);
       return res.json({ ok: true, approval, execution: { status: 'cancelled', summary } });
+    }
+    if (approval.payload?.action_type === 'mcp.tool') {
+      try {
+        const result = await dispatchApprovedMcpTool(approval);
+        const employeeName = EMPLOYEE_CATALOG.find((employee) => employee.id === approval.payload?.employee_id)?.name || 'The employee';
+        const summary = result?.commit_sha ? `${employeeName} completed the approved MCP write. Commit SHA: ${result.commit_sha}.` : `${employeeName} completed the approved MCP write. The provider returned: ${result?.summary || 'a successful tool result'}`;
+        await persistApprovalRecord(approval);
+        await recordWorkforceApprovalOutcome(approval, 'succeeded', summary, result || undefined);
+        return res.json({ ok: true, approval, execution: { status: 'succeeded', summary, result } });
+      } catch (error: any) {
+        approval.payload = { ...(approval.payload || {}), execution_status: 'failed', execution_error: String(error?.message || 'MCP dispatch failed.').slice(0, 500) };
+        await persistApprovalRecord(approval);
+        const employeeName = EMPLOYEE_CATALOG.find((employee) => employee.id === approval.payload?.employee_id)?.name || 'The employee';
+        const summary = `${employeeName} could not execute the approved MCP action. ${String(error?.message || 'MCP dispatch failed.').slice(0, 500)} No external change has been confirmed.`;
+        reportOperationalFailure('workforce.mcp_dispatch', error, { tenant_hash: anonymizeIdentifier(companyId), approval_id: approval.id, task_id: approval.task_id, tool_name: String(approval.payload?.tool_name || '') });
+        await recordWorkforceApprovalOutcome(approval, 'failed', summary);
+        return res.status(502).json({ error: summary, approval, execution: { status: 'failed', summary } });
+      }
     }
     if (approval.payload?.action_type === 'gmail.send') {
       try {
