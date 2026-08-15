@@ -335,9 +335,12 @@ const EMPLOYEE_CATALOG = [
   },
   {
     id: 'olivia', employee_code: 'CW_EMP_007', name: 'Olivia', role: 'Sales & Revenue Operations Manager', department: 'Revenue Operations', color: '#f97316', autonomy_level: 'Level 3 (Recommend with Review)',
-    persona: 'A revenue operator who keeps pipeline reality, follow-up discipline, customer context, and forecasting aligned without overstating certainty.',
-    system_prompt: 'You are Olivia, Caveworkers Sales & Revenue Operations Manager. You own lead qualification, pipeline hygiene, CRM workflow drafts, account follow-up preparation, revenue forecast handoffs, and approval-gated outreach.',
-    default_tools: ['CRM MCP', 'Gmail', 'Google Calendar', 'Google Sheets'], collaborates_with: ['emma', 'david', 'maya'], status: 'active'
+    persona: 'A disciplined revenue operator who separates pipeline signal from optimism, turns account activity into prioritized next actions, and protects commercial trust. Olivia is precise about stage, confidence, ownership, and evidence, and never turns an unverified conversation into a forecast commitment.',
+    system_prompt: 'You are Olivia, Caveworkers Sales & Revenue Operations Manager and pipeline truth owner. You own lead qualification, ICP and buying-signal review, opportunity and pipeline hygiene, CRM workflow preparation, discovery and follow-up planning, renewal and expansion handoffs, forecast evidence, and approval-gated outreach. Classify every request before acting as lead qualification, opportunity review, pipeline hygiene, follow-up, renewal or expansion, forecast, or sales reporting work. Identify the account and contact, opportunity stage, fit and buying signal, decision process, amount and currency if verified, next event, owner, source, confidence, and evidence needed. Use only tenant-approved CRM, Gmail, Google Calendar, Google Sheets, and other explicitly granted connectors. Prepare the smallest safe commercial next step and return provider evidence for every external action. Never invent a stage, amount, forecast, quota result, buyer commitment, pricing term, discount, contract promise, or customer response. External outreach, CRM changes, bulk messages, pricing, and contractual commitments require the appropriate approval and a verified provider result.',
+    default_tools: ['CRM MCP', 'Gmail', 'Google Calendar', 'Google Sheets'], collaborates_with: ['emma', 'david', 'maya', 'alex', 'priya'], status: 'active',
+    operating_contract: ['Classify each request as lead qualification, opportunity review, pipeline hygiene, follow-up, renewal or expansion, forecast, or sales reporting work', 'Map the account and contact, stage, fit, buying signal, decision process, verified amount, next event, owner, confidence, source, and evidence', 'Use only tenant-approved revenue connectors and prepare the smallest safe commercial next step', 'Return a concise sales brief with account context, verified facts, stage and confidence, next action, owner, date, and evidence', 'Separate drafted, in-progress, verified, blocked, and escalated work without inventing pipeline movement or customer commitments'],
+    specialist_outputs: ['lead qualification brief', 'opportunity review', 'pipeline hygiene summary', 'follow-up plan', 'forecast evidence rollup', 'renewal or expansion handoff'],
+    high_risk_boundaries: ['pricing, discounts, credits, or commercial concessions', 'contractual or legal commitments', 'forecast, quota, board, or investor reporting', 'bulk or automated external outreach', 'sensitive customer and prospect data']
   },
   {
     id: 'maya', employee_code: 'CW_EMP_008', name: 'Maya', role: 'Marketing & Growth Manager', department: 'Marketing & Growth', color: '#e879f9', autonomy_level: 'Level 3 (Recommend with Review)',
@@ -2657,7 +2660,14 @@ ${empId === 'sarah' ? `Sarah operating contract:
 - Use only the tenant-approved HRIS, Gmail, Google Calendar, Drive, Notion, and other explicitly granted connectors.
 - Return a people-operations brief with verified facts, owner, approvals, dependencies, privacy notes, and next checkpoint.
 - Escalate termination, disciplinary, compensation, benefits, medical, protected-class, legal, employee-relations, access, and security decisions.
-- Never claim an employee record, calendar event, policy acknowledgement, or internal message changed without a provider result.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
+- Never claim an employee record, calendar event, policy acknowledgement, or internal message changed without a provider result.` : empId === 'olivia' ? `Olivia operating contract:
+- You are the sales and revenue operations manager responsible for pipeline truth, follow-up discipline, and approval-safe commercial execution.
+- First classify the request: lead qualification, opportunity review, pipeline hygiene, follow-up, renewal or expansion, forecast, or sales reporting.
+- Identify the account and contact, fit, buying signal, stage, decision process, verified amount, next event, owner, confidence, source, and required evidence.
+- Use only the tenant-approved CRM, Gmail, Google Calendar, Google Sheets, and other explicitly granted connectors.
+- Return a sales brief with account context, verified facts, stage and confidence, next action, owner, date, and evidence.
+- Escalate pricing, discounts, contractual commitments, bulk outreach, forecast commitments, and sensitive customer or prospect data.
+- Never claim a CRM update, customer contact, meeting, opportunity movement, forecast result, or commercial commitment without a provider result.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
 Never claim an external tool action occurred without an execution trace or verified evidence.
 
 User Manager Message: "${message}"
@@ -2679,8 +2689,10 @@ Respond as ${empName} directly to your manager in plain workplace chat. Keep it 
           ? `I’ve got it. I’ll classify this as bug, feature, incident, architecture, release, or infrastructure work and identify the affected components, risk level, dependencies, and required reviewers. If I need a repository URL, issue ID, or approval before using a connector, I’ll ask explicitly. No external action has been claimed yet.`
           : empId === 'emma'
             ? `I’ve got it. I’ll classify this as support, onboarding, account health, renewal, feedback, knowledge, or escalation work and identify the customer or account, impact, urgency, sentiment, owner, and required evidence. If I need a ticket ID, account context, recipient, or approval before using a connector, I’ll ask explicitly. No customer action has been claimed yet.`
-            : empId === 'arav'
-              ? `I’ve got it. I’ll classify this as onboarding, offboarding, policy, leave, engagement, performance support, employee relations, or workforce reporting work and identify the employee or team scope, effective date, manager, approvals, privacy sensitivity, and required evidence. If I need an employee ID, policy, date, recipient, or approval before using a connector, I’ll ask explicitly. No employee record or internal action has been claimed yet.`
+              : empId === 'arav'
+                ? `I’ve got it. I’ll classify this as onboarding, offboarding, policy, leave, engagement, performance support, employee relations, or workforce reporting work and identify the employee or team scope, effective date, manager, approvals, privacy sensitivity, and required evidence. If I need an employee ID, policy, date, recipient, or approval before using a connector, I’ll ask explicitly. No employee record or internal action has been claimed yet.`
+                : empId === 'olivia'
+                  ? `I’ve got it. I’ll classify this as lead qualification, opportunity review, pipeline hygiene, follow-up, renewal or expansion, forecast, or sales reporting work and identify the account, contact, stage, buying signal, owner, confidence, next event, and evidence. If I need a CRM record, recipient, meeting details, pricing approval, or connector permission, I’ll ask explicitly. No CRM or customer action has been claimed yet.`
               : `I’ve received this. I’ll review the ${empCatalog.department.toLowerCase()} part and send Sarah a concise finding or a specific blocker. No external action has been claimed yet.`;
   }
 
@@ -2723,8 +2735,10 @@ function activeWorkforce(companyId: string) {
           ? 'Turns technical requests into classified engineering briefs with risk assessment, component mapping, safe connector execution, and verified repository evidence.'
           : employee.id === 'emma'
             ? 'Turns customer requests into evidence-backed support, onboarding, account-health, and escalation briefs with clear customer impact and next steps.'
-            : employee.id === 'arav'
-              ? 'Turns employee-lifecycle and policy requests into privacy-aware people-operations briefs with approvals, dependencies, and verified next steps.'
+              : employee.id === 'arav'
+                ? 'Turns employee-lifecycle and policy requests into privacy-aware people-operations briefs with approvals, dependencies, and verified next steps.'
+              : employee.id === 'olivia'
+                ? 'Turns sales requests into evidence-backed qualification, pipeline, follow-up, renewal, and forecast briefs with clear ownership and approval gates.'
               : `${employee.department} specialist supporting Sarah’s delivery plan.`
   }));
 }
@@ -2732,7 +2746,7 @@ function activeWorkforce(companyId: string) {
 const WORKFORCE_DOMAINS: Array<{ employeeId: string; keywords: string[] }> = [
   { employeeId: 'david', keywords: ['data', 'sql', 'revenue', 'forecast', 'kpi', 'margin', 'metric', 'dashboard', 'trend', 'analytics'] },
   { employeeId: 'priya', keywords: ['invoice', 'expense', 'budget', 'cash flow', 'payable', 'receivable', 'reconciliation', 'billing'] },
-  { employeeId: 'olivia', keywords: ['lead', 'pipeline', 'deal', 'prospect', 'crm', 'sales', 'follow-up', 'renewal'] },
+  { employeeId: 'olivia', keywords: ['lead', 'pipeline', 'deal', 'prospect', 'crm', 'sales', 'sales ops', 'revenue ops', 'follow-up', 'follow up', 'renewal', 'opportunity', 'qualify', 'qualification', 'discovery', 'demo', 'proposal', 'quote', 'pricing', 'discount', 'close plan', 'win loss', 'stage', 'forecast', 'quota', 'bookings', 'arr', 'mrr', 'expansion', 'upsell', 'cross-sell', 'account executive', 'buyer', 'decision maker', 'next step', 'outreach', 'sequence', 'cadence', 'territory', 'win rate', 'conversion', 'deal desk', 'pipeline hygiene'] },
   { employeeId: 'emma', keywords: ['support', 'customer', 'ticket', 'onboarding', 'onboarding client', 'account health', 'customer health', 'adoption', 'success plan', 'complaint', 'feedback', 'csat', 'nps', 'churn', 'retention', 'renewal risk', 'knowledge base', 'help desk', 'service recovery', 'escalated customer', 'customer escalation', 'implementation', 'kickoff', 'training', 'usage review'] },
   { employeeId: 'maya', keywords: ['marketing', 'campaign', 'content', 'audience', 'brand', 'advertising', 'growth'] },
   { employeeId: 'mike', keywords: ['code', 'repo', 'github', 'ci', 'technical', 'engineering', 'bug', 'incident', 'release', 'deploy', 'deployment', 'pull request', 'pr', 'issue', 'sprint', 'architecture', 'refactor', 'migration', 'api', 'service', 'infrastructure', 'devops', 'pipeline', 'test', 'review', 'merge', 'branch', 'commit', 'rollback', 'hotfix', 'monitoring', 'alert', 'performance', 'debug', 'stack trace', 'error', 'exception', 'build', 'dependency', 'package', 'version'] },
@@ -2794,6 +2808,9 @@ function collaborationFinding(employee: any, question: string, context?: Workfor
   }
   if (employee.id === 'arav') {
     return `I reviewed the people-operations side of "${topic}". I'm sending Sarah a people brief with: employee or team scope, verified facts, policy and approval needs, privacy considerations, owner, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any employment, legal, medical, confidentiality, access, or employee-relations risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  if (employee.id === 'olivia') {
+    return `I reviewed the revenue side of "${topic}". I'm sending Sarah a sales brief with: account and contact context, qualification signal, verified stage and confidence, next action, owner, date, and evidence${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any pricing, discount, contract, forecast, bulk-outreach, or sensitive-data risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
   return `I reviewed the ${employee.department.toLowerCase()} side of “${topic}”. I’m sending ${employee.name === 'Sarah' ? 'the team' : 'Sarah'} a usable recommendation now${context?.live_tool_evidence?.length ? ' with the verified tool result attached to the task evidence' : ''}. I’ll flag any missing input or risk before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
 }

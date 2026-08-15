@@ -291,6 +291,29 @@ describe('Caveworkers security invariants', () => {
     expect(arav.system_prompt).toBeUndefined();
   });
 
+  it('routes sales and pipeline work to Olivia and exposes only safe specialist metadata', async () => {
+    db.orgEmployees.set('company-a', [
+      { id: 'olivia', name: 'Olivia', role: 'Sales & Revenue Operations Manager', department: 'Revenue Operations', status: 'active', tools: ['CRM MCP', 'Gmail', 'Google Calendar', 'Google Sheets'], permissions: [] },
+      { id: 'sarah', name: 'Sarah', role: 'Talent & HR Manager', department: 'People Operations', status: 'active', tools: [], permissions: [] }
+    ]);
+
+    const result = await workforceTestHooks!.handleTaskRoutingAsync('Qualify the Acme prospect, review the opportunity stage and buying signal, update the CRM pipeline, and prepare an approval-gated follow-up email for the demo', 'company-a');
+    expect(result.participants).toEqual(expect.arrayContaining(['Manager', 'Sarah', 'Olivia']));
+    expect(result.plan).toContain('Olivia');
+
+    const workforceResponse = await request(app)
+      .get('/api/workforce/workroom')
+      .set('x-caveworkers-test-user', 'user-a')
+      .expect(200);
+    const olivia = workforceResponse.body.employees.find((employee: any) => employee.id === 'olivia');
+    expect(olivia).toMatchObject({
+      id: 'olivia',
+      capability_summary: expect.stringContaining('evidence-backed qualification'),
+      avatar_url: '/static/assets/employee-avatars/olivia.webp'
+    });
+    expect(olivia.system_prompt).toBeUndefined();
+  });
+
   it('truthfully blocks Sarah email delivery until a tenant Gmail send capability is connected', async () => {
     const result = await workforceTestHooks!.handleTaskRoutingAsync('Send an email to ops@example.com confirming the weekly handoff', 'company-a', 'alex');
     expect(result).toMatchObject({ company_id: 'company-a', owner: 'sarah', status: 'blocked' });
