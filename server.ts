@@ -344,9 +344,12 @@ const EMPLOYEE_CATALOG = [
   },
   {
     id: 'maya', employee_code: 'CW_EMP_008', name: 'Maya', role: 'Marketing & Growth Manager', department: 'Marketing & Growth', color: '#e879f9', autonomy_level: 'Level 3 (Recommend with Review)',
-    persona: 'A commercially minded growth leader who converts audience insight and performance signals into cohesive, reviewable campaigns.',
-    system_prompt: 'You are Maya, Caveworkers Marketing & Growth Manager. You own campaign briefs, content calendars, audience research, performance synthesis, lifecycle draft work, and approval-gated publishing plans.',
-    default_tools: ['Analytics MCP', 'Ads MCP', 'CRM MCP', 'Google Sheets', 'Content / social MCP'], collaborates_with: ['olivia', 'david', 'emma'], status: 'active'
+    persona: 'A commercially minded growth leader who connects positioning, audience insight, creative execution, channel discipline, and measurable experiments. Maya protects brand trust by separating hypotheses from evidence and treating public publishing and paid spend as reviewable actions.',
+    system_prompt: 'You are Maya, Caveworkers Marketing & Growth Manager and demand-generation operator. You own campaign strategy, audience and positioning research, content calendars, lifecycle draft work, paid and organic channel planning, growth experiments, funnel measurement, performance synthesis, and approval-gated publishing plans. Classify every request before acting as campaign planning, audience or positioning, content, lifecycle, paid acquisition, performance review, growth experiment, or publishing work. Identify the business goal, audience, funnel stage, offer, channel, budget if supplied, asset requirements, success metric, attribution window, approval owner, and evidence needed. Use only tenant-approved Analytics, Ads, CRM, Google Sheets, Content/Social, and other explicitly granted connectors. Prepare the smallest safe marketing next step and return provider evidence for every external action. Never invent audience size, reach, impressions, spend, conversion, attribution, experiment result, customer quote, product claim, or published status. Public publishing, paid spend, bulk outbound campaigns, regulated or comparative claims, sensitive audience targeting, and customer-data exports require the appropriate approval and a verified provider result.',
+    default_tools: ['Analytics MCP', 'Ads MCP', 'CRM MCP', 'Google Sheets', 'Content / social MCP'], collaborates_with: ['olivia', 'david', 'emma', 'alex', 'mike'], status: 'active',
+    operating_contract: ['Classify each request as campaign planning, audience or positioning, content, lifecycle, paid acquisition, performance review, growth experiment, or publishing work', 'Map the goal, audience, funnel stage, offer, channel, budget, asset needs, success metric, attribution window, approver, and evidence', 'Use only tenant-approved marketing connectors and prepare the smallest safe experiment or campaign step', 'Return a concise marketing brief with strategy, audience, message, channel, metric, owner, approval gate, and next checkpoint', 'Separate hypothesis, draft, scheduled, verified, blocked, and escalated work without inventing performance or publishing outcomes'],
+    specialist_outputs: ['campaign brief', 'audience and positioning brief', 'content calendar', 'growth experiment plan', 'performance readout', 'lifecycle nurture plan'],
+    high_risk_boundaries: ['paid media spend or budget changes', 'public publishing or brand-affecting changes', 'regulated, comparative, or unsupported product claims', 'targeting based on sensitive attributes', 'customer-data exports and bulk external outreach']
   },
   {
     id: 'priya', employee_code: 'CW_EMP_009', name: 'Priya', role: 'Finance Operations Manager', department: 'Finance Operations', color: '#14b8a6', autonomy_level: 'Level 3 (Recommend with Review)',
@@ -2667,7 +2670,14 @@ ${empId === 'sarah' ? `Sarah operating contract:
 - Use only the tenant-approved CRM, Gmail, Google Calendar, Google Sheets, and other explicitly granted connectors.
 - Return a sales brief with account context, verified facts, stage and confidence, next action, owner, date, and evidence.
 - Escalate pricing, discounts, contractual commitments, bulk outreach, forecast commitments, and sensitive customer or prospect data.
-- Never claim a CRM update, customer contact, meeting, opportunity movement, forecast result, or commercial commitment without a provider result.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
+- Never claim a CRM update, customer contact, meeting, opportunity movement, forecast result, or commercial commitment without a provider result.` : empId === 'maya' ? `Maya operating contract:
+- You are the marketing and growth manager responsible for measurable demand generation, clear positioning, and brand-safe execution.
+- First classify the request: campaign planning, audience or positioning, content, lifecycle, paid acquisition, performance review, growth experiment, or publishing.
+- Identify the goal, audience, funnel stage, offer, channel, budget, asset needs, success metric, attribution window, approver, and required evidence.
+- Use only the tenant-approved Analytics, Ads, CRM, Google Sheets, Content/Social, and other explicitly granted connectors.
+- Return a marketing brief with strategy, audience, message, channel, metric, owner, approval gate, and next checkpoint.
+- Escalate paid spend, public publishing, regulated or comparative claims, sensitive targeting, customer-data exports, and bulk outreach.
+- Never claim a campaign was published, an ad was launched, spend occurred, or performance changed without a provider result.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
 Never claim an external tool action occurred without an execution trace or verified evidence.
 
 User Manager Message: "${message}"
@@ -2693,6 +2703,8 @@ Respond as ${empName} directly to your manager in plain workplace chat. Keep it 
                 ? `I’ve got it. I’ll classify this as onboarding, offboarding, policy, leave, engagement, performance support, employee relations, or workforce reporting work and identify the employee or team scope, effective date, manager, approvals, privacy sensitivity, and required evidence. If I need an employee ID, policy, date, recipient, or approval before using a connector, I’ll ask explicitly. No employee record or internal action has been claimed yet.`
                 : empId === 'olivia'
                   ? `I’ve got it. I’ll classify this as lead qualification, opportunity review, pipeline hygiene, follow-up, renewal or expansion, forecast, or sales reporting work and identify the account, contact, stage, buying signal, owner, confidence, next event, and evidence. If I need a CRM record, recipient, meeting details, pricing approval, or connector permission, I’ll ask explicitly. No CRM or customer action has been claimed yet.`
+                  : empId === 'maya'
+                    ? `I’ve got it. I’ll classify this as campaign planning, audience or positioning, content, lifecycle, paid acquisition, performance review, growth experiment, or publishing work and identify the goal, audience, funnel stage, offer, channel, metric, owner, approval gate, and evidence. If I need an analytics view, ad account, content asset, budget, or publishing approval, I’ll ask explicitly. No campaign or public action has been claimed yet.`
               : `I’ve received this. I’ll review the ${empCatalog.department.toLowerCase()} part and send Sarah a concise finding or a specific blocker. No external action has been claimed yet.`;
   }
 
@@ -2739,6 +2751,8 @@ function activeWorkforce(companyId: string) {
                 ? 'Turns employee-lifecycle and policy requests into privacy-aware people-operations briefs with approvals, dependencies, and verified next steps.'
               : employee.id === 'olivia'
                 ? 'Turns sales requests into evidence-backed qualification, pipeline, follow-up, renewal, and forecast briefs with clear ownership and approval gates.'
+              : employee.id === 'maya'
+                ? 'Turns growth requests into evidence-backed campaign, audience, content, experiment, and performance briefs with clear metrics and publishing approvals.'
               : `${employee.department} specialist supporting Sarah’s delivery plan.`
   }));
 }
@@ -2748,7 +2762,7 @@ const WORKFORCE_DOMAINS: Array<{ employeeId: string; keywords: string[] }> = [
   { employeeId: 'priya', keywords: ['invoice', 'expense', 'budget', 'cash flow', 'payable', 'receivable', 'reconciliation', 'billing'] },
   { employeeId: 'olivia', keywords: ['lead', 'pipeline', 'deal', 'prospect', 'crm', 'sales', 'sales ops', 'revenue ops', 'follow-up', 'follow up', 'renewal', 'opportunity', 'qualify', 'qualification', 'discovery', 'demo', 'proposal', 'quote', 'pricing', 'discount', 'close plan', 'win loss', 'stage', 'forecast', 'quota', 'bookings', 'arr', 'mrr', 'expansion', 'upsell', 'cross-sell', 'account executive', 'buyer', 'decision maker', 'next step', 'outreach', 'sequence', 'cadence', 'territory', 'win rate', 'conversion', 'deal desk', 'pipeline hygiene'] },
   { employeeId: 'emma', keywords: ['support', 'customer', 'ticket', 'onboarding', 'onboarding client', 'account health', 'customer health', 'adoption', 'success plan', 'complaint', 'feedback', 'csat', 'nps', 'churn', 'retention', 'renewal risk', 'knowledge base', 'help desk', 'service recovery', 'escalated customer', 'customer escalation', 'implementation', 'kickoff', 'training', 'usage review'] },
-  { employeeId: 'maya', keywords: ['marketing', 'campaign', 'content', 'audience', 'brand', 'advertising', 'growth'] },
+  { employeeId: 'maya', keywords: ['marketing', 'campaign', 'content', 'audience', 'brand', 'advertising', 'growth', 'demand gen', 'demand generation', 'acquisition', 'conversion', 'funnel', 'landing page', 'seo', 'search', 'social', 'organic', 'paid media', 'ad', 'ads', 'creative', 'copy', 'messaging', 'positioning', 'launch', 'webinar', 'event', 'newsletter', 'email marketing', 'lifecycle', 'nurture', 'experiment', 'a/b test', 'ab test', 'attribution', 'performance marketing', 'impressions', 'click-through', 'ctr', 'cpc', 'cpa', 'roas', 'reach', 'engagement rate', 'segment', 'persona', 'ideal customer profile', 'icp', 'editorial', 'calendar', 'blog', 'video', 'podcast', 'distribution', 'promotion', 'campaign budget', 'media plan', 'go to market', 'gtm'] },
   { employeeId: 'mike', keywords: ['code', 'repo', 'github', 'ci', 'technical', 'engineering', 'bug', 'incident', 'release', 'deploy', 'deployment', 'pull request', 'pr', 'issue', 'sprint', 'architecture', 'refactor', 'migration', 'api', 'service', 'infrastructure', 'devops', 'pipeline', 'test', 'review', 'merge', 'branch', 'commit', 'rollback', 'hotfix', 'monitoring', 'alert', 'performance', 'debug', 'stack trace', 'error', 'exception', 'build', 'dependency', 'package', 'version'] },
   { employeeId: 'iris', keywords: ['security', 'access', 'identity', 'compliance', 'it ', 'device', 'vulnerability', 'risk review'] },
   { employeeId: 'sarah', keywords: ['hire', 'recruit', 'candidate', 'interview', 'job description', 'talent', 'staffing'] },
@@ -2811,6 +2825,9 @@ function collaborationFinding(employee: any, question: string, context?: Workfor
   }
   if (employee.id === 'olivia') {
     return `I reviewed the revenue side of "${topic}". I'm sending Sarah a sales brief with: account and contact context, qualification signal, verified stage and confidence, next action, owner, date, and evidence${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any pricing, discount, contract, forecast, bulk-outreach, or sensitive-data risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  if (employee.id === 'maya') {
+    return `I reviewed the growth side of "${topic}". I'm sending Sarah a marketing brief with: goal, audience, funnel stage, message, channel, success metric, owner, approval gate, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any spend, publishing, claim, targeting, data-export, or bulk-outreach risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
   return `I reviewed the ${employee.department.toLowerCase()} side of “${topic}”. I’m sending ${employee.name === 'Sarah' ? 'the team' : 'Sarah'} a usable recommendation now${context?.live_tool_evidence?.length ? ' with the verified tool result attached to the task evidence' : ''}. I’ll flag any missing input or risk before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
 }

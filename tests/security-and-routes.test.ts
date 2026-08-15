@@ -314,6 +314,29 @@ describe('Caveworkers security invariants', () => {
     expect(olivia.system_prompt).toBeUndefined();
   });
 
+  it('routes marketing and growth work to Maya and exposes only safe specialist metadata', async () => {
+    db.orgEmployees.set('company-a', [
+      { id: 'maya', name: 'Maya', role: 'Marketing & Growth Manager', department: 'Marketing & Growth', status: 'active', tools: ['Analytics MCP', 'Ads MCP', 'CRM MCP', 'Google Sheets', 'Content / social MCP'], permissions: [] },
+      { id: 'sarah', name: 'Sarah', role: 'Talent & HR Manager', department: 'People Operations', status: 'active', tools: [], permissions: [] }
+    ]);
+
+    const result = await workforceTestHooks!.handleTaskRoutingAsync('Plan a demand-generation campaign for Indian SMBs with audience positioning, a content calendar, a landing page, paid ads, and a measurable A/B test', 'company-a');
+    expect(result.participants).toEqual(expect.arrayContaining(['Manager', 'Sarah', 'Maya']));
+    expect(result.plan).toContain('Maya');
+
+    const workforceResponse = await request(app)
+      .get('/api/workforce/workroom')
+      .set('x-caveworkers-test-user', 'user-a')
+      .expect(200);
+    const maya = workforceResponse.body.employees.find((employee: any) => employee.id === 'maya');
+    expect(maya).toMatchObject({
+      id: 'maya',
+      capability_summary: expect.stringContaining('evidence-backed campaign'),
+      avatar_url: '/static/assets/employee-avatars/maya.webp'
+    });
+    expect(maya.system_prompt).toBeUndefined();
+  });
+
   it('truthfully blocks Sarah email delivery until a tenant Gmail send capability is connected', async () => {
     const result = await workforceTestHooks!.handleTaskRoutingAsync('Send an email to ops@example.com confirming the weekly handoff', 'company-a', 'alex');
     expect(result).toMatchObject({ company_id: 'company-a', owner: 'sarah', status: 'blocked' });
