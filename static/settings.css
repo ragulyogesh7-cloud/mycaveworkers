@@ -263,3 +263,66 @@
 .tool-access-actions em { color: #91f5c8; font: 700 10px/1 var(--mono, 'DM Mono', monospace); text-transform: uppercase; letter-spacing: .05em; }
 @media (max-width: 720px) { .agent-policy-row { grid-template-columns: 1fr; } .agent-connector-card .connection-actions { align-items: stretch; } .connector-autonomy { min-width: 0; } }
 @media (prefers-reduced-motion: reduce) { .agent-card::after { display: none; } }
+
+
+/* Employee portrait system: shared with the Company Room, never initials-only by default. */
+.employee-profile {
+  --employee-color: #7ee8ff;
+  position: relative;
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  width: 48px;
+  height: 48px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--employee-color) 70%, white 10%);
+  border-radius: 16px;
+  background: linear-gradient(145deg, color-mix(in srgb, var(--employee-color) 36%, #101923), #0a111a 76%);
+  box-shadow: 0 10px 24px color-mix(in srgb, var(--employee-color) 17%, transparent), inset 0 1px 0 rgba(255,255,255,.16);
+}
+.employee-profile::after {
+  content: '';
+  position: absolute;
+  inset: 6px;
+  border: 1px solid rgba(255,255,255,.12);
+  border-radius: 12px;
+  pointer-events: none;
+}
+.employee-profile img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  object-position: center;
+}
+.employee-profile .profile-initials {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: #f4fbff;
+  font-size: .82rem;
+  font-weight: 800;
+  letter-spacing: .08em;
+}
+.employee-profile .profile-initials[hidden] { display: none; }
+.settings-employee-dp { width: 56px; height: 56px; border-radius: 18px; }
+.catalog-employee-dp { width: 44px; height: 44px; border-radius: 14px; }
+.connection-owner-dp { width: 34px; height: 34px; border-radius: 11px; }
+.employee-settings-top .employee-profile { margin-right: 2px; }
+.catalog-card .employee-profile { margin-top: 1px; }
+.connection-owner { display: inline-flex; align-items: center; gap: 9px; }
+@media (max-width: 720px) {
+  .settings-employee-dp { width: 48px; height: 48px; }
+  .employee-profile::after { inset: 5px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .employee-profile { transition: none !important; }
+}
+
+/* Override legacy initials-only selectors for the portrait rollout. */
+.employee-settings-card .employee-settings-top .employee-profile { width: 56px; height: 56px; }
+.employee-catalog .catalog-card { grid-template-columns: 44px minmax(0, 1fr) auto; }
+.catalog-card .employee-profile { width: 44px; height: 44px; }
+.connection-owner .connection-owner-dp { width: 34px; height: 34px; flex: 0 0 34px; border-radius: 11px; background: transparent; }
+.connection-owner .connection-owner-dp .profile-initials { color: #f4fbff; }

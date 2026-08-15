@@ -2613,11 +2613,17 @@ Department: ${empCatalog.department}
 Autonomy Level: ${empCatalog.autonomy_level || 'Level 3'}
 Attached Tools: ${empCatalog.default_tools.join(', ')}
 Active teammate context: ${(db.orgEmployees.get(companyId) || []).filter((entry) => entry.id !== empId).map((entry) => `${entry.name} (${entry.role})`).join(', ') || 'No other activated teammates'}
-Collaboration rule: keep the manager accountable, mention a specialist handoff only when it is useful, and never claim an external tool action occurred without an approval-backed trace.
+${empId === 'sarah' ? `Sarah operating contract:
+- You are the workforce manager and the single point of accountability for the client.
+- First understand the requested outcome and identify missing inputs before any tool call.
+- Delegate to one clear specialist when domain expertise is needed, and explain the handoff in one sentence.
+- Report only what is verified. If work is blocked, say exactly what is missing and ask one precise question.
+- Use short workplace messages: answer, progress, blocker, or next action. Never write a report, checklist, fake attachment, or invented delivery confirmation.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
+Never claim an external tool action occurred without an execution trace or verified evidence.
 
 User Manager Message: "${message}"
 
-Respond as ${empName} directly to your manager in a helpful, concise, professional tone.`
+Respond as ${empName} directly to your manager in plain workplace chat. Keep it under 90 words unless detail is requested.`
       });
       botAnswer = response.text || '';
     } catch (err) {
@@ -2626,7 +2632,9 @@ Respond as ${empName} directly to your manager in a helpful, concise, profession
   }
 
   if (!botAnswer) {
-    botAnswer = `Understood! I'm ${empName} (${empCatalog.role}). I have processed your instruction: "${message}". I will coordinate with workspace tools (${empCatalog.default_tools.join(', ')}) and log the handoff.`;
+    botAnswer = empId === 'sarah'
+      ? `I’ve got it. I’m taking ownership of “${message}” and will route the right part to the team. If I need a file, recipient, or approval before acting, I’ll ask for that explicitly. No external action has been claimed yet.`
+      : `I’ve received this. I’ll review the ${empCatalog.department.toLowerCase()} part and send Sarah a concise finding or a specific blocker. No external action has been claimed yet.`;
   }
 
   const botMsg = { sender: empId, receiver: 'manager', body: botAnswer, created_at: new Date().toISOString() };
@@ -2649,7 +2657,11 @@ Respond as ${empName} directly to your manager in a helpful, concise, profession
 function activeWorkforce(companyId: string) {
   const activeIds = (db.orgEmployees.get(companyId) || []).map((employee) => employee.id);
   const workforce = activeIds.length ? EMPLOYEE_CATALOG.filter((employee) => activeIds.includes(employee.id)) : EMPLOYEE_CATALOG;
-  return workforce.length ? workforce : EMPLOYEE_CATALOG;
+  return (workforce.length ? workforce : EMPLOYEE_CATALOG).map((employee) => ({
+    ...employee,
+    avatar_url: `/static/assets/employee-avatars/${employee.id}.webp`,
+    capability_summary: employee.id === 'sarah' ? 'Owns intake, delegation, progress updates, approvals, and the final client handoff.' : `${employee.department} specialist supporting Sarah’s delivery plan.`
+  }));
 }
 
 const WORKFORCE_DOMAINS: Array<{ employeeId: string; keywords: string[] }> = [
@@ -2705,7 +2717,8 @@ function collaborationFinding(employee: any, question: string, context?: Workfor
   const connectorNote = context?.connectors?.length ? ` Connected tenant tools considered: ${context.connectors.join(', ')}.` : '';
   const memoryNote = context?.memory?.length ? ` Applied role memory: ${context.memory[0].slice(0, 180)}.` : '';
   const evidenceNote = context?.live_tool_evidence?.length ? ` Live MCP evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} (${entry.status}) — ${entry.summary.slice(0, 260)}`).join(' | ')}` : '';
-  return `${employee.name} reviewed the ${employee.department.toLowerCase()} implications of “${topic}” and returned a permissioned recommendation for the lead’s decision brief.${toolNote}${connectorNote}${memoryNote}${evidenceNote}`;
+  const evidence = context?.live_tool_evidence?.length ? ` Evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} is ${entry.status} — ${entry.summary.slice(0, 180)}`).join('; ')}` : '';
+  return `I reviewed the ${employee.department.toLowerCase()} side of “${topic}”. I’m sending ${employee.name === 'Sarah' ? 'the team' : 'Sarah'} a usable recommendation now${context?.live_tool_evidence?.length ? ' with the verified tool result attached to the task evidence' : ''}. I’ll flag any missing input or risk before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
 }
 
 async function handleTaskRoutingAsync(question: string, companyId: string, preferredEmployeeId?: string, existingTaskId?: number, emailEmployeeId?: string) {
@@ -2742,10 +2755,14 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   });
   const teamBrief = `Public research evidence:\n${webText}\n\n` + specialistContexts.map((context) => `${context.employee.name}: ${context.employee.role} — ${context.employee.persona}\nGranted tools: ${context.tools.join(', ') || 'none'}\nConnected tenant tools: ${context.connectors.join(', ') || 'none'}\nRole memory: ${context.memory.join(' | ') || 'none'}\nLive MCP evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} [${entry.status}] ${entry.summary.slice(0, 900)}`).join(' | ') || 'none'}`).join('\n\n');
   const deliveryTeam = [lead, ...collaborators].filter((employee, index, list) => list.findIndex((entry) => entry.id === employee.id) === index);
-  const narrative = await generateWorkforceNarrative(`Manager: ${manager.name} (${manager.role})\nDelivery lead: ${lead.name} (${lead.role})\nTask: "${question}"\n\nActive specialist evidence:\n${teamBrief}\n\nWorkspace knowledge:\n${knowText}\n\nWrite the direct final response to the manager. Start with the requested answer or a precise blocker. Then give a short "Work completed" list and a clear "Next action". Name the delivery lead and contributors. Do not claim that an email, write, payment, publication, access change, or other external action happened unless the execution evidence explicitly confirms it.`, companyId);
+  const narrative = await generateWorkforceNarrative(`Manager: ${manager.name} (${manager.role})\nDelivery lead: ${lead.name} (${lead.role})\nTask: "${question}"\n\nActive specialist evidence:\n${teamBrief}\n\nWorkspace knowledge:\n${knowText}\n\nWrite a concise workplace chat update for the manager. Use plain language and short paragraphs, not a report, checklist, Markdown headings, or a long preamble. Start with either the answer, a single precise question if required information is missing, or a single clear blocker. Then state what the team did, what is actually verified, and the next action. Mention the delivery lead and contributors naturally. Never invent an attachment, file, message body, link, recipient, tool call, or completed external action. Do not claim that an email, write, payment, publication, access change, or other external action happened unless execution evidence explicitly confirms it. Keep the update under 120 words unless the user asks for detail.`, companyId);
   let answer = narrative.text;
   if (!answer) {
-    answer = `### Sarah’s manager update (Task #${taskId})\n\n**Your request:** ${question}\n\n**Delivery lead:** ${lead.name} — ${lead.role}\n\n**Work completed**\n${deliveryTeam.map((employee) => `- **${employee.name}:** ${employee.id === lead.id ? `assessed the primary ${employee.department.toLowerCase()} workstream and prepared the delivery response.` : collaborationFinding(employee, question, contextByEmployeeId.get(employee.id))}`).join('\n')}\n\n**Current result**\nThe request has been routed and recorded, but a production model response is unavailable for this task. I have not represented a simulated draft as completed work.\n\n**Next action**\nConfigure a valid OpenRouter or Gemini production model key, then rerun this task. Any external action will remain approval-gated and will report a verifiable outcome.`;
+    answer = `I’ve routed this to ${lead.name}, with ${collaborators.length ? collaborators.map((employee) => employee.name).join(' and ') + ' supporting.' : 'Sarah coordinating the work.'}
+
+The request is recorded, but I can’t produce a verified answer because the production model is unavailable. No external action was executed or represented as complete.
+
+Next step: configure a valid OpenRouter or Gemini model key, then rerun this request.`;
   }
   const isEmailAction = ['email', 'send email', 'gmail', 'mail '].some((term) => lowerQ.includes(term));
   const isGitHubWriteAction = (lowerQ.includes('github') || lowerQ.includes('git repository') || lowerQ.includes('github repo')) && /\b(edit|update|create|write|push|commit|change|modify)\b/.test(lowerQ);

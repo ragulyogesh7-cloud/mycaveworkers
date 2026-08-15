@@ -181,7 +181,10 @@ function employeeById(employeeId) {
 function avatarMarkup(employee = {}, label = 'AI', extraClass = '') {
   const color = employee.color || '#82e9ff';
   const employeeId = employee.id || employee.employee_id || '';
-  return `<span class="employee-dp employee-orb ${extraClass}" style="--avatar-color:${safe(color)}" data-employee-id="${safe(employeeId)}" aria-hidden="true"><span class="orb-ears"></span><span class="orb-face"><i></i><i></i><b>${safe(label || employee.name?.[0] || 'AI')}</b></span></span>`;
+  const initials = String(label || employee.name || 'AI').split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'AI';
+  const portrait = employee.avatar_url || (employeeId ? `/static/assets/employee-avatars/${encodeURIComponent(employeeId)}.webp` : '');
+  const image = portrait ? `<img class="employee-portrait" src="${safe(portrait)}" alt="" loading="lazy" onerror="this.hidden=true;this.nextElementSibling.hidden=false">` : '';
+  return `<span class="employee-dp employee-profile ${extraClass}" style="--avatar-color:${safe(color)}" data-employee-id="${safe(employeeId)}" aria-hidden="true">${image}<span class="profile-initials"${portrait ? ' hidden' : ''}>${safe(initials)}</span></span>`;
 }
 
 function employeeStatus(employeeId) {
@@ -267,6 +270,22 @@ function messageInitial(message) {
   return String(message.sender || 'AI').split(/\s+/).map((part) => part[0]).join('').slice(0, 2).toUpperCase() || 'AI';
 }
 
+function cleanChatCopy(value) {
+  return String(value ?? '')
+    .replace(/\r/g, '')
+    .replace(/^\s*#{1,6}\s*/gm, '')
+    .replace(/^\s*>\s?/gm, '')
+    .replace(/^\s*[-*]\s+/gm, '')
+    .replace(/^\s*\*{0,2}(Blocker|Work completed|Current result|Next action|Your request|Delivery lead|Team|Sarah[’']s manager update)\*{0,2}\s*:\s*/gim, '')
+    .replace(/\*\*(.*?)\*\*/g, '$1')
+    .replace(/__(.*?)__/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/\n{3,}/g, '\n\n')
+    .replace(/\s*\n\s*/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 function renderRoomFeed(shouldFollow = roomAtLatest()) {
   const container = $('#workroom-thread');
   if (!container) return;
@@ -285,7 +304,10 @@ function renderRoomFeed(shouldFollow = roomAtLatest()) {
     article.style.setProperty('--message-delay', `${Math.min(index, 10) * 35}ms`);
     const taskReference = message.task_id ? `<button class="message-task" data-task-id="${safe(message.task_id)}" type="button">Task #${safe(message.task_id)}</button>` : '';
     const approvalAction = message.approval_id ? `<button class="message-approval" data-approval-id="${safe(message.approval_id)}" data-approval-status="approved" type="button">Approve</button>` : '';
-    article.innerHTML = `${avatarMarkup(senderEmployee || { color: tone === 'approval' ? '#ffd78f' : '#82e9ff' }, messageInitial(message), 'message-dp')}<div class="message-body"><div class="message-meta"><b>${safe(message.sender || 'Caveworkers')}</b>${message.receiver ? `<span>to ${safe(message.receiver)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}</div>${tone === 'result' ? '<span class="final-answer-label">Sarah’s final answer</span>' : ''}<p>${safe(message.body || '')}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
+    const senderName = message.sender === 'Manager' ? 'You' : (senderEmployee?.name || message.sender || 'Caveworkers');
+    const recipient = message.receiver && message.receiver !== 'Manager' ? `<span>to ${safe(message.receiver)}</span>` : '';
+    const messageLabel = tone === 'result' ? 'Manager update' : tone === 'approval' ? 'Needs your attention' : tone === 'failure' ? 'Blocked' : tone === 'complete' ? 'Completed' : message.kind === 'team_context' ? 'Coordination' : '';
+    article.innerHTML = `${avatarMarkup(senderEmployee || { id: '', color: tone === 'approval' ? '#ffd78f' : '#82e9ff' }, senderName, 'message-dp')}<div class="message-body"><div class="message-meta"><b>${safe(senderName)}</b>${recipient}${messageLabel ? `<span class="message-label ${tone}">${safe(messageLabel)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}</div>${tone === 'result' ? '<span class="final-answer-label">Sarah’s update</span>' : ''}<p>${safe(cleanChatCopy(message.body || ''))}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
     fragment.append(article);
   });
   container.replaceChildren(fragment);
