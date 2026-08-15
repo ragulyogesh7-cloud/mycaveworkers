@@ -178,3 +178,69 @@
 @media (max-width: 960px) { .settings-wrap { width: min(100% - 42px, 900px); } .settings-layout { display: block; } .settings-nav { margin-bottom: 18px; } .settings-nav button { flex: 1; } .settings-nav p { display: none; } }
 @media (max-width: 680px) { .settings-wrap { width: min(100% - 24px, 620px); padding-top: 24px; } .settings-hero { display: block; } .settings-hero h1 { font-size: clamp(42px, 13vw, 58px); } .settings-hero > div:first-child > p:last-child { font-size: 13px; } .settings-panel-header, .quick-connect, .registry-console { padding: 18px; } .quick-connect, .registry-console { margin-left: 12px; margin-right: 12px; } .quick-connect-grid { grid-template-columns: 1fr; } .integration-intro-grid, .integration-grid { padding-left: 12px; padding-right: 12px; } .connected-heading, .connection-list, .tool-grant-form { margin-left: 12px; margin-right: 12px; } }
 @media (prefers-reduced-motion: reduce) { .quick-connect-card, .quick-connect-arrow { transition: none; } }
+
+
+/* Clean settings redesign: fewer choices in view, advanced controls on demand. */
+.clean-settings-body { background: #060a17; }
+.clean-settings-shell { grid-template-columns: 198px minmax(0, 1fr); }
+.clean-settings-rail { padding-top: 20px; }
+.clean-settings-main { min-width: 0; }
+.clean-settings-topbar { min-height: 62px; border-bottom-color: rgba(203,220,255,.08); }
+.clean-settings-wrap { width: min(1180px, 100%); padding: 28px clamp(18px, 3vw, 42px) 48px; }
+.clean-settings-hero { align-items: end; margin: 8px 0 22px; }
+.clean-settings-hero h1 { font-size: clamp(30px, 4vw, 48px); letter-spacing: -.065em; line-height: .98; }
+.clean-settings-hero > div:first-child p:last-child { max-width: 430px; font-size: 11px; line-height: 1.5; }
+.clean-settings-layout { grid-template-columns: 156px minmax(0, 1fr); gap: 18px; align-items: start; }
+.clean-settings-nav { position: sticky; top: 82px; padding: 6px 0; background: transparent; border: 0; }
+.clean-settings-nav button { width: 100%; padding: 11px 10px; border: 0; border-left: 2px solid transparent; border-radius: 0 9px 9px 0; background: transparent; color: var(--muted); text-align: left; font-size: 10px; }
+.clean-settings-nav button span { display: inline-block; width: 24px; color: var(--faint); font: 9px "DM Mono", monospace; }
+.clean-settings-nav button.active { border-left-color: var(--aqua); background: rgba(130,233,255,.08); color: var(--white); }
+.clean-settings-nav p { margin: 18px 10px 0; color: var(--faint); font-size: 9px; line-height: 1.55; }
+.clean-settings-panel { border-color: rgba(203,220,255,.11); background: rgba(11,18,42,.66); border-radius: 18px; box-shadow: 0 24px 70px rgba(0,0,0,.16), inset 0 1px 0 rgba(255,255,255,.04); }
+.clean-settings-panel .settings-panel-header { padding: 22px 24px 18px; }
+.clean-settings-panel .settings-panel-header h2 { margin-top: 6px; font-size: 21px; letter-spacing: -.04em; }
+.clean-settings-panel .settings-panel-header p:last-child { max-width: 570px; font-size: 11px; line-height: 1.55; }
+.clean-security-overview { grid-template-columns: repeat(2, minmax(0, 1fr)); margin-top: 18px; }
+.clean-quick-connect { margin: 0 18px 18px; padding: 18px; border-radius: 15px; background: rgba(6,12,30,.56); }
+.clean-quick-connect .card-heading { margin-bottom: 14px; }
+.clean-quick-connect .card-heading h3 { margin-top: 4px; font-size: 15px; }
+.clean-quick-connect .card-heading p:last-child { font-size: 10px; }
+.clean-quick-connect .quick-connect-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.clean-quick-connect .quick-connect-card { min-height: 66px; padding: 11px; border-radius: 11px; }
+.clean-quick-connect .quick-connect-card small { font-size: 9px; }
+.clean-connection-form { margin: 0 18px 22px; padding: 18px; border-radius: 15px; background: rgba(6,12,30,.5); }
+.clean-connection-form .card-heading { margin-bottom: 14px; }
+.clean-connection-form .card-heading h3 { margin-top: 4px; font-size: 15px; }
+.clean-connection-form .card-heading p:last-child { font-size: 10px; }
+.clean-settings-panel .connected-heading { margin: 0 18px; padding-top: 8px; }
+.clean-settings-panel .connection-list { margin: 0 18px 20px; }
+.advanced-tools { margin: 18px; border-top: 1px solid rgba(203,220,255,.1); }
+.advanced-tools summary { padding: 15px 2px; color: var(--muted); cursor: pointer; font: 10px "DM Mono", monospace; list-style-position: inside; }
+.advanced-tools summary:hover { color: var(--white); }
+.advanced-tools-inner { display: grid; gap: 14px; padding-bottom: 4px; }
+.advanced-tools .registry-console, .advanced-tools .tool-grant-form, .advanced-tools .integration-grid { margin: 0; }
+.clean-settings-panel .employee-settings-list, .clean-settings-panel .employee-catalog { padding-inline: 18px; }
+.clean-settings-panel .employee-settings-card, .clean-settings-panel .catalog-card { border-radius: 12px; }
+@media (max-width: 900px) {
+  .clean-settings-shell { grid-template-columns: 1fr; }
+  .clean-settings-rail { position: fixed; z-index: 30; transform: translateX(-110%); transition: transform .22s var(--ease); }
+  .clean-settings-rail.is-open { transform: translateX(0); }
+  .clean-settings-layout { grid-template-columns: 1fr; }
+  .clean-settings-nav { position: static; display: flex; gap: 4px; overflow-x: auto; padding: 0 0 10px; }
+  .clean-settings-nav button { min-width: 124px; border-left: 0; border-bottom: 2px solid transparent; border-radius: 8px; }
+  .clean-settings-nav button.active { border-bottom-color: var(--aqua); }
+  .clean-settings-nav p { display: none; }
+}
+@media (max-width: 620px) {
+  .clean-settings-wrap { padding: 18px 10px 32px; }
+  .clean-settings-hero { display: block; margin: 6px 4px 18px; }
+  .clean-settings-plan-chip { margin-top: 14px; }
+  .clean-security-overview, .clean-quick-connect .quick-connect-grid { grid-template-columns: 1fr; }
+  .clean-settings-panel .settings-panel-header { padding-inline: 16px; }
+  .clean-quick-connect, .clean-connection-form { margin-inline: 10px; }
+  .clean-settings-panel .connected-heading, .clean-settings-panel .connection-list { margin-inline: 10px; }
+  .advanced-tools { margin-inline: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .clean-settings-rail { transition: none; }
+}

@@ -512,7 +512,7 @@ function bindRoomInteractions() {
 }
 
 async function initializeRoom() {
-  soundEnabled = window.localStorage.getItem('caveworkers-sound') === 'on';
+  soundEnabled = false;
   setSoundToggle();
   setExecutionLive();
   bindRoomInteractions();

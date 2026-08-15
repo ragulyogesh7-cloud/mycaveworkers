@@ -11,89 +11,67 @@
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/command.css">
 </head>
-<body class="command-body room-body">
-  <div class="app-shell room-app-shell">
-    <aside class="side-rail room-rail" aria-label="Workspace navigation">
+<body class="command-body room-body clean-room-body">
+  <div class="app-shell room-app-shell clean-room-shell">
+    <aside class="side-rail room-rail clean-room-rail" aria-label="Workspace navigation">
       <a class="brand" href="/command"><img class="brand-logo" src="/static/logo.jpeg" alt=""><span>Caveworkers</span></a>
       <div class="rail-label">WORKSPACE</div>
       <a class="rail-link active" href="#company-room"><i></i>Company room <span class="rail-badge workroom-nav-badge">LIVE</span></a>
-      <a class="rail-link" href="/analyst"><i></i>David’s data lab</a>
-      <a class="rail-link" href="#team-status"><i></i>Team status <span class="rail-badge" id="task-count-badge">0</span></a>
-      <a class="rail-link" href="#approval-queue"><i></i>Approvals <span class="rail-badge" id="approval-count-badge">0</span></a>
       <div class="rail-label rail-gap">MANAGE</div>
       <a class="rail-link" href="/settings"><i></i>Settings</a>
       <div class="rail-footer"><span class="system-dot"></span><div><b id="rail-system-status">Connecting</b><small id="rail-system-detail">Checking workspace services</small></div></div>
     </aside>
 
-    <main class="command-main room-main" id="company-room">
-      <header class="app-topbar room-topbar">
+    <main class="command-main room-main clean-room-main" id="company-room">
+      <header class="app-topbar room-topbar clean-room-topbar">
         <button class="menu-button" id="menuButton" aria-label="Open navigation">☰</button>
         <div class="workspace-name"><span class="status-dot"></span><span><%= (user && user.company_name) || "Your workspace" %></span><small>COMPANY ROOM</small></div>
-        <div class="top-actions"><button class="sound-toggle" id="sound-toggle" type="button" aria-pressed="false" title="Enable workspace sounds"><span class="sound-toggle-icon" aria-hidden="true">◌</span><span class="sound-toggle-label">Sound off</span></button><a class="settings-link" href="/settings">Settings <span>↗</span></a><a id="logout-btn" href="/logout" class="logout-button">Sign out</a></div>
+        <div class="top-actions"><a class="settings-link" href="/settings">Settings <span>↗</span></a><a id="logout-btn" href="/logout" class="logout-button">Sign out</a></div>
       </header>
 
-      <div class="room-wrap">
-        <div class="room-signal-line" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span></div>
+      <div class="room-wrap clean-room-wrap">
         <section class="trial-banner room-trial-banner" id="trial-banner" hidden aria-live="polite">
           <div><span class="trial-banner-kicker">WORKSPACE ACCESS</span><strong id="trial-banner-text">Your free trial is active.</strong><small id="trial-banner-detail">Loading trial status…</small></div>
           <a href="/settings#billing" class="trial-banner-action">Upgrade workspace ↗</a>
         </section>
 
-        <section class="room-intro">
-          <div><p class="eyebrow">VERIFIED AI WORKFORCE</p><h1>Work moves here.<br><em>Proof comes with it.</em></h1></div>
-          <p>Give Sarah the outcome you want. Your AI employees coordinate in one room, use only the tools you approve, and show the external evidence when the work is actually done.</p>
+        <section class="room-intro clean-room-intro">
+          <div><p class="eyebrow">COMPANY ROOM</p><h1>What should the crew do?</h1></div>
+          <div class="clean-room-explainer"><p>Assign an outcome in plain language. Sarah coordinates the specialists, they work together in this chat, and you see the proof when the job is actually finished.</p><span><i class="signal-dot"></i> One room · many employees · real tools</span></div>
         </section>
 
-        <div class="room-layout">
-          <section class="room-panel" aria-labelledby="room-heading">
-            <header class="room-header">
-              <div class="room-heading"><span class="room-mark">#</span><div><p class="panel-kicker">TEAM CHANNEL</p><h2 id="room-heading">Company room</h2><p id="room-connection-copy">Live coordination and verified execution in one shared room.</p></div></div>
+        <div class="room-layout clean-room-layout">
+          <section class="room-panel clean-chat-panel" aria-labelledby="room-heading">
+            <header class="room-header clean-chat-header">
+              <div class="room-heading"><div><p class="panel-kicker">LIVE WORKSPACE</p><h2 id="room-heading">Company room</h2><p id="room-connection-copy">Sarah and the team are here.</p></div></div>
               <div class="room-header-actions"><div class="avatar-stack" id="room-avatar-stack" aria-label="Active AI employees"></div><span class="live-pill" id="workroom-status">CONNECTING…</span></div>
             </header>
 
-            <section class="workforce-stage" id="workforce-stage" aria-label="Live AI workforce visualization">
-              <div class="stage-heading"><div><p class="panel-kicker">WORKFORCE VISUALIZATION</p><h3>Coordination map</h3><p>Watch the crew route context, tools, and decisions through one shared room.</p></div><span class="stage-live-tag"><i></i><span id="stage-active-count">0 active</span></span></div>
-              <div class="workforce-map" id="workforce-map" role="img" aria-label="AI employees coordinating around the company room"><div class="map-grid" aria-hidden="true"></div><svg class="map-lines" viewBox="0 0 760 290" preserveAspectRatio="none" aria-hidden="true"><path class="map-line line-a" d="M140 132 C250 36 284 36 380 144 S540 246 635 128"></path><path class="map-line line-b" d="M140 132 C245 233 295 245 380 144 S540 47 635 128"></path><path class="map-line line-c" d="M140 132 C250 132 300 144 380 144 S530 132 635 128"></path></svg><div class="map-node map-node-coordinator" id="map-node-coordinator"></div><div class="map-node map-node-center"><span class="core-pulse"></span><span class="core-mark">CW</span><small>company room</small></div><div class="map-node map-node-right" id="map-node-right"></div><div class="map-float-label map-label-top">shared context</div><div class="map-float-label map-label-bottom">approved tools</div></div>
-              <div class="stage-roster" id="stage-roster" aria-label="AI workforce roster"></div>
-            </section>
-            <div class="room-feed" id="workroom-thread" aria-live="polite" aria-label="Realtime employee conversation">
+            <div class="room-feed clean-room-feed" id="workroom-thread" aria-live="polite" aria-label="Realtime employee conversation">
               <div class="room-loading"><span></span><p>Opening the company room…</p></div>
             </div>
 
             <div class="room-jump-wrap"><button class="room-jump" id="jump-to-latest" type="button" hidden>Jump to latest ↓</button></div>
 
-            <form class="room-composer" id="room-composer">
-              <div class="room-composer-top"><label for="request">Assign work</label><span><i class="signal-dot"></i> Approval gates stay on</span></div>
-              <textarea id="request" rows="3" maxlength="6000" placeholder="Tell Caveworkers the outcome you need… e.g. Create employee-names.txt in my GitHub repository with all ten employee names."></textarea>
-              <div class="composer-quickbar"><button class="connector-plus" id="connector-plus" type="button" aria-expanded="false" aria-controls="connector-popover" title="Connect a tool or app"><span aria-hidden="true">+</span><span>Connect a tool</span></button><span class="composer-quickhint">GitHub · Gmail · Sheets · Custom MCP</span><div class="connector-popover" id="connector-popover" hidden><div class="popover-heading"><div><b>Bring a tool into this task</b><small>Choose a tenant-owned connector to configure in Settings.</small></div><button class="popover-close" id="connector-popover-close" type="button" aria-label="Close connector menu">×</button></div><div class="connector-quickgrid"><a href="/settings?connect=github#integrations" data-connector-launch="github"><span class="quick-icon github">GH</span><span><b>GitHub</b><small>Repos, files, commits</small></span><span>↗</span></a><a href="/settings?connect=gmail#integrations" data-connector-launch="gmail"><span class="quick-icon gmail">GM</span><span><b>Gmail</b><small>Messages with review</small></span><span>↗</span></a><a href="/settings?connect=sheets#integrations" data-connector-launch="sheets"><span class="quick-icon sheets">SH</span><span><b>Sheets</b><small>Read and update data</small></span><span>↗</span></a><a href="/settings?connect=custom#integrations" data-connector-launch="custom"><span class="quick-icon custom">MC</span><span><b>Custom MCP</b><small>Bring your own tool</small></span><span>↗</span></a></div></div></div>
-              <div class="room-composer-bottom">
-                <label class="assignment-control" for="task-assignee"><span>Route to</span><select id="task-assignee" aria-label="Choose who should lead this task"><option value="">Auto-route the best team</option><option value="__whole_team__">Whole team</option></select></label>
-                <div class="composer-actions"><span class="composer-hint"><i class="signal-dot"></i> Consequential writes pause for your approval</span><button class="run-button" id="run" type="submit">Start the work <span>↗</span></button></div>
-              </div>
+            <form class="room-composer clean-room-composer" id="room-composer">
+              <div class="room-composer-top"><label for="request">Assign work to the room</label><span><i class="signal-dot"></i> Approval gates stay on</span></div>
+              <textarea id="request" rows="3" maxlength="6000" placeholder="Tell the team the outcome you need…"></textarea>
+              <div class="composer-quickbar"><button class="connector-plus" id="connector-plus" type="button" aria-expanded="false" aria-controls="connector-popover" title="Connect a tool or app"><span aria-hidden="true">+</span><span>Connect a tool</span></button><span class="composer-quickhint">Add GitHub, Gmail, Sheets, or a custom MCP tool</span><div class="connector-popover" id="connector-popover" hidden><div class="popover-heading"><div><b>Connect a tool for this workspace</b><small>Set it up once in Settings, then your employees can use it within their permissions.</small></div><button class="popover-close" id="connector-popover-close" type="button" aria-label="Close connector menu">×</button></div><div class="connector-quickgrid"><a href="/settings?connect=github#integrations" data-connector-launch="github"><span class="quick-icon github">GH</span><span><b>GitHub</b><small>Repos, files, commits</small></span><span>↗</span></a><a href="/settings?connect=gmail#integrations" data-connector-launch="gmail"><span class="quick-icon gmail">GM</span><span><b>Gmail</b><small>Messages with review</small></span><span>↗</span></a><a href="/settings?connect=sheets#integrations" data-connector-launch="sheets"><span class="quick-icon sheets">SH</span><span><b>Sheets</b><small>Read and update data</small></span><span>↗</span></a><a href="/settings?connect=custom#integrations" data-connector-launch="custom"><span class="quick-icon custom">MC</span><span><b>Custom MCP</b><small>Bring your own tool</small></span><span>↗</span></a></div></div></div>
+              <div class="room-composer-bottom"><label class="assignment-control" for="task-assignee"><span>Lead</span><select id="task-assignee" aria-label="Choose who should lead this task"><option value="">Auto-route the team</option><option value="__whole_team__">Whole team</option></select></label><div class="composer-actions"><span class="composer-hint"><i class="signal-dot"></i> Writes pause for your approval</span><button class="run-button" id="run" type="submit">Start the work <span>↗</span></button></div></div>
             </form>
             <p class="room-notice" id="room-notice" role="status" aria-live="polite"></p>
           </section>
 
-          <aside class="room-context" aria-label="Company room context">
-            <section class="context-card" id="team-status">
-              <div class="context-heading"><div><p class="panel-kicker">PRESENT NOW</p><h2>Team status</h2></div><span id="room-team-count" class="context-count">0</span></div>
+          <aside class="room-context clean-chat-rail" aria-label="Review and team context">
+            <section class="context-card clean-context-card" id="team-status">
+              <div class="context-heading"><div><p class="panel-kicker">THE CREW</p><h2>Who is here</h2></div><span id="room-team-count" class="context-count">0</span></div>
               <div class="workroom-presence compact-presence" id="workroom-presence"><p class="empty-state-sm">Loading employee presence…</p></div>
-              <a href="/settings#team" class="context-link">Manage team ↗</a>
+              <a href="/settings#team" class="context-link">Manage employees ↗</a>
             </section>
 
-            <section class="context-card execution-card" id="execution-rail">
-              <div class="context-heading"><div><p class="panel-kicker">TRUST LAYER</p><h2>Execution rail</h2></div><span class="secure-tag">VERIFIED</span></div>
-              <div class="execution-live" id="execution-live" aria-live="polite"><span class="execution-live-dot"></span><b id="execution-live-title">Ready for an outcome</b><small id="execution-live-detail">Your team is standing by.</small></div><div class="execution-steps" aria-label="How Caveworkers executes work"><div class="execution-step active"><span>01</span><b>Understand</b><small>Sarah routes the outcome</small></div><div class="execution-step"><span>02</span><b>Collaborate</b><small>Specialists share context</small></div><div class="execution-step"><span>03</span><b>Use tools</b><small>Approved connectors only</small></div><div class="execution-step"><span>04</span><b>Prove it</b><small>Evidence, IDs, or failure</small></div></div>
-            </section>
-
-            <section class="context-card" id="approval-queue">
-              <div class="context-heading"><div><p class="panel-kicker">HUMAN REVIEW</p><h2>Approvals</h2></div><span class="pending-label" id="approvals-status-text">Checking</span></div>
+            <section class="context-card clean-context-card" id="approval-queue">
+              <div class="context-heading"><div><p class="panel-kicker">YOUR TURN</p><h2>Needs review</h2></div><span class="pending-label" id="approvals-status-text">Checking</span></div>
               <div id="approvals-list" class="approvals-list compact-approvals"><p class="empty-state-sm">Checking for approval requests…</p></div>
-            </section>
-
-            <section class="context-card task-context-card" id="task-summary">
-              <div class="context-heading"><div><p class="panel-kicker">WORK IN MOTION</p><h2>Recent tasks</h2></div><button class="context-refresh" id="refresh-tasks" type="button" aria-label="Refresh recent tasks">↻</button></div>
-              <div class="task-summary-list" id="task-dashboard-grid"><p class="empty-state-sm">Loading tasks…</p></div>
             </section>
           </aside>
         </div>
