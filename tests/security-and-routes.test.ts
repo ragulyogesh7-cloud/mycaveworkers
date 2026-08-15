@@ -475,6 +475,46 @@ describe('Caveworkers security invariants', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
+  it('returns curated connector catalog with tenant connection state', async () => {
+    db.mcpConnections.set('company-a:alex', [{
+      id: 4101,
+      company_id: 'company-a',
+      employee_id: 'alex',
+      name: 'GitHub workspace',
+      connection_type: 'streamable_http',
+      server_url: 'https://mcp.example.com/tools',
+      status: 'connected',
+      auth_token_encrypted: 'must-not-leak',
+      config: { registry_server_name: 'GitHub' },
+      created_at: now,
+      updated_at: now
+    } as any]);
+
+    const response = await request(app)
+      .get('/api/mcp/directory')
+      .set('x-caveworkers-test-user', 'user-a')
+      .expect(200);
+
+    expect(response.body.catalog.length).toBeGreaterThan(0);
+    expect(response.body.categories.length).toBeGreaterThan(0);
+    expect(response.body.catalog[0]).toMatchObject({
+      id: expect.any(String),
+      name: expect.any(String),
+      connection_mode: expect.any(String),
+      connected: expect.any(Boolean)
+    });
+    expect(response.body.catalog.find((entry: any) => entry.id === 'github')).toMatchObject({ connected: true, connected_employee_ids: ['alex'] });
+    expect(response.body.catalog[0].auth_token_encrypted).toBeUndefined();
+    expect(response.body.total).toBeGreaterThan(response.body.catalog.length);
+
+    const aliasResponse = await request(app)
+      .get('/api/connectors/catalog?q=GitHub')
+      .set('x-caveworkers-test-user', 'user-a')
+      .expect(200);
+    expect(aliasResponse.body.catalog).toHaveLength(1);
+    expect(aliasResponse.body.catalog[0]).toMatchObject({ id: 'github', connected: true });
+  });
+
   it('rejects private Registry-advertised remotes before any MCP connection attempt', async () => {
     process.env.MCP_REGISTRY_URL = 'https://registry.mock/v0.1';
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: any) => {

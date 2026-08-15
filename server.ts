@@ -16,6 +16,7 @@ import { google } from 'googleapis';
 import { Sentry, anonymizeIdentifier, reportOperationalFailure, sentryEnabled } from './instrument.js';
 import { isTrialExpired, verifyRazorpayPaymentSignature, verifyRazorpayWebhookSignature } from './security.js';
 import { getMcpRegistryServer, searchMcpRegistry } from './mcp-registry.js';
+import { CONNECTOR_DIRECTORY_CATEGORIES, CONNECTOR_DIRECTORY_COUNT, connectorDirectoryPublicView, getConnectorDirectoryEntry, searchConnectorDirectory } from './connector-directory.js';
 
 dotenv.config();
 
@@ -3348,6 +3349,48 @@ app.get('/api/mcp/marketplace', (_req, res) => {
       { id: 'context7', name: 'Context7 Docs', description: 'Read-only documentation search', category: 'Knowledge', icon: '📚' }
     ]
   });
+});
+
+app.get(['/api/mcp/directory', '/api/connectors/catalog'], async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const query = String(req.query.q || '').slice(0, 80);
+  const category = String(req.query.category || '').slice(0, 60);
+  const entries = searchConnectorDirectory(query, category);
+  const workforce = activeWorkforce(companyId);
+  const connectionsByEmployee = await Promise.all(workforce.map(async (employee) => {
+    try { return [employee.id, await loadMcpConnections(companyId, employee.id)] as const; }
+    catch (error) {
+      reportOperationalFailure('mcp.directory_connection_state', error, { tenant_hash: anonymizeIdentifier(companyId), employee_id: employee.id, request_id: getRequestId(req) });
+      return [employee.id, [] as TenantConnector[]] as const;
+    }
+  }));
+  const stateByEmployee = new Map(connectionsByEmployee);
+  const catalog = entries.map((entry) => {
+    const matches = workforce.flatMap((employee) => (stateByEmployee.get(employee.id) || []).filter((connection) => {
+      const connectionName = `${connection.name} ${connection.connection_type} ${connection.config?.registry_server_name || ''}`.toLowerCase();
+      return connectionName.includes(entry.name.toLowerCase()) || connectionName.includes(entry.short_name.toLowerCase()) || connectionName.includes(entry.id.replace(/-/g, ' '));
+    }).map((connection) => ({ employee_id: employee.id, connection_id: connection.id })));
+    return { ...connectorDirectoryPublicView(entry), connected: matches.length > 0, connection_count: matches.length, connected_employee_ids: Array.from(new Set(matches.map((match) => match.employee_id))), connection_ids: matches.map((match) => match.connection_id) };
+  });
+  res.json({ catalog, categories: CONNECTOR_DIRECTORY_CATEGORIES, total: CONNECTOR_DIRECTORY_COUNT, matched: catalog.length, query, category });
+});
+
+app.get('/api/mcp/directory/:id', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const entry = getConnectorDirectoryEntry(String(req.params.id));
+  if (!entry) return res.status(404).json({ error: 'Connector was not found in the Caveworkers directory.' });
+  if (entry.registry_name) {
+    try {
+      const server = await getMcpRegistryServer(entry.registry_name);
+      return res.json({ connector: connectorDirectoryPublicView(entry), server: server || null });
+    } catch (error: any) {
+      reportOperationalFailure('mcp.directory_detail', error, { tenant_hash: anonymizeIdentifier(user.company_id || DEFAULT_COMPANY_ID), connector_id: entry.id, request_id: getRequestId(req) });
+    }
+  }
+  res.json({ connector: connectorDirectoryPublicView(entry), server: null });
 });
 
 app.get('/api/mcp/registry/search', async (req, res) => {

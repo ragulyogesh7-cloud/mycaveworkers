@@ -8,5 +8,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["server.ts", "instrument.ts", "security.ts", "mcp-registry.ts"]
+  "include": ["server.ts", "instrument.ts", "security.ts", "mcp-registry.ts", "connector-directory.ts"]
 }

@@ -2,6 +2,8 @@ const $ = (selector) => document.querySelector(selector);
 let employees = [];
 let billingState = null;
 let selectedRegistryServer = null;
+let directoryState = { catalog: [], categories: [], query: '', category: '', showAll: false, open: false };
+let directorySearchTimer = null;
 
 function safe(value) {
   const node = document.createElement('span');
@@ -460,6 +462,109 @@ function applyConnectorPreset(preset) {
   notify(`${selected.name} is ready. Choose the employee, review the access level, and save the connection.`, 'success');
 }
 
+function directoryConnectorCard(connector) {
+  const connectedEmployees = connector.connected_employee_ids || [];
+  const connected = Boolean(connector.connected);
+  const employeeNames = connectedEmployees.map((id) => employees.find((employee) => employee.id === id)?.name || id).slice(0, 3);
+  const statusCopy = connected ? `Connected${employeeNames.length ? ` · ${employeeNames.join(', ')}` : ''}` : 'Ready to connect';
+  const actionCopy = connected ? 'View connection' : connector.connection_mode === 'mcp_registry' ? 'Inspect & connect' : 'Connect';
+  const actions = (connector.supported_actions || []).slice(0, 3).map((action) => `<span>${safe(action)}</span>`).join('');
+  return `<article class="directory-card ${connected ? 'directory-connected' : ''}" style="--directory-tone:${safe(connector.icon_tone || 'custom')}"><div class="directory-card-top"><span class="directory-icon directory-icon-${safe(connector.icon_tone || 'custom')}">${safe(connector.icon_label || connector.short_name?.[0] || '?')}</span><div class="directory-card-heading"><div><h4>${safe(connector.name)}</h4>${connector.verified ? '<span class="directory-verified">✓ Verified</span>' : '<span class="directory-unverified">Custom</span>'}</div><span class="directory-card-category">${safe(connector.category)}</span></div></div><p class="directory-card-description">${safe(connector.description)}</p><div class="directory-action-chips">${actions}</div><p class="directory-card-setup">${safe(connector.setup_copy)}</p><div class="directory-card-footer"><span class="directory-connection-state ${connected ? 'is-connected' : ''}"><i></i>${safe(statusCopy)}</span><button class="directory-connect-button ${connected ? 'is-connected' : ''}" type="button" data-connect-directory-id="${safe(connector.id)}" aria-label="${safe(actionCopy)} ${safe(connector.name)}"><span>${connected ? '↗' : '+'}</span>${safe(actionCopy)}</button></div></article>`;
+}
+
+function renderDirectoryModal() {
+  const modal = $('#connector-directory-modal');
+  if (!modal) return;
+  const query = directoryState.query.trim().toLowerCase();
+  const category = directoryState.category.trim().toLowerCase();
+  const filtered = directoryState.catalog.filter((connector) => {
+    const categoryMatch = !category || connector.category.toLowerCase() === category;
+    const haystack = [connector.name, connector.short_name, connector.description, connector.category, ...(connector.keywords || [])].join(' ').toLowerCase();
+    return categoryMatch && (!query || haystack.includes(query));
+  });
+  const search = $('#directory-search');
+  if (search && search.value !== directoryState.query) search.value = directoryState.query;
+  const categories = $('#directory-categories');
+  if (categories) categories.innerHTML = [`<button class="directory-category-chip ${!directoryState.category ? 'active' : ''}" type="button" role="tab" aria-selected="${!directoryState.category}" data-directory-category="">All</button>`, ...(directoryState.categories || []).map((item) => `<button class="directory-category-chip ${directoryState.category === item ? 'active' : ''}" type="button" role="tab" aria-selected="${directoryState.category === item}" data-directory-category="${safe(item)}">${safe(item)}</button>`)].join('');
+  const featured = filtered.filter((connector) => connector.featured).slice(0, 6);
+  const featuredGrid = $('#directory-featured-grid');
+  if (featuredGrid) featuredGrid.innerHTML = featured.length ? featured.map(directoryConnectorCard).join('') : '<p class="directory-empty">No featured connector matches this search. Explore the full catalog below.</p>';
+  const allGrid = $('#directory-all-grid');
+  const visible = directoryState.showAll ? filtered : filtered.slice(0, 6);
+  if (allGrid) allGrid.innerHTML = visible.length ? visible.map(directoryConnectorCard).join('') : '<p class="directory-empty">No connectors match your filters. Try a broader search.</p>';
+  const count = $('#directory-result-count');
+  if (count) count.textContent = `${filtered.length} match${filtered.length === 1 ? '' : 'es'} · ${directoryState.catalog.length} curated`;
+  const toggle = $('#directory-toggle-all');
+  if (toggle) {
+    toggle.hidden = filtered.length <= 6;
+    toggle.textContent = directoryState.showAll ? 'Show fewer' : `Show all ${filtered.length}`;
+    toggle.setAttribute('aria-expanded', String(directoryState.showAll));
+  }
+  const summary = $('#directory-modal-summary');
+  if (summary) summary.textContent = connectedDirectoryCount(filtered) ? `${connectedDirectoryCount(filtered)} already connected in this workspace · reuse or manage it below.` : 'Search verified connectors and connect them to your tenant.';
+}
+
+function connectedDirectoryCount(connectors) {
+  return connectors.filter((connector) => connector.connected).length;
+}
+
+async function openConnectorDirectory() {
+  const modal = $('#connector-directory-modal');
+  if (!modal) return;
+  activateTab('integrations', false);
+  directoryState = { catalog: [], categories: [], query: '', category: '', showAll: false, open: true };
+  modal.hidden = false;
+  document.body.classList.add('directory-modal-open');
+  renderDirectoryModal();
+  try {
+    const data = await requestJson('/api/mcp/directory');
+    directoryState.catalog = data.catalog || [];
+    directoryState.categories = data.categories || [];
+    renderDirectoryModal();
+    $('#directory-search')?.focus();
+  } catch (error) {
+    notify(error.message || 'The connector directory could not be loaded.', 'error');
+    const grid = $('#directory-featured-grid');
+    if (grid) grid.innerHTML = '<p class="directory-empty">The directory is temporarily unavailable. Your existing connectors are still safe.</p>';
+  }
+}
+
+function closeConnectorDirectory() {
+  const modal = $('#connector-directory-modal');
+  if (!modal) return;
+  modal.hidden = true;
+  directoryState.open = false;
+  document.body.classList.remove('directory-modal-open');
+}
+
+async function connectFromDirectory(connectorId) {
+  const connector = directoryState.catalog.find((entry) => entry.id === connectorId);
+  if (!connector) return;
+  if (connector.connected) {
+    closeConnectorDirectory();
+    activateTab('integrations', false);
+    $('#custom-mcp-list')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    notify(`${connector.name} is already connected for ${connector.connected_employee_ids?.length || 1} employee${(connector.connected_employee_ids?.length || 1) === 1 ? '' : 's'}. Review or reuse the existing connection below.`, 'success');
+    return;
+  }
+  closeConnectorDirectory();
+  activateTab('integrations', false);
+  if (connector.connection_mode === 'google_oauth') {
+    applyConnectorPreset(connector.connection_type === 'google_gmail' ? 'gmail' : 'sheets');
+    notify(`${connector.name} is ready. Choose the employee, save the connection, and complete Google authorization.`, 'success');
+    return;
+  }
+  if (connector.connection_mode === 'mcp_registry' && connector.registry_name) {
+    const advanced = document.querySelector('.advanced-tools');
+    if (advanced) advanced.open = true;
+    await inspectRegistryServer(connector.registry_name);
+    document.querySelector('#mcp-registry-connect-form')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    return;
+  }
+  applyConnectorPreset('custom');
+  notify(`${connector.name} is ready. Add the trusted endpoint and authentication details, then discover its tools.`, 'success');
+}
+
 function bindEvents() {
   document.querySelector('.settings-nav')?.addEventListener('click', (event) => {
     const button = event.target.closest('[data-settings-tab]');
@@ -473,6 +578,12 @@ function bindEvents() {
   $('#mcp-registry-search-form')?.addEventListener('submit', searchRegistry);
   $('#mcp-registry-connect-form')?.addEventListener('submit', connectRegistryServer);
   $('#mcp-registry-all-employees')?.addEventListener('change', toggleRegistryEmployeePicker);
+  $('#open-connector-directory')?.addEventListener('click', openConnectorDirectory);
+  $('#directory-modal-close')?.addEventListener('click', closeConnectorDirectory);
+  $('#connector-directory-modal')?.addEventListener('click', (event) => { if (event.target.closest('[data-directory-close]')) closeConnectorDirectory(); });
+  $('#directory-search')?.addEventListener('input', (event) => { clearTimeout(directorySearchTimer); directorySearchTimer = setTimeout(() => { directoryState.query = event.target.value || ''; directoryState.showAll = false; renderDirectoryModal(); }, 100); });
+  $('#directory-toggle-all')?.addEventListener('click', () => { directoryState.showAll = !directoryState.showAll; renderDirectoryModal(); });
+  $('#directory-categories')?.addEventListener('click', (event) => { const button = event.target.closest('[data-directory-category]'); if (!button) return; directoryState.category = button.dataset.directoryCategory || ''; directoryState.showAll = false; renderDirectoryModal(); });
   $('#custom-mcp-type')?.addEventListener('change', updateCustomMcpFields);
   $('#custom-mcp-employee')?.addEventListener('change', updateCustomMcpFields);
   $('#menuButton')?.addEventListener('click', () => document.querySelector('.settings-rail')?.classList.toggle('is-open'));
@@ -485,6 +596,8 @@ function bindEvents() {
     if (action === 'set-employee-impact-policy') updateEmployeeAutonomy(target.dataset.employeeId, { high_impact_action_policy: target.value });
   });
   document.addEventListener('click', (event) => {
+    const directoryTrigger = event.target.closest('[data-connect-directory-id]');
+    if (directoryTrigger) { connectFromDirectory(directoryTrigger.dataset.connectDirectoryId); return; }
     const preset = event.target.closest('[data-connector-preset]');
     if (preset) { applyConnectorPreset(preset.dataset.connectorPreset); return; }
     const target = event.target.closest('[data-action], [data-plan]');
@@ -504,6 +617,7 @@ function bindEvents() {
     if (action === 'request-git-commit') requestGitCommit(employeeId, connectionId);
     if (action === 'inspect-registry') inspectRegistryServer(target.dataset.registryName);
   });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && directoryState.open) closeConnectorDirectory(); if (event.key === '/' && !directoryState.open && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) { event.preventDefault(); openConnectorDirectory(); } });
   $('#logout-btn')?.addEventListener('click', async (event) => {
     event.preventDefault();
     try { if (window.firebaseAuth?.signOut) await window.firebaseAuth.signOut(); } catch (_) {}
