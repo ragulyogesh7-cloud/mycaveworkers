@@ -8,6 +8,60 @@ let workroomTasks = [];
 let taskSummaries = [];
 let pendingMessages = [];
 let trialCountdownTimer = null;
+let soundEnabled = false;
+let audioContext = null;
+
+function getSoundContext() {
+  if (!soundEnabled || !window.AudioContext) return null;
+  audioContext ||= new window.AudioContext();
+  if (audioContext.state === 'suspended') audioContext.resume().catch(() => {});
+  return audioContext;
+}
+
+function playCue(kind = 'tick') {
+  const context = getSoundContext();
+  if (!context) return;
+  const frequencies = { submit: [330, 494], approval: [294, 370], complete: [494, 659], failure: [220, 165], tick: [392] };
+  const values = frequencies[kind] || frequencies.tick;
+  const start = context.currentTime;
+  values.forEach((frequency, index) => {
+    const oscillator = context.createOscillator();
+    const gain = context.createGain();
+    oscillator.type = kind === 'failure' ? 'sine' : 'triangle';
+    oscillator.frequency.setValueAtTime(frequency, start + index * 0.075);
+    gain.gain.setValueAtTime(0.0001, start + index * 0.075);
+    gain.gain.exponentialRampToValueAtTime(0.045, start + index * 0.075 + 0.018);
+    gain.gain.exponentialRampToValueAtTime(0.0001, start + index * 0.075 + 0.24);
+    oscillator.connect(gain).connect(context.destination);
+    oscillator.start(start + index * 0.075);
+    oscillator.stop(start + index * 0.075 + 0.26);
+  });
+}
+
+function setSoundToggle() {
+  const button = $('#sound-toggle');
+  if (!button) return;
+  button.setAttribute('aria-pressed', String(soundEnabled));
+  button.classList.toggle('is-on', soundEnabled);
+  const label = button.querySelector('.sound-toggle-label');
+  const icon = button.querySelector('.sound-toggle-icon');
+  if (label) label.textContent = soundEnabled ? 'Sound on' : 'Sound off';
+  if (icon) icon.textContent = soundEnabled ? '◉' : '◌';
+}
+
+function setExecutionLive(state = 'ready', title = 'Ready for an outcome', detail = 'Your team is standing by.') {
+  const live = $('#execution-live');
+  const liveTitle = $('#execution-live-title');
+  const liveDetail = $('#execution-live-detail');
+  if (live) live.dataset.state = state;
+  if (liveTitle) liveTitle.textContent = title;
+  if (liveDetail) liveDetail.textContent = detail;
+  const phase = { ready: 0, working: 1, coordinating: 1, approval: 2, complete: 3, failure: 2 }[state] ?? 0;
+  document.querySelectorAll('.execution-step').forEach((step, index) => {
+    step.classList.toggle('active', index === phase);
+    step.classList.toggle('done', index < phase && state === 'complete');
+  });
+}
 
 function safe(value) {
   const node = document.createElement('span');
@@ -252,6 +306,7 @@ function setRoomConnection(status, detail) {
 
 function applyWorkroomEvent(event) {
   if (!event) return;
+  if (event.type === 'message' && event.message) playCue(event.message.kind === 'approval_required' ? 'approval' : 'tick');
   const follow = roomAtLatest();
   if (event.type === 'presence' && event.presence) upsertWorkroomPresence(event.presence);
   if (event.type === 'message' && event.message) {
@@ -262,6 +317,11 @@ function applyWorkroomEvent(event) {
   if (event.type === 'task_update' && event.task) {
     const index = workroomTasks.findIndex((task) => task.id === event.task.id);
     if (index >= 0) workroomTasks[index] = event.task; else workroomTasks.push(event.task);
+    const taskStatus = event.task.status || event.task.execution?.status || 'processing';
+    if (['completed', 'succeeded'].includes(taskStatus)) { setExecutionLive('complete', 'Work verified', event.task.execution?.summary || 'The latest task has reported evidence.'); playCue('complete'); }
+    else if (['failed', 'blocked'].includes(taskStatus)) { setExecutionLive('failure', taskStatus === 'blocked' ? 'Action blocked' : 'Execution needs attention', event.task.execution?.summary || 'Review the task details and connector policy.'); playCue('failure'); }
+    else if (taskStatus === 'pending_approval') setExecutionLive('approval', 'Approval required', 'A consequential action is paused for your review.');
+    else setExecutionLive('working', 'Work is moving', 'The workforce is coordinating and preparing the next step.');
     rebuildWorkroomMessages();
     void Promise.all([loadTaskSummaries(), loadApprovals()]);
   }
@@ -377,7 +437,9 @@ async function submitTask(event) {
   renderRoomFeed(true);
   input.value = '';
   button.disabled = true;
-    button.innerHTML = '<span class="button-spinner" aria-hidden="true"></span> Working…';
+  button.innerHTML = '<span class="button-spinner" aria-hidden="true"></span> Working…';
+  playCue('submit');
+  setExecutionLive('working', 'Routing your outcome', `Sarah is preparing the workforce for ${target}.`);
   setRoomNotice(`Routing this task to ${target}.`, '');
   try {
     const task = await responseJson('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request, preferred_employee_id: preferred || undefined }) });
@@ -406,6 +468,7 @@ function bindRoomInteractions() {
   $('#jump-to-latest')?.addEventListener('click', jumpToLatest);
   $('#refresh-tasks')?.addEventListener('click', () => Promise.all([loadTaskSummaries(), loadApprovals(), loadWorkroomSnapshot()]));
   $('#menuButton')?.addEventListener('click', () => document.querySelector('.side-rail')?.classList.toggle('is-open'));
+  $('#sound-toggle')?.addEventListener('click', () => { soundEnabled = !soundEnabled; window.localStorage.setItem('caveworkers-sound', soundEnabled ? 'on' : 'off'); setSoundToggle(); if (soundEnabled) playCue('complete'); });
   document.addEventListener('click', (event) => {
     const approval = event.target.closest('[data-approval-id]');
     if (approval) resolveApproval(approval.dataset.approvalId, approval.dataset.approvalStatus);
@@ -415,6 +478,9 @@ function bindRoomInteractions() {
 }
 
 async function initializeRoom() {
+  soundEnabled = window.localStorage.getItem('caveworkers-sound') === 'on';
+  setSoundToggle();
+  setExecutionLive();
   bindRoomInteractions();
   await Promise.all([loadEmployees(), loadBilling(), loadHealth(), loadWorkroomSnapshot(), loadApprovals(), loadTaskSummaries()]);
   connectWorkroom();

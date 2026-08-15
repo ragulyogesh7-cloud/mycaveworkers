@@ -688,3 +688,51 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
   .execution-step, .execution-step:first-child { border-left: 0; border-top: 1px solid rgba(213, 229, 255, .09); padding: 9px 0 0; }
   .execution-step:nth-child(-n+2) { border-top: 0; padding-top: 0; }
 }
+
+
+/* Premium interaction layer: sound preference and live workflow signal. */
+.sound-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 34px;
+  padding: 7px 10px;
+  border: 1px solid rgba(203, 220, 255, .17);
+  border-radius: 999px;
+  color: var(--faint);
+  background: rgba(255, 255, 255, .035);
+  font: 10px "DM Mono", ui-monospace, monospace;
+  cursor: pointer;
+  transition: color .18s var(--ease), border-color .18s var(--ease), background .18s var(--ease), transform .18s var(--ease);
+}
+.sound-toggle:hover { transform: translateY(-1px); color: var(--chalk); border-color: rgba(130, 233, 255, .38); background: rgba(130, 233, 255, .08); }
+.sound-toggle:active { transform: scale(.97); }
+.sound-toggle:focus-visible { outline: 2px solid var(--aqua); outline-offset: 3px; }
+.sound-toggle.is-on { color: var(--moss); border-color: rgba(182, 255, 182, .3); background: rgba(182, 255, 182, .08); }
+.sound-toggle-icon { display: inline-grid; place-items: center; width: 14px; height: 14px; color: var(--aqua); font-size: 14px; }
+.sound-toggle.is-on .sound-toggle-icon { color: var(--moss); text-shadow: 0 0 12px rgba(182, 255, 182, .75); animation: sound-ping 1.8s ease-in-out infinite; }
+.execution-live { position: relative; display: grid; grid-template-columns: 9px minmax(0, 1fr); gap: 8px; margin: 0 0 15px; padding: 11px 12px; border: 1px solid rgba(130, 233, 255, .15); border-radius: 15px; background: rgba(4, 12, 29, .34); overflow: hidden; }
+.execution-live::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(105deg, rgba(130, 233, 255, .11), transparent 48%); opacity: .5; }
+.execution-live-dot { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: var(--aqua); box-shadow: 0 0 0 4px rgba(130, 233, 255, .1), 0 0 15px var(--aqua); animation: live-breathe 1.8s ease-in-out infinite; }
+.execution-live b, .execution-live small { position: relative; z-index: 1; grid-column: 2; }
+.execution-live b { color: var(--chalk); font-size: 11px; }
+.execution-live small { margin-top: 2px; color: var(--faint); font-size: 10px; line-height: 1.4; }
+.execution-live[data-state="approval"] { border-color: rgba(255, 215, 143, .3); background: rgba(75, 53, 22, .22); }
+.execution-live[data-state="approval"] .execution-live-dot { background: var(--gold); box-shadow: 0 0 0 4px rgba(255, 215, 143, .1), 0 0 15px var(--gold); }
+.execution-live[data-state="complete"] { border-color: rgba(182, 255, 182, .28); background: rgba(27, 70, 49, .2); }
+.execution-live[data-state="complete"] .execution-live-dot { background: var(--moss); box-shadow: 0 0 0 4px rgba(182, 255, 182, .1), 0 0 15px var(--moss); }
+.execution-live[data-state="failure"] { border-color: rgba(255, 148, 177, .3); background: rgba(80, 25, 50, .19); }
+.execution-live[data-state="failure"] .execution-live-dot { background: #ff94b1; box-shadow: 0 0 0 4px rgba(255, 148, 177, .1), 0 0 15px #ff94b1; }
+.execution-live[data-state="working"] .execution-live-dot { animation-duration: .9s; }
+@keyframes live-breathe { 0%, 100% { transform: scale(.8); opacity: .65; } 50% { transform: scale(1.08); opacity: 1; } }
+@keyframes sound-ping { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.14); } }
+@media (max-width: 680px) {
+  .sound-toggle-label { display: none; }
+  .sound-toggle { width: 34px; justify-content: center; padding-inline: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sound-toggle.is-on .sound-toggle-icon, .execution-live-dot { animation: none !important; }
+}
+
+.execution-step.done > span { color: #081b20; border-color: rgba(182, 255, 182, .48); background: var(--moss); box-shadow: 0 0 15px rgba(182, 255, 182, .18); }
+.execution-step.done b { color: var(--moss); }

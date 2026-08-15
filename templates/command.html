@@ -29,7 +29,7 @@
       <header class="app-topbar room-topbar">
         <button class="menu-button" id="menuButton" aria-label="Open navigation">☰</button>
         <div class="workspace-name"><span class="status-dot"></span><span><%= (user && user.company_name) || "Your workspace" %></span><small>COMPANY ROOM</small></div>
-        <div class="top-actions"><a class="settings-link" href="/settings">Settings <span>↗</span></a><a id="logout-btn" href="/logout" class="logout-button">Sign out</a></div>
+        <div class="top-actions"><button class="sound-toggle" id="sound-toggle" type="button" aria-pressed="false" title="Enable workspace sounds"><span class="sound-toggle-icon" aria-hidden="true">◌</span><span class="sound-toggle-label">Sound off</span></button><a class="settings-link" href="/settings">Settings <span>↗</span></a><a id="logout-btn" href="/logout" class="logout-button">Sign out</a></div>
       </header>
 
       <div class="room-wrap">
@@ -77,7 +77,7 @@
 
             <section class="context-card execution-card" id="execution-rail">
               <div class="context-heading"><div><p class="panel-kicker">TRUST LAYER</p><h2>Execution rail</h2></div><span class="secure-tag">VERIFIED</span></div>
-              <div class="execution-steps" aria-label="How Caveworkers executes work"><div class="execution-step active"><span>01</span><b>Understand</b><small>Sarah routes the outcome</small></div><div class="execution-step"><span>02</span><b>Collaborate</b><small>Specialists share context</small></div><div class="execution-step"><span>03</span><b>Use tools</b><small>Approved connectors only</small></div><div class="execution-step"><span>04</span><b>Prove it</b><small>Evidence, IDs, or failure</small></div></div>
+              <div class="execution-live" id="execution-live" aria-live="polite"><span class="execution-live-dot"></span><b id="execution-live-title">Ready for an outcome</b><small id="execution-live-detail">Your team is standing by.</small></div><div class="execution-steps" aria-label="How Caveworkers executes work"><div class="execution-step active"><span>01</span><b>Understand</b><small>Sarah routes the outcome</small></div><div class="execution-step"><span>02</span><b>Collaborate</b><small>Specialists share context</small></div><div class="execution-step"><span>03</span><b>Use tools</b><small>Approved connectors only</small></div><div class="execution-step"><span>04</span><b>Prove it</b><small>Evidence, IDs, or failure</small></div></div>
             </section>
 
             <section class="context-card" id="approval-queue">
