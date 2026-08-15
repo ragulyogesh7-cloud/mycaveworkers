@@ -299,9 +299,12 @@ const EMPLOYEE_CATALOG = [
   },
   {
     id: 'alex', employee_code: 'CW_EMP_003', name: 'Alex', role: 'Operations Manager', department: 'Operations', color: '#3b82f6', autonomy_level: 'Level 4 (Execute with Approval)',
-    persona: 'A calm operating leader who turns ambiguous requests into accountable workflows, clear owners, service levels, and escalation paths.',
-    system_prompt: 'You are Alex, Caveworkers Operations Manager. You own workflow design, work intake, SLA tracking, vendor and team coordination, process documentation, and approval-gated operational actions.',
-    default_tools: ['Gmail', 'Google Calendar', 'Sheets', 'Project management MCP', 'Notion'], collaborates_with: ['david', 'mike', 'iris', 'emma'], status: 'active'
+    persona: 'A calm, execution-focused operations leader who turns ambiguous requests into owned workflows, practical schedules, measurable service levels, and clear escalation paths. Alex is concise, dependable, and explicit about what is planned versus what is actually completed.',
+    system_prompt: 'You are Alex, Caveworkers Operations Manager and workflow control specialist. You own intake triage, process design, task and project coordination, SLA tracking, meeting and calendar operations, vendor follow-up, operating procedures, handoffs, and escalation management. Before acting, extract the objective, owner, deadline, dependencies, and definition of done. If one critical input is missing, ask one precise question. When the inputs are sufficient, create a short execution plan, use only the tenant connectors and tools granted to you, and return evidence for every external action. Never claim a task was scheduled, assigned, emailed, documented, or completed without a provider result. Escalate security, financial, legal, people-sensitive, or destructive changes to Sarah and the appropriate specialist.',
+    default_tools: ['Gmail', 'Google Calendar', 'Sheets', 'Project management MCP', 'Notion'], collaborates_with: ['david', 'mike', 'iris', 'emma'], status: 'active',
+    operating_contract: ['Clarify the outcome and one missing critical input before acting', 'Turn requests into owner, deadline, dependency, and next-checkpoint fields', 'Run routine connector work only within the tenant-approved tool belt', 'Report planned, in-progress, verified, blocked, and escalated states separately'],
+    specialist_outputs: ['operating brief', 'task and project plan', 'SLA and escalation note', 'meeting or calendar plan', 'process SOP', 'vendor follow-up draft'],
+    high_risk_boundaries: ['payments and financial commitments', 'access or permission changes', 'destructive data changes', 'legal or people-sensitive decisions', 'mass external communication']
   },
   {
     id: 'mike', employee_code: 'CW_EMP_004', name: 'Mike', role: 'Engineering Manager', department: 'Engineering', color: '#8b5cf6', autonomy_level: 'Level 3 (Recommend with Review)',
@@ -2618,7 +2621,13 @@ ${empId === 'sarah' ? `Sarah operating contract:
 - First understand the requested outcome and identify missing inputs before any tool call.
 - Delegate to one clear specialist when domain expertise is needed, and explain the handoff in one sentence.
 - Report only what is verified. If work is blocked, say exactly what is missing and ask one precise question.
-- Use short workplace messages: answer, progress, blocker, or next action. Never write a report, checklist, fake attachment, or invented delivery confirmation.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
+- Use short workplace messages: answer, progress, blocker, or next action. Never write a report, checklist, fake attachment, or invented delivery confirmation.` : empId === 'alex' ? `Alex operating contract:
+- You are the operations manager responsible for turning requests into executable work.
+- First extract the outcome, owner, deadline, dependencies, and definition of done.
+- Ask one precise question if a critical input is missing; do not invent a deadline, recipient, task owner, or provider result.
+- When ready, state the next three operating steps and use the tenant-approved connector tool belt.
+- Coordinate David for metrics, Mike for technical work, Iris for risk and access, and Emma for customer impact when relevant.
+- Report in short workplace language using exactly one primary status: planned, working, verified, blocked, or escalated.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
 Never claim an external tool action occurred without an execution trace or verified evidence.
 
 User Manager Message: "${message}"
@@ -2634,7 +2643,9 @@ Respond as ${empName} directly to your manager in plain workplace chat. Keep it 
   if (!botAnswer) {
     botAnswer = empId === 'sarah'
       ? `I’ve got it. I’m taking ownership of “${message}” and will route the right part to the team. If I need a file, recipient, or approval before acting, I’ll ask for that explicitly. No external action has been claimed yet.`
-      : `I’ve received this. I’ll review the ${empCatalog.department.toLowerCase()} part and send Sarah a concise finding or a specific blocker. No external action has been claimed yet.`;
+      : empId === 'alex'
+        ? `I’ve got it. I’ll turn this into an operating plan with an owner, deadline, dependencies, and next checkpoint. If one critical input is missing, I’ll ask for it before using a connector. No external action has been claimed yet.`
+        : `I’ve received this. I’ll review the ${empCatalog.department.toLowerCase()} part and send Sarah a concise finding or a specific blocker. No external action has been claimed yet.`;
   }
 
   const botMsg = { sender: empId, receiver: 'manager', body: botAnswer, created_at: new Date().toISOString() };
@@ -2658,9 +2669,21 @@ function activeWorkforce(companyId: string) {
   const activeIds = (db.orgEmployees.get(companyId) || []).map((employee) => employee.id);
   const workforce = activeIds.length ? EMPLOYEE_CATALOG.filter((employee) => activeIds.includes(employee.id)) : EMPLOYEE_CATALOG;
   return (workforce.length ? workforce : EMPLOYEE_CATALOG).map((employee) => ({
-    ...employee,
+    id: employee.id,
+    employee_code: employee.employee_code,
+    name: employee.name,
+    role: employee.role,
+    department: employee.department,
+    color: employee.color,
+    status: employee.status,
+    default_tools: [...employee.default_tools],
+    collaborates_with: [...employee.collaborates_with],
     avatar_url: `/static/assets/employee-avatars/${employee.id}.webp`,
-    capability_summary: employee.id === 'sarah' ? 'Owns intake, delegation, progress updates, approvals, and the final client handoff.' : `${employee.department} specialist supporting Sarah’s delivery plan.`
+    capability_summary: employee.id === 'sarah'
+      ? 'Owns intake, delegation, progress updates, approvals, and the final client handoff.'
+      : employee.id === 'alex'
+        ? 'Turns requests into owned workflows, deadlines, dependencies, service levels, handoffs, and verified operational outcomes.'
+        : `${employee.department} specialist supporting Sarah’s delivery plan.`
   }));
 }
 
@@ -2674,7 +2697,7 @@ const WORKFORCE_DOMAINS: Array<{ employeeId: string; keywords: string[] }> = [
   { employeeId: 'iris', keywords: ['security', 'access', 'identity', 'compliance', 'it ', 'device', 'vulnerability', 'risk review'] },
   { employeeId: 'sarah', keywords: ['hire', 'recruit', 'candidate', 'interview', 'job description', 'talent', 'staffing'] },
   { employeeId: 'arav', keywords: ['people ops', 'offboarding', 'policy acknowledgement', 'engagement', 'leave', 'handbook', 'employee experience'] },
-  { employeeId: 'alex', keywords: ['route', 'workflow', 'sla', 'operations', 'vendor', 'project', 'process', 'coordinate'] }
+  { employeeId: 'alex', keywords: ['route', 'workflow', 'sla', 'operations', 'vendor', 'project', 'process', 'coordinate', 'intake', 'owner', 'deadline', 'dependency', 'handoff', 'escalation', 'runbook', 'sop', 'procedure', 'queue', 'backlog', 'schedule', 'calendar', 'meeting', 'follow-up', 'status update', 'service level'] }
 ];
 
 function selectCollaborativeTeam(question: string, companyId: string, preferredEmployeeId?: string) {
@@ -2718,6 +2741,9 @@ function collaborationFinding(employee: any, question: string, context?: Workfor
   const memoryNote = context?.memory?.length ? ` Applied role memory: ${context.memory[0].slice(0, 180)}.` : '';
   const evidenceNote = context?.live_tool_evidence?.length ? ` Live MCP evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} (${entry.status}) — ${entry.summary.slice(0, 260)}`).join(' | ')}` : '';
   const evidence = context?.live_tool_evidence?.length ? ` Evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} is ${entry.status} — ${entry.summary.slice(0, 180)}`).join('; ')}` : '';
+  if (employee.id === 'alex') {
+    return `I translated “${topic}” into an operations brief: owner, next checkpoint, dependencies, and the safest handoff. I’m sending Sarah the execution path now${context?.live_tool_evidence?.length ? ' with the verified tool result attached' : ''}. I’ll flag any missing input, SLA risk, or escalation before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
   return `I reviewed the ${employee.department.toLowerCase()} side of “${topic}”. I’m sending ${employee.name === 'Sarah' ? 'the team' : 'Sarah'} a usable recommendation now${context?.live_tool_evidence?.length ? ' with the verified tool result attached to the task evidence' : ''}. I’ll flag any missing input or risk before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
 }
 

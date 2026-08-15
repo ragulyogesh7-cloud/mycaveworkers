@@ -198,6 +198,30 @@ describe('Caveworkers security invariants', () => {
     expect(db.tasks.get(result.id)).toMatchObject({ company_id: 'company-a', owner: 'sarah', status: 'completed' });
   });
 
+  it('routes operations work to Alex and exposes his specialist operating capability', async () => {
+    db.orgEmployees.set('company-a', [
+      { id: 'alex', name: 'Alex', role: 'Operations Manager', department: 'Operations', status: 'active', tools: ['Gmail', 'Google Calendar', 'Sheets'], permissions: [] },
+      { id: 'mike', name: 'Mike', role: 'Engineering Manager', department: 'Engineering', status: 'active', tools: [], permissions: [] }
+    ]);
+
+    const result = await workforceTestHooks!.handleTaskRoutingAsync('Build an incident response runbook with an owner, deadline, SLA, and escalation path', 'company-a');
+    expect(result.participants).toEqual(expect.arrayContaining(['Manager', 'Sarah', 'Alex']));
+    expect(result.plan).toContain('Alex');
+    expect(result.answer).not.toMatch(/^#{1,6}\\s|^\\s*[-*]\\s/m);
+
+    const workforceResponse = await request(app)
+      .get('/api/workforce/workroom')
+      .set('x-caveworkers-test-user', 'user-a')
+      .expect(200);
+    const alex = workforceResponse.body.employees.find((employee: any) => employee.id === 'alex');
+    expect(alex).toMatchObject({
+      id: 'alex',
+      capability_summary: expect.stringContaining('owned workflows'),
+      avatar_url: '/static/assets/employee-avatars/alex.webp'
+    });
+    expect(alex.system_prompt).toBeUndefined();
+  });
+
   it('truthfully blocks Sarah email delivery until a tenant Gmail send capability is connected', async () => {
     const result = await workforceTestHooks!.handleTaskRoutingAsync('Send an email to ops@example.com confirming the weekly handoff', 'company-a', 'alex');
     expect(result).toMatchObject({ company_id: 'company-a', owner: 'sarah', status: 'blocked' });
