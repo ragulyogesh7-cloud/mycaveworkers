@@ -999,3 +999,37 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 @media (prefers-reduced-motion: reduce) {
   .intro-card { transition: none; }
 }
+
+
+/* Chat-room mode: employee conversation, not an execution report. */
+.room-feed { background: radial-gradient(circle at 50% 0%, rgba(126,232,255,.055), transparent 48%), rgba(5, 12, 24, .42); }
+.room-message { position: relative; grid-template-columns: 38px minmax(0, 1fr); gap: 10px; margin: 2px 0; padding: 8px 8px 10px; border: 0; border-radius: 14px; transition: background 160ms var(--ease-out), transform 160ms var(--ease-out); }
+.room-message:hover { background: rgba(255,255,255,.035); }
+.room-message .message-dp { align-self: start; margin-top: 3px; }
+.message-body { min-width: 0; padding: 8px 11px 9px; border: 1px solid rgba(157,185,211,.13); border-radius: 4px 16px 16px 16px; background: rgba(23, 38, 66, .62); box-shadow: 0 5px 16px rgba(0,0,0,.12); }
+.room-message:nth-child(even) .message-body { background: rgba(17, 30, 55, .72); }
+.room-message.result .message-body { border-color: rgba(126,232,255,.30); background: linear-gradient(135deg, rgba(48,79,130,.70), rgba(19,33,66,.78)); }
+.room-message.failure .message-body { border-color: rgba(255,142,168,.30); }
+.room-message.pending .message-body { border-style: dashed; }
+.message-meta { gap: 6px; min-height: 18px; }
+.message-meta b { font-size: 12px; }
+.message-meta time { margin-left: 4px; }
+.message-recipient { color: #9fb2ca !important; }
+.message-mentions { color: var(--aqua) !important; font-weight: 700; }
+.message-label { padding: 3px 6px; border-radius: 999px; background: rgba(126,232,255,.08); color: #9beeff !important; font: 9px "DM Mono", monospace; letter-spacing: .04em; text-transform: uppercase; }
+.message-label.result { color: #d5ffbb !important; background: rgba(185,255,176,.09); }
+.message-delete { margin-left: auto; border: 0; padding: 3px 4px; color: #7e90a9; background: transparent; font-size: 10px; opacity: 0; cursor: pointer; transition: color 160ms var(--ease-out), opacity 160ms var(--ease-out); }
+.room-message:hover .message-delete, .message-delete:focus-visible { opacity: 1; }
+.message-delete:hover { color: #ffb5c8; }
+.message-body p { margin: 6px 0 0; font-size: 14px; line-height: 1.62; }
+.room-message.result .message-body p { font-size: 15px; }
+.final-answer-label { margin-top: 5px; }
+.room-message.introduction .message-body { border-color: rgba(174,182,255,.27); background: rgba(49,54,101,.35); }
+.room-message.handoff .message-body { background: rgba(31,57,74,.57); }
+.room-message.complete .message-body { background: rgba(35,74,55,.30); }
+@media (max-width: 640px) {
+  .room-message { grid-template-columns: 32px minmax(0, 1fr); padding-inline: 2px; }
+  .message-body { padding: 8px 9px; }
+  .message-body p, .room-message.result .message-body p { font-size: 14px; line-height: 1.58; }
+  .message-delete { opacity: 1; }
+}

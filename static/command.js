@@ -259,14 +259,14 @@ function renderWorkroomPresence() {
 }
 
 function messageKey(message) {
-  return `${message.task_id || 'room'}:${message.created_at || ''}:${message.sender || ''}:${message.receiver || ''}:${message.body || ''}`;
+  return message.chat_id || `${message.task_id || 'room'}:${message.created_at || ''}:${message.sender_id || message.sender || ''}:${message.receiver_id || message.receiver || ''}:${message.body || ''}`;
 }
 
 function messageTone(kind) {
   if (kind === 'approval_required') return 'approval';
   if (['blocked', 'action_failed', 'worker_failed'].includes(kind)) return 'failure';
   if (['completed', 'action_completed'].includes(kind)) return 'complete';
-  if (kind === 'manager_response' || kind === 'manager_result') return 'result';
+  if (['manager_response', 'manager_result', 'final_answer'].includes(kind)) return 'result';
   if (kind === 'introduction') return 'introduction';
   if (['handoff', 'handoff_ack'].includes(kind)) return 'handoff';
   if (kind === 'received') return 'manager';
@@ -299,7 +299,7 @@ function cleanChatCopy(value) {
 function renderRoomFeed(shouldFollow = roomAtLatest()) {
   const container = $('#workroom-thread');
   if (!container) return;
-  const all = [...workroomMessages, ...pendingMessages].sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()).slice(-140);
+  const all = [...workroomMessages, ...pendingMessages].filter((message) => message.chat_visible !== false && message.sender !== 'You').sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()).slice(-140);
   if (!all.length) {
     container.innerHTML = `<div class="room-empty"><span class="room-empty-mark">✦</span><h3>Your company room is ready.</h3><p>Assign a task below and your team’s routing, collaboration, and review steps will appear here in realtime.</p></div>`;
     return;
@@ -314,12 +314,14 @@ function renderRoomFeed(shouldFollow = roomAtLatest()) {
     article.style.setProperty('--message-delay', `${Math.min(index, 10) * 35}ms`);
     const taskReference = message.task_id ? `<button class="message-task" data-task-id="${safe(message.task_id)}" type="button">Task #${safe(message.task_id)}</button>` : '';
     const approvalAction = message.approval_id ? `<button class="message-approval" data-approval-id="${safe(message.approval_id)}" data-approval-status="approved" type="button">Approve</button>` : '';
+    const deleteAction = message.chat_id && message.task_id ? `<button class="message-delete" data-delete-chat-id="${safe(message.chat_id)}" data-delete-task-id="${safe(message.task_id)}" type="button" aria-label="Delete this message" title="Delete message">Delete</button>` : '';
     const senderName = message.sender === 'Manager' ? 'You' : (senderEmployee?.name || message.sender || 'Caveworkers');
     const recipient = message.receiver && message.receiver !== 'Manager' ? `<span class="message-recipient">to ${safe(message.receiver)}</span>` : '';
     const mentionNames = Array.isArray(message.mentions) ? message.mentions.map((id) => employeeById(id)?.name || id).filter(Boolean) : [];
     const mentionMarkup = mentionNames.length ? `<span class="message-mentions">${mentionNames.map((name) => `@${safe(name)}`).join(' ')}</span>` : '';
-    const messageLabel = tone === 'result' ? 'Manager update' : tone === 'approval' ? 'Needs your attention' : tone === 'failure' ? 'Blocked' : tone === 'complete' ? 'Completed' : tone === 'introduction' ? 'Introduces self' : tone === 'handoff' && message.kind === 'handoff_ack' ? 'Handoff received' : tone === 'handoff' ? 'Handoff' : message.kind === 'team_context' ? 'Coordination' : '';
-    article.innerHTML = `${avatarMarkup(senderEmployee || { id: '', color: tone === 'approval' ? '#ffd78f' : '#82e9ff' }, senderName, 'message-dp')}<div class="message-body"><div class="message-meta"><b>${safe(senderName)}</b>${recipient}${mentionMarkup}${messageLabel ? `<span class="message-label ${tone}">${safe(messageLabel)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}</div>${tone === 'result' ? '<span class="final-answer-label">Sarah’s update</span>' : ''}<p>${safe(cleanChatCopy(message.body || ''))}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
+    const messageLabel = tone === 'result' ? (message.kind === 'final_answer' ? 'Final answer' : 'Team update') : tone === 'approval' ? 'Needs your attention' : tone === 'failure' ? 'Blocked' : tone === 'complete' ? 'Completed' : tone === 'introduction' ? 'Introduces self' : tone === 'handoff' && message.kind === 'handoff_ack' ? 'Handoff received' : tone === 'handoff' ? 'Handoff' : message.kind === 'team_context' ? 'Team chat' : message.kind === 'queued' ? 'Sarah is coordinating' : '';
+    article.dataset.chatId = message.chat_id || '';
+    article.innerHTML = `${avatarMarkup(senderEmployee || { id: '', color: tone === 'approval' ? '#ffd78f' : '#82e9ff' }, senderName, 'message-dp')}<div class="message-body"><div class="message-meta"><b>${safe(senderName)}</b>${recipient}${mentionMarkup}${messageLabel ? `<span class="message-label ${tone}">${safe(messageLabel)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}${deleteAction}</div>${tone === 'result' ? '<span class="final-answer-label">Final answer</span>' : ''}<p>${safe(cleanChatCopy(message.body || ''))}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
     fragment.append(article);
   });
   container.replaceChildren(fragment);
@@ -330,13 +332,7 @@ function renderRoomFeed(shouldFollow = roomAtLatest()) {
 function rebuildWorkroomMessages() {
   const source = [];
   workroomTasks.forEach((task) => {
-    (task.trace || []).forEach((step) => { if (step?.body) source.push({ ...step, task_id: task.id }); });
-    if (task.answer && !['queued', 'processing'].includes(task.status)) {
-      source.push({ kind: 'manager_response', sender: 'Sarah', receiver: 'Manager', body: task.answer, task_id: task.id, created_at: task.completed_at || task.created_at });
-    }
-    if (task.execution && !['queued', 'not_required'].includes(task.execution.status)) {
-      source.push({ kind: task.execution.status === 'succeeded' ? 'action_completed' : ['failed', 'blocked'].includes(task.execution.status) ? 'action_failed' : 'action_update', sender: 'Sarah', receiver: 'Manager', body: `Execution status — ${task.execution.status.replace(/_/g, ' ')}: ${task.execution.summary}`, task_id: task.id, created_at: task.execution.updated_at || task.completed_at || task.created_at });
-    }
+    (task.chat_messages || []).forEach((message) => { if (message?.body) source.push({ ...message, task_id: task.id, chat_visible: true }); });
   });
   const seen = new Set();
   workroomMessages = source.filter((message) => {
@@ -372,7 +368,12 @@ function applyWorkroomEvent(event) {
   if (event.type === 'presence' && event.presence) upsertWorkroomPresence(event.presence);
   if (event.type === 'message' && event.message) {
     const key = messageKey(event.message);
-    if (!workroomMessages.some((message) => messageKey(message) === key)) workroomMessages.push(event.message);
+    if (event.message.chat_visible !== false && !workroomMessages.some((message) => messageKey(message) === key)) workroomMessages.push(event.message);
+    renderRoomFeed(follow);
+  }
+  if (event.type === 'chat_deleted' && event.chat_id) {
+    workroomMessages = workroomMessages.filter((message) => messageKey(message) !== event.chat_id);
+    workroomTasks = workroomTasks.map((task) => task.id === event.task_id ? { ...task, chat_messages: (task.chat_messages || []).filter((message) => messageKey(message) !== event.chat_id) } : task);
     renderRoomFeed(follow);
   }
   if (event.type === 'task_update' && event.task) {
@@ -413,7 +414,7 @@ function connectWorkroom() {
   const receive = (event) => { try { applyWorkroomEvent(JSON.parse(event.data)); } catch (error) { console.warn('Invalid workroom update:', error); } };
   workroomSource.onopen = () => setRoomConnection('LIVE', 'Realtime updates are flowing from your workforce.');
   workroomSource.onmessage = receive;
-  ['connected', 'presence', 'message', 'task_update'].forEach((type) => workroomSource.addEventListener(type, receive));
+  ['connected', 'presence', 'message', 'chat_deleted', 'task_update'].forEach((type) => workroomSource.addEventListener(type, receive));
   workroomSource.onerror = () => setRoomConnection('RECONNECTING…', 'Reconnecting to your workforce activity stream…');
 }
 
@@ -431,6 +432,18 @@ async function loadApprovals() {
     console.error('Unable to load approvals:', error);
     if (status) status.textContent = 'Unavailable';
     container.innerHTML = '<p class="empty-state-sm">The approval queue could not be loaded.</p>';
+  }
+}
+
+async function deleteChatMessage(taskId, chatId) {
+  if (!taskId || !chatId) return;
+  try {
+    await responseJson(`/api/workforce/tasks/${encodeURIComponent(taskId)}/chat/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
+    workroomMessages = workroomMessages.filter((message) => messageKey(message) !== chatId);
+    renderRoomFeed(false);
+    setRoomNotice('Message deleted from your Company Room.', 'success');
+  } catch (error) {
+    setRoomNotice(error.message || 'This message could not be deleted.', 'error');
   }
 }
 
@@ -473,9 +486,8 @@ async function loadTaskSummaries() {
 function renderTaskInRoom(taskId) {
   const task = taskSummaries.find((entry) => String(entry.id) === String(taskId)) || workroomTasks.find((entry) => String(entry.id) === String(taskId));
   if (!task) return;
-  const trace = task.trace || [];
-  if (trace.length) {
-    const taskMessages = trace.filter((step) => step?.body).map((step) => ({ ...step, task_id: task.id }));
+  if ((task.chat_messages || []).length) {
+    const taskMessages = (task.chat_messages || []).filter((step) => step?.body).map((step) => ({ ...step, task_id: task.id }));
     const existingKeys = new Set(workroomMessages.map(messageKey));
     taskMessages.forEach((message) => { if (!existingKeys.has(messageKey(message))) workroomMessages.push(message); });
     renderRoomFeed(false);
@@ -493,7 +505,7 @@ async function submitTask(event) {
   if (!request) { input?.focus(); return; }
   const preferred = select?.value || '';
   const target = preferred === '__whole_team__' ? 'the whole team' : employeeById(preferred)?.name || 'the best available team';
-  const pending = { kind: 'received', sender: 'You', receiver: target, body: request, created_at: new Date().toISOString(), pending: true };
+  const pending = { kind: 'employee_typing', sender: 'Sarah', sender_id: 'sarah', receiver: target, body: 'Sarah is bringing the right people into this conversation…', created_at: new Date().toISOString(), pending: true, chat_visible: true };
   pendingMessages.push(pending);
   renderRoomFeed(true);
   input.value = '';
@@ -504,11 +516,12 @@ async function submitTask(event) {
   setRoomNotice(`Routing this task to ${target}.`, '');
   try {
     const task = await responseJson('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request, preferred_employee_id: preferred || undefined }) });
-    pending.pending = false;
-    pending.task_id = task.id;
-    pending.receiver = (task.participants || []).slice(1).join(', ') || target;
+    pendingMessages = pendingMessages.filter((entry) => entry !== pending);
+    const existingTask = workroomTasks.find((entry) => entry.id === task.id);
+    if (!existingTask) workroomTasks.push(task);
+    rebuildWorkroomMessages();
     setRoomNotice(`Task #${task.id} is in the company room. The team will post updates here.`, 'success');
-    await Promise.all([loadTaskSummaries(), loadWorkroomSnapshot()]);
+    void Promise.all([loadTaskSummaries()]);
   } catch (error) {
     pendingMessages = pendingMessages.filter((entry) => entry !== pending);
     renderRoomFeed();
@@ -540,6 +553,8 @@ function bindRoomInteractions() {
   document.addEventListener('click', (event) => {
     const approval = event.target.closest('[data-approval-id]');
     if (approval) resolveApproval(approval.dataset.approvalId, approval.dataset.approvalStatus);
+    const deleteButton = event.target.closest('[data-delete-chat-id]');
+    if (deleteButton) { void deleteChatMessage(deleteButton.dataset.deleteTaskId, deleteButton.dataset.deleteChatId); return; }
     const introButton = event.target.closest('[data-introduce-employee]');
     if (introButton) {
       const employee = employeeById(introButton.dataset.introduceEmployee);

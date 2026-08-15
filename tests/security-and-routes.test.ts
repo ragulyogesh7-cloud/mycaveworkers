@@ -416,6 +416,36 @@ describe('Caveworkers security invariants', () => {
     expect(addressedAssignments.every((message: any) => Array.isArray(message.mentions) && message.body.includes('@'))).toBe(true);
   });
 
+  it('exposes curated employee chat without private trace and supports tenant-scoped message deletion', async () => {
+    db.orgEmployees.set('company-a', [
+      { id: 'sarah', name: 'Sarah', role: 'Talent & HR Manager', department: 'People Operations', status: 'active', tools: [], permissions: [] },
+      { id: 'mike', name: 'Mike', role: 'Engineering Manager', department: 'Engineering', status: 'active', tools: ['GitHub MCP'], permissions: [] }
+    ]);
+
+    const result = await workforceTestHooks!.handleTaskRoutingAsync('Review the GitHub release incident and prepare a technical handoff', 'company-a', 'mike');
+    const workroomResponse = await request(app)
+      .get('/api/workforce/workroom')
+      .set('x-caveworkers-test-user', 'user-a')
+      .expect(200);
+    const roomTask = workroomResponse.body.tasks.find((task: any) => task.id === result.id);
+    expect(roomTask).toBeDefined();
+    expect(roomTask.trace).toBeUndefined();
+    expect(roomTask.chat_messages.length).toBeGreaterThan(0);
+    expect(roomTask.chat_messages.every((message: any) => message.chat_visible === true && message.sender_id)).toBe(true);
+    expect(roomTask.chat_messages.some((message: any) => message.body.includes('I’m Mike'))).toBe(true);
+
+    const deletedMessage = roomTask.chat_messages[0];
+    await csrfRequest('user-a', 'delete', `/api/workforce/tasks/${result.id}/chat/${deletedMessage.chat_id}`).expect(200);
+
+    const refreshed = await request(app)
+      .get('/api/workforce/workroom')
+      .set('x-caveworkers-test-user', 'user-a')
+      .expect(200);
+    const refreshedTask = refreshed.body.tasks.find((task: any) => task.id === result.id);
+    expect(refreshedTask.chat_messages.some((message: any) => message.chat_id === deletedMessage.chat_id)).toBe(false);
+    expect(db.tasks.get(result.id)?.trace?.length).toBeGreaterThan(0);
+  });
+
   it('truthfully blocks Sarah email delivery until a tenant Gmail send capability is connected', async () => {
     const result = await workforceTestHooks!.handleTaskRoutingAsync('Send an email to ops@example.com confirming the weekly handoff', 'company-a', 'alex');
     expect(result).toMatchObject({ company_id: 'company-a', owner: 'sarah', status: 'blocked' });

@@ -454,6 +454,8 @@ interface TaskRecord {
   plan: string;
   created_at: string;
   trace: any[];
+  /** IDs of employee chat messages hidden by the tenant user. The private trace remains intact for auditability. */
+  deleted_chat_message_ids?: string[];
   participants?: string[];
   collaboration_summary?: string;
   live_tool_evidence?: WorkforceLiveToolEvidence[];
@@ -826,6 +828,53 @@ function workroomStreamKey(companyId: string, taskId?: number) {
   return `${companyId}:${taskId || 'all'}`;
 }
 
+const EMPLOYEE_CHAT_KINDS = new Set([
+  'queued',
+  'introduction',
+  'team_context',
+  'group_message',
+  'handoff',
+  'handoff_ack',
+  'manager_response',
+  'manager_result',
+  'final_answer',
+  'action_completed',
+  'action_failed',
+  'approval_declined'
+]);
+
+function employeeForChatMessage(message: any) {
+  const senderId = String(message?.sender_id || '').toLowerCase();
+  const senderName = String(message?.sender || '').trim().toLowerCase();
+  return EMPLOYEE_CATALOG.find((employee) => employee.id === senderId || employee.name.toLowerCase() === senderName);
+}
+
+function chatMessageId(taskId: number, message: any) {
+  if (message?.chat_id) return String(message.chat_id);
+  return crypto.createHash('sha1').update(JSON.stringify({ taskId, kind: message?.kind || 'employee_message', sender: message?.sender || '', receiver: message?.receiver || '', created_at: message?.created_at || '', body: message?.body || '' })).digest('hex').slice(0, 24);
+}
+
+function publicEmployeeChat(task: TaskRecord) {
+  const deleted = new Set(task.deleted_chat_message_ids || []);
+  const messages: any[] = [];
+  const seen = new Set<string>();
+  const add = (message: any) => {
+    if (!message?.body || !employeeForChatMessage(message)) return;
+    const kind = String(message.kind || 'employee_message');
+    if (!EMPLOYEE_CHAT_KINDS.has(kind)) return;
+    const chat_id = chatMessageId(task.id, message);
+    if (deleted.has(chat_id) || seen.has(chat_id)) return;
+    seen.add(chat_id);
+    const employee = employeeForChatMessage(message);
+    messages.push({ ...message, chat_id, task_id: task.id, sender_id: message.sender_id || employee?.id, chat_visible: true });
+  };
+  (task.trace || []).forEach(add);
+  if (task.answer && !['queued', 'processing'].includes(task.status)) {
+    add({ kind: 'final_answer', thread_role: 'final_answer', sender: 'Sarah', receiver: 'Company room', sender_id: 'sarah', receiver_id: 'company-room', body: task.answer, created_at: task.completed_at || task.created_at });
+  }
+  return messages.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
+}
+
 function workroomSnapshot(task: TaskRecord) {
   return {
     id: task.id,
@@ -835,7 +884,7 @@ function workroomSnapshot(task: TaskRecord) {
     status: task.status,
     answer: task.answer,
     plan: task.plan,
-    trace: task.trace || [],
+    chat_messages: publicEmployeeChat(task),
     participants: task.participants || [],
     collaboration_summary: task.collaboration_summary,
     live_tool_evidence: task.live_tool_evidence || [],
@@ -860,8 +909,11 @@ function emitWorkroomEvent(companyId: string, taskId: number | undefined, payloa
 }
 
 function emitWorkroomTrace(companyId: string, taskId: number, trace: any[]) {
+  const task = db.tasks.get(taskId);
   trace.filter((message) => message?.body).forEach((message) => {
-    emitWorkroomEvent(companyId, taskId, { type: 'message', message: { ...message, task_id: taskId } });
+    if (!task) return;
+    const chatMessages = publicEmployeeChat({ ...task, trace: [message] });
+    if (chatMessages.length) emitWorkroomEvent(companyId, taskId, { type: 'message', message: chatMessages[0] });
   });
 }
 
@@ -1541,7 +1593,7 @@ async function recordWorkforceApprovalOutcome(approval: ApprovalRecord, status: 
   task.execution = { action_type: String(approval.payload?.action_type || 'external.action'), status, summary: summary.slice(0, 1200), updated_at: new Date().toISOString(), result };
   task.status = status === 'succeeded' || status === 'cancelled' ? 'completed' : status === 'failed' ? 'failed' : status === 'blocked' ? 'blocked' : 'pending_approval';
   const actor = EMPLOYEE_CATALOG.find((employee) => employee.id === approval.payload?.employee_id) || EMPLOYEE_CATALOG.find((employee) => employee.id === 'sarah');
-  task.trace = [...(task.trace || []), { kind: status === 'succeeded' ? 'action_completed' : status === 'cancelled' ? 'approval_declined' : status === 'failed' || status === 'blocked' ? 'action_failed' : 'action_update', sender: actor?.name || 'Sarah', receiver: 'Manager', body: summary.slice(0, 1200), created_at: new Date().toISOString() }];
+  task.trace = [...(task.trace || []), { kind: status === 'succeeded' ? 'action_completed' : status === 'cancelled' ? 'approval_declined' : status === 'failed' || status === 'blocked' ? 'action_failed' : 'action_update', sender: actor?.name || 'Sarah', sender_id: actor?.id || 'sarah', receiver: 'Company room', receiver_id: 'company-room', body: summary.slice(0, 1200), created_at: new Date().toISOString() }];
   task.completed_at = new Date().toISOString();
   db.tasks.set(task.id, task);
   await persistTaskRecord(task);
@@ -2559,7 +2611,7 @@ app.get('/api/tasks/:id/group-chat', async (req, res) => {
   await hydrateTenantTasks(companyId);
   const task = db.tasks.get(Number(req.params.id));
   if (!task || task.company_id !== companyId) return res.status(404).json({ error: 'Task room not found.' });
-  res.json({ task_id: task.id, question: task.question, owner: task.owner, participants: task.participants || ['Manager', task.owner], messages: task.trace.filter((step) => !['rag_retrieval', 'verified'].includes(step.kind)) });
+  res.json({ task_id: task.id, question: task.question, owner: task.owner, participants: task.participants || ['Manager', task.owner], messages: publicEmployeeChat(task) });
 });
 
 
@@ -2581,6 +2633,24 @@ app.post('/api/workforce/workroom', async (req, res) => {
   if (!message) return res.status(400).json({ error: 'A company workroom message is required.' });
   const result = await enqueueWorkforceTask(companyId, message, typeof req.body?.preferred_employee_id === 'string' ? req.body.preferred_employee_id : undefined, typeof req.body?.email_employee_id === 'string' ? req.body.email_employee_id : undefined);
   res.status(202).json(result);
+});
+
+app.delete('/api/workforce/tasks/:taskId/chat/:messageId', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
+  if (await enforceWorkspaceAccess(req, res)) return;
+  await hydrateTenantTasks(companyId);
+  const taskId = Number(req.params.taskId);
+  const task = db.tasks.get(taskId);
+  if (!task || task.company_id !== companyId) return res.status(404).json({ error: 'Chat task not found.' });
+  const messageId = String(req.params.messageId || '');
+  if (!publicEmployeeChat(task).some((message) => message.chat_id === messageId)) return res.status(404).json({ error: 'Chat message not found.' });
+  task.deleted_chat_message_ids = [...new Set([...(task.deleted_chat_message_ids || []), messageId])];
+  db.tasks.set(task.id, task);
+  await persistTaskRecord(task);
+  emitWorkroomEvent(companyId, task.id, { type: 'chat_deleted', task_id: task.id, chat_id: messageId });
+  res.json({ ok: true, task_id: task.id, chat_id: messageId });
 });
 
 app.get('/api/workforce/stream', (req, res) => {
@@ -3047,7 +3117,7 @@ app.get('/api/tasks', async (req, res) => {
     };
     const pendingApproval = Array.from(db.approvals.values()).find((a) => a.company_id === companyId && a.task_id === t.id && a.status === 'pending');
     return {
-      ...t,
+      ...(() => { const { trace: _privateTrace, ...safeTask } = t; return { ...safeTask, chat_messages: publicEmployeeChat(t) }; })(),
       owner_info: ownerEmp,
       status: pendingApproval ? 'pending_approval' : t.status || 'completed',
       has_pending_approval: !!pendingApproval,
