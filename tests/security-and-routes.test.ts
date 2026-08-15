@@ -383,6 +383,39 @@ describe('Caveworkers security invariants', () => {
     expect(iris.system_prompt).toBeUndefined();
   });
 
+  it('introduces active employees and preserves addressed handoffs in the company-room trace', async () => {
+    db.orgEmployees.set('company-a', [
+      { id: 'sarah', name: 'Sarah', role: 'Talent & HR Manager', department: 'People Operations', status: 'active', tools: [], permissions: [] },
+      { id: 'mike', name: 'Mike', role: 'Engineering Manager', department: 'Engineering', status: 'active', tools: ['GitHub MCP'], permissions: [] },
+      { id: 'iris', name: 'Iris', role: 'IT & Security Operations Manager', department: 'IT & Security', status: 'active', tools: ['ITSM MCP'], permissions: [] }
+    ]);
+
+    const result = await workforceTestHooks!.handleTaskRoutingAsync('Review the GitHub release incident, coordinate the security check, and prepare the safest technical handoff', 'company-a', 'mike');
+    const introductions = result.trace.filter((message: any) => message.kind === 'introduction');
+    expect(introductions).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sender: 'Sarah', thread_role: 'introduction', receiver_id: 'company-room' }),
+      expect.objectContaining({ sender: 'Mike', body: expect.stringContaining('I’m Mike') }),
+      expect.objectContaining({ sender: 'Iris', body: expect.stringContaining('I’m Iris') })
+    ]));
+
+    const mikeHandoff = result.trace.find((message: any) => message.kind === 'handoff' && message.sender === 'Mike' && message.receiver === 'Sarah');
+    expect(mikeHandoff).toMatchObject({
+      sender_id: 'mike',
+      receiver_id: 'sarah',
+      mentions: ['sarah'],
+      thread_role: 'handoff'
+    });
+    expect(mikeHandoff.body).toContain('Sarah');
+
+    const handoffAcknowledgement = result.trace.find((message: any) => message.kind === 'handoff_ack' && message.sender === 'Sarah' && message.receiver === 'Mike');
+    expect(handoffAcknowledgement).toMatchObject({ sender_id: 'sarah', receiver_id: 'mike', mentions: ['mike'], thread_role: 'handoff_ack' });
+    expect(handoffAcknowledgement.body).toContain('@Mike');
+
+    const addressedAssignments = result.trace.filter((message: any) => message.thread_role === 'assignment');
+    expect(addressedAssignments.length).toBeGreaterThan(0);
+    expect(addressedAssignments.every((message: any) => Array.isArray(message.mentions) && message.body.includes('@'))).toBe(true);
+  });
+
   it('truthfully blocks Sarah email delivery until a tenant Gmail send capability is connected', async () => {
     const result = await workforceTestHooks!.handleTaskRoutingAsync('Send an email to ops@example.com confirming the weekly handoff', 'company-a', 'alex');
     expect(result).toMatchObject({ company_id: 'company-a', owner: 'sarah', status: 'blocked' });

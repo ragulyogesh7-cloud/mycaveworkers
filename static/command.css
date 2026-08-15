@@ -934,3 +934,68 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .message-label.failure { color: #ff9fa7; border-color: rgba(255,159,167,.25); background: rgba(255,159,167,.08); }
 @media (max-width: 680px) { .message-dp.employee-profile { width: 34px; height: 34px; } .stack-avatar.employee-profile { width: 34px; height: 34px; } }
 @media (prefers-reduced-motion: reduce) { .room-message:hover .message-dp.employee-profile { transform: none; } }
+
+
+/* Employee conversation layer: clear introductions, direct handoffs, and visible mentions. */
+.room-communication-guide {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  margin: 14px 0 12px;
+  padding: 11px 12px;
+  border: 1px solid rgba(126, 232, 255, .16);
+  border-radius: 14px;
+  background: linear-gradient(135deg, rgba(126, 232, 255, .08), rgba(174, 182, 255, .05));
+}
+.room-communication-guide .guide-mark {
+  display: grid;
+  flex: 0 0 25px;
+  width: 25px;
+  height: 25px;
+  place-items: center;
+  border: 1px solid rgba(126, 232, 255, .35);
+  border-radius: 9px;
+  color: #061622;
+  background: var(--aqua);
+  font: 700 14px "DM Mono", monospace;
+}
+.room-communication-guide p { margin: 0; color: #b9c8e4; font-size: 11px; line-height: 1.52; }
+.room-communication-guide b { display: block; margin-bottom: 2px; color: #eff7ff; font-size: 12px; }
+.workroom-introductions { display: grid; gap: 7px; margin-top: 10px; }
+.intro-card {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding: 9px;
+  border: 1px solid rgba(255, 255, 255, .07);
+  border-radius: 13px;
+  background: rgba(255, 255, 255, .035);
+  transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+}
+.intro-card:hover { border-color: color-mix(in srgb, var(--avatar-color) 42%, transparent); background: rgba(255, 255, 255, .06); transform: translateY(-1px); }
+.intro-dp { width: 28px; height: 28px; border-radius: 10px; }
+.intro-card-copy { min-width: 0; }
+.intro-card-copy b, .intro-card-copy small, .intro-card-copy p { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.intro-card-copy b { color: #eef5ff; font-size: 11px; }
+.intro-card-copy small { margin-top: 2px; color: #93a4c5; font-size: 10px; }
+.intro-card-copy p { margin: 3px 0 0; color: #7182a4; font-size: 10px; }
+.intro-ask { padding: 5px 7px; border: 1px solid rgba(126, 232, 255, .18); border-radius: 8px; color: #aeefff; background: rgba(126, 232, 255, .07); font: 10px "DM Mono", monospace; white-space: nowrap; cursor: pointer; }
+.intro-ask:hover { border-color: rgba(126, 232, 255, .55); background: rgba(126, 232, 255, .15); }
+.room-message.introduction { margin: 5px 0; padding: 13px 13px; border: 1px solid rgba(126, 232, 255, .16); border-radius: 14px; background: rgba(126, 232, 255, .045); }
+.room-message.introduction .message-avatar { border-color: color-mix(in srgb, var(--avatar-color) 60%, white); }
+.room-message.introduction .message-body p { color: #cfe6f2; }
+.room-message.handoff { padding-block: 14px; border-left: 2px solid rgba(174, 182, 255, .42); background: linear-gradient(90deg, rgba(174, 182, 255, .055), transparent 78%); }
+.room-message.handoff .message-body p { color: #d8dcf4; }
+.message-recipient { color: #9eb1d4 !important; }
+.message-mentions { color: #8cecff !important; font-family: "DM Mono", monospace; }
+.message-label.introduction { color: #9befff; border-color: rgba(126, 232, 255, .25); background: rgba(126, 232, 255, .08); }
+.message-label.handoff { color: #c8c9ff; border-color: rgba(174, 182, 255, .26); background: rgba(174, 182, 255, .09); }
+@media (max-width: 680px) {
+  .intro-card { grid-template-columns: 28px minmax(0, 1fr); }
+  .intro-ask { grid-column: 2; justify-self: start; }
+  .room-communication-guide { margin-top: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .intro-card { transition: none; }
+}

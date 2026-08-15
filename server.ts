@@ -859,6 +859,12 @@ function emitWorkroomEvent(companyId: string, taskId: number | undefined, payloa
   });
 }
 
+function emitWorkroomTrace(companyId: string, taskId: number, trace: any[]) {
+  trace.filter((message) => message?.body).forEach((message) => {
+    emitWorkroomEvent(companyId, taskId, { type: 'message', message: { ...message, task_id: taskId } });
+  });
+}
+
 function setEmployeePresence(companyId: string, employeeId: string, status: 'idle' | 'working' | 'offline', taskId?: number) {
   const presence = { employee_id: employeeId, status, task_id: taskId, last_seen_at: new Date().toISOString() };
   db.employeePresence.set(`${companyId}:${employeeId}`, presence);
@@ -988,6 +994,7 @@ async function processNextWorkforceJob() {
       task.started_at = task.started_at || new Date().toISOString();
       task.completed_at = new Date().toISOString();
       await persistTaskRecord(task);
+      emitWorkroomTrace(job.company_id, task.id, task.trace || []);
       job.status = 'completed'; job.updated_at = new Date().toISOString(); await persistWorkforceJob(job);
       emitWorkroomEvent(job.company_id, task.id, { type: 'task_update', task: workroomSnapshot(task) });
     } catch (error: any) {
@@ -995,8 +1002,9 @@ async function processNextWorkforceJob() {
       const failureDetail = String(error?.message || 'Worker execution failed').slice(0, 300);
       task.answer = `### Sarah’s manager update (Task #${task.id})\n\nI could not complete the requested work because the execution service returned a recoverable failure. I have **not** represented a draft, tool intent, or partial planning as completed work.\n\n**What I completed**\n- Recorded the task, assigned delivery ownership, and preserved the workroom trace.\n- Stopped any external action; no email, write, payment, or account change was performed.\n\n**Next action**\nRetry this task after the configured model, connector, or source is available. If the problem persists, review the connection state in Settings and share the task trace with support.`;
       task.execution = { action_type: task.execution?.action_type || 'none', status: 'failed', summary: 'Sarah could not complete the execution run. No external action was performed.', updated_at: new Date().toISOString() };
-      task.trace = [...(task.trace || []), { kind: 'manager_result', sender: 'Sarah', receiver: 'Manager', body: 'I could not complete this run. I preserved the trace, performed no external action, and provided the next step in the final response.', created_at: new Date().toISOString() }];
+      task.trace = [...(task.trace || []), { kind: 'manager_result', thread_role: 'manager_result', sender: 'Sarah', receiver: 'Manager', sender_id: 'sarah', receiver_id: 'manager', body: 'I could not complete this run. I preserved the trace, performed no external action, and provided the next step in the final response.', created_at: new Date().toISOString() }];
       await updateQueuedTask(task, 'failed', failureDetail);
+      emitWorkroomTrace(job.company_id, task.id, task.trace.slice(-1));
       job.status = 'failed'; job.error = failureDetail; job.updated_at = new Date().toISOString(); await persistWorkforceJob(job);
     } finally {
       workerEmployees.forEach((employeeId) => setEmployeePresence(job.company_id, employeeId, 'idle'));
@@ -2832,38 +2840,57 @@ async function loadWorkforceTaskContext(companyId: string, employee: any): Promi
   return { employee, tools: tools.slice(0, 8), memory: memory.slice(0, 4).map((entry) => entry.content), connectors: connectors.filter((connector) => connector.status === 'connected').slice(0, 5).map((connector) => connector.name), live_tool_evidence: [] };
 }
 
-function collaborationFinding(employee: any, question: string, context?: WorkforceTaskContext) {
+const EMPLOYEE_COMMUNICATION_FOCUS: Record<string, string> = {
+  sarah: 'intake, delegation, approvals, and the final manager handoff',
+  david: 'metrics, trends, dashboards, and decision-ready analysis',
+  alex: 'owners, deadlines, dependencies, service levels, and operational handoffs',
+  mike: 'technical planning, repositories, incidents, architecture, and release safety',
+  emma: 'customer context, adoption, support quality, and account health',
+  arav: 'employee lifecycle, policy coordination, and confidential people operations',
+  olivia: 'qualification, pipeline truth, follow-up, renewals, and forecast evidence',
+  maya: 'positioning, campaigns, content, experiments, and measurable growth',
+  priya: 'invoices, controls, cash visibility, reconciliation, and finance exceptions',
+  iris: 'least privilege, incidents, vulnerabilities, compliance, and safe change control'
+};
+
+function employeeIntroduction(employee: any) {
+  const focus = EMPLOYEE_COMMUNICATION_FOCUS[employee.id] || `${employee.department.toLowerCase()} delivery`;
+  return `Hi team — I’m ${employee.name}, the ${employee.role}. I’m covering ${focus}. I’ll share concise findings, name the evidence, and hand off blockers instead of claiming work I haven’t verified.`;
+}
+
+function collaborationFinding(employee: any, question: string, context?: WorkforceTaskContext, recipientName = 'Sarah') {
   const topic = question.length > 110 ? `${question.slice(0, 110)}…` : question;
+  const recipient = recipientName || 'Sarah';
   const toolNote = context?.tools?.length ? ` Available permissioned tools: ${context.tools.join(', ')}.` : '';
   const connectorNote = context?.connectors?.length ? ` Connected tenant tools considered: ${context.connectors.join(', ')}.` : '';
   const memoryNote = context?.memory?.length ? ` Applied role memory: ${context.memory[0].slice(0, 180)}.` : '';
   const evidenceNote = context?.live_tool_evidence?.length ? ` Live MCP evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} (${entry.status}) — ${entry.summary.slice(0, 260)}`).join(' | ')}` : '';
   const evidence = context?.live_tool_evidence?.length ? ` Evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} is ${entry.status} — ${entry.summary.slice(0, 180)}`).join('; ')}` : '';
   if (employee.id === 'alex') {
-    return `I translated “${topic}” into an operations brief: owner, next checkpoint, dependencies, and the safest handoff. I’m sending Sarah the execution path now${context?.live_tool_evidence?.length ? ' with the verified tool result attached' : ''}. I’ll flag any missing input, SLA risk, or escalation before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+    return `I translated “${topic}” into an operations brief for ${recipient}: owner, next checkpoint, dependencies, and the safest handoff. I’m sending ${recipient} the execution path now${context?.live_tool_evidence?.length ? ' with the verified tool result attached' : ''}. I’ll flag any missing input, SLA risk, or escalation before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
   if (employee.id === 'mike') {
-    return `I reviewed the engineering side of "${topic}". I'm sending Sarah a technical brief with: risk classification, affected components, recommended approach, and the safest next step${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any production risk, security concern, or breaking change before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+    return `I reviewed the engineering side of "${topic}". I'm sending ${recipient} a technical brief with: risk classification, affected components, recommended approach, and the safest next step${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any production risk, security concern, or breaking change before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
   if (employee.id === 'emma') {
-    return `I reviewed the customer-impact side of "${topic}". I'm sending Sarah a success brief with: customer context, verified facts, impact and urgency, recommended response, owner, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any promise, refund, security, privacy, or escalation risk before customer-facing action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+    return `I reviewed the customer-impact side of "${topic}". I'm sending ${recipient} a success brief with: customer context, verified facts, impact and urgency, recommended response, owner, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any promise, refund, security, privacy, or escalation risk before customer-facing action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
   if (employee.id === 'arav') {
-    return `I reviewed the people-operations side of "${topic}". I'm sending Sarah a people brief with: employee or team scope, verified facts, policy and approval needs, privacy considerations, owner, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any employment, legal, medical, confidentiality, access, or employee-relations risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+    return `I reviewed the people-operations side of "${topic}". I'm sending ${recipient} a people brief with: employee or team scope, verified facts, policy and approval needs, privacy considerations, owner, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any employment, legal, medical, confidentiality, access, or employee-relations risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
   if (employee.id === 'olivia') {
-    return `I reviewed the revenue side of "${topic}". I'm sending Sarah a sales brief with: account and contact context, qualification signal, verified stage and confidence, next action, owner, date, and evidence${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any pricing, discount, contract, forecast, bulk-outreach, or sensitive-data risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+    return `I reviewed the revenue side of "${topic}". I'm sending ${recipient} a sales brief with: account and contact context, qualification signal, verified stage and confidence, next action, owner, date, and evidence${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any pricing, discount, contract, forecast, bulk-outreach, or sensitive-data risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
   if (employee.id === 'maya') {
-    return `I reviewed the growth side of "${topic}". I'm sending Sarah a marketing brief with: goal, audience, funnel stage, message, channel, success metric, owner, approval gate, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any spend, publishing, claim, targeting, data-export, or bulk-outreach risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+    return `I reviewed the growth side of "${topic}". I'm sending ${recipient} a marketing brief with: goal, audience, funnel stage, message, channel, success metric, owner, approval gate, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any spend, publishing, claim, targeting, data-export, or bulk-outreach risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
   if (employee.id === 'priya') {
-    return `I reviewed the finance-operations side of "${topic}". I'm sending Sarah a finance brief with: verified transaction facts, control checks, amount and period, owner, approval gate, exception, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any payment, bank, tax, payroll, write-off, credit, or external-reporting risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+    return `I reviewed the finance-operations side of "${topic}". I'm sending ${recipient} a finance brief with: verified transaction facts, control checks, amount and period, owner, approval gate, exception, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any payment, bank, tax, payroll, write-off, credit, or external-reporting risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
   if (employee.id === 'iris') {
-    return `I reviewed the IT and security side of "${topic}". I'm sending Sarah a security brief with: verified facts, affected scope, severity, containment or remediation path, owner, approval gate, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any access, production, secret, privacy, incident-communication, compliance, or vendor-risk concern before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+    return `I reviewed the IT and security side of "${topic}". I'm sending ${recipient} a security brief with: verified facts, affected scope, severity, containment or remediation path, owner, approval gate, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any access, production, secret, privacy, incident-communication, compliance, or vendor-risk concern before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
-  return `I reviewed the ${employee.department.toLowerCase()} side of “${topic}”. I’m sending ${employee.name === 'Sarah' ? 'the team' : 'Sarah'} a usable recommendation now${context?.live_tool_evidence?.length ? ' with the verified tool result attached to the task evidence' : ''}. I’ll flag any missing input or risk before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  return `I reviewed the ${employee.department.toLowerCase()} side of “${topic}”. I’m sending ${employee.name === 'Sarah' ? 'the team' : recipient} a usable recommendation now${context?.live_tool_evidence?.length ? ' with the verified tool result attached to the task evidence' : ''}. I’ll flag any missing input or risk before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
 }
 
 async function handleTaskRoutingAsync(question: string, companyId: string, preferredEmployeeId?: string, existingTaskId?: number, emailEmployeeId?: string) {
@@ -2885,16 +2912,31 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   const relevantDocs = knowList.filter((document) => lowerQ.includes(document.title.toLowerCase()) || document.content.toLowerCase().split(' ').some((word) => word.length > 4 && lowerQ.includes(word)));
   const knowText = relevantDocs.length ? relevantDocs.map((document) => `[${document.title}] ${document.content}`).join('\n').slice(0, 2400) : 'No matching workspace knowledge was found.';
   const webText = webResearch.length ? webResearch.map((source) => `[${source.title}] ${source.url}\n${source.snippet}\n${source.content_preview || ''}`).join('\n\n').slice(0, 4200) : 'No web research provider is enabled or no public sources matched.';
+  const introductionTeam = [manager, ...executionTeam].filter((employee, index, list) => list.findIndex((entry) => entry.id === employee.id) === index);
+  const introductionTrace = introductionTeam.map((employee, index) => ({
+    kind: 'introduction',
+    thread_role: 'introduction',
+    sender: employee.name,
+    receiver: 'Company room',
+    sender_id: employee.id,
+    receiver_id: 'company-room',
+    body: employeeIntroduction(employee),
+    created_at: new Date(Date.now() + 120 + index * 180).toISOString()
+  }));
   const trace: any[] = [
-    { kind: 'received', sender: 'Manager', receiver: 'Sarah', body: `New task: “${question}”`, created_at: now },
-    { kind: 'team_context', sender: 'Sarah', receiver: lead.name, body: `I own this request. ${lead.name} is the delivery lead${collaborators.length ? `, supported by ${collaborators.map((employee) => employee.name).join(', ')}` : ''}. I will report the result and any approval or connector blocker back to you.`, created_at: new Date(Date.now() + 250).toISOString() },
-    { kind: 'knowledge', sender: 'Workspace knowledge', receiver: lead.name, body: relevantDocs.length ? `Shared ${relevantDocs.length} relevant workspace reference${relevantDocs.length === 1 ? '' : 's'} with the team.` : 'No matching reference was found; the team will state assumptions clearly.', created_at: new Date(Date.now() + 500).toISOString() },
-    ...(webResearch.length ? [{ kind: 'web_research', sender: 'Caveworkers research desk', receiver: 'Company workroom', body: `Collected ${webResearch.length} public source${webResearch.length === 1 ? '' : 's'} for the team. Sources remain linked in the task evidence panel.`, created_at: new Date(Date.now() + 650).toISOString() }] : [])
+    { kind: 'received', thread_role: 'manager_request', sender: 'Manager', receiver: 'Sarah', sender_id: 'manager', receiver_id: manager.id, body: `New task: “${question}”`, created_at: now },
+    ...introductionTrace,
+    { kind: 'team_context', thread_role: 'coordination', sender: 'Sarah', receiver: lead.name, sender_id: manager.id, receiver_id: lead.id, mentions: [lead.id], body: `I own this request. @${lead.name} is the delivery lead${collaborators.length ? `, supported by ${collaborators.map((employee) => `@${employee.name}`).join(', ')}` : ''}. I will report the result and any approval or connector blocker back to you.`, created_at: new Date(Date.now() + 250).toISOString() },
+    { kind: 'knowledge', thread_role: 'context', sender: 'Workspace knowledge', receiver: lead.name, receiver_id: lead.id, body: relevantDocs.length ? `Shared ${relevantDocs.length} relevant workspace reference${relevantDocs.length === 1 ? '' : 's'} with the team.` : 'No matching reference was found; the team will state assumptions clearly.', created_at: new Date(Date.now() + 500).toISOString() },
+    ...(webResearch.length ? [{ kind: 'web_research', thread_role: 'context', sender: 'Caveworkers research desk', receiver: 'Company workroom', body: `Collected ${webResearch.length} public source${webResearch.length === 1 ? '' : 's'} for the team. Sources remain linked in the task evidence panel.`, created_at: new Date(Date.now() + 650).toISOString() }] : [])
   ];
   collaborators.forEach((employee, index) => {
-    trace.push({ kind: 'group_message', sender: 'Sarah', receiver: employee.name, body: `@${employee.name}, work with ${lead.name} on the ${employee.department.toLowerCase()} portion of this request. Return usable findings, constraints, evidence needed, and a safe next step.`, created_at: new Date(Date.now() + 900 + index * 600).toISOString() });
-    trace.push({ kind: 'group_message', sender: employee.name, receiver: 'Sarah', body: collaborationFinding(employee, question, contextByEmployeeId.get(employee.id)), created_at: new Date(Date.now() + 1200 + index * 600).toISOString() });
+    trace.push({ kind: 'group_message', thread_role: 'assignment', sender: 'Sarah', receiver: `@${employee.name} + @${lead.name}`, sender_id: manager.id, receiver_id: employee.id, mentions: [employee.id, lead.id], body: `@${employee.name}, work with @${lead.name} on the ${employee.department.toLowerCase()} portion of this request. Return usable findings, constraints, evidence needed, and a safe next step.`, created_at: new Date(Date.now() + 900 + index * 600).toISOString() });
+    trace.push({ kind: 'handoff', thread_role: 'handoff', sender: employee.name, receiver: lead.name, sender_id: employee.id, receiver_id: lead.id, mentions: [lead.id], body: collaborationFinding(employee, question, contextByEmployeeId.get(employee.id), lead.name), created_at: new Date(Date.now() + 1200 + index * 600).toISOString() });
+    trace.push({ kind: 'handoff_ack', thread_role: 'handoff_ack', sender: lead.name, receiver: employee.name, sender_id: lead.id, receiver_id: employee.id, mentions: [employee.id], body: `@${employee.name}, received. I’ll fold your verified findings and constraints into the team handoff to @Sarah. I’ll call out any unresolved blocker rather than treating the work as complete.`, created_at: new Date(Date.now() + 1450 + index * 600).toISOString() });
   });
+  trace.push({ kind: 'handoff', thread_role: 'handoff', sender: lead.name, receiver: manager.name, sender_id: lead.id, receiver_id: manager.id, mentions: [manager.id], body: `@${manager.name}, I’m consolidating the team conversation now. The specialists have been introduced, addressed directly, and their findings will be carried forward with evidence and blockers visible.`, created_at: new Date(Date.now() + 2050).toISOString() });
+  trace.push({ kind: 'handoff_ack', thread_role: 'handoff_ack', sender: manager.name, receiver: lead.name, sender_id: manager.id, receiver_id: lead.id, mentions: [lead.id], body: `@${lead.name}, received. Keep the verified evidence, owners, and blockers visible in the final answer. No external action is treated as complete without provider confirmation.`, created_at: new Date(Date.now() + 2350).toISOString() });
   specialistContexts.flatMap((context) => context.live_tool_evidence).forEach((evidence, index) => {
     trace.push({ kind: 'tool_execution', sender: evidence.employee_name, receiver: 'Caveworkers group', body: `${evidence.status === 'executed' ? 'Read tool executed' : 'Read tool failed'}: ${evidence.connector_name} / ${evidence.tool_name}. ${evidence.summary.slice(0, 500)}`, created_at: new Date(Date.now() + 650 + index * 120).toISOString() });
   });

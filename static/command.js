@@ -227,11 +227,18 @@ async function loadEmployees() {
     renderAssignmentOptions();
     renderAvatarStack();
     renderWorkroomPresence();
+    renderWorkroomIntroductions();
     renderWorkforceStage();
   } catch (error) {
     console.error('Unable to load employees:', error);
     setRoomNotice('Your employee list could not be loaded. Reconnect and try again.', 'error');
   }
+}
+
+function renderWorkroomIntroductions() {
+  const container = $('#workroom-introductions');
+  if (!container) return;
+  container.innerHTML = employees.length ? employees.map((employee) => `<article class="intro-card" style="--avatar-color:${safe(employee.color || '#7ee8ff')}">${avatarMarkup(employee, employee.name?.[0] || 'AI', 'intro-dp')}<div class="intro-card-copy"><b>${safe(employee.name)}</b><small>${safe(employee.role || 'Specialist')}</small><p>${safe(employee.capability_summary || `Available for ${employee.department || 'company'} work.`)}</p></div><button class="intro-ask" type="button" data-introduce-employee="${safe(employee.id)}">Ask for intro</button></article>`).join('') : '<p class="empty-state-sm">Your employee introductions will appear here.</p>';
 }
 
 function renderWorkroomPresence() {
@@ -248,6 +255,7 @@ function renderWorkroomPresence() {
     return `<a class="presence-row" href="/employee/${encodeURIComponent(entry.employee_id || '')}" style="--presence-delay:${Math.min(index, 8) * 35}ms;--avatar-color:${safe(employee.color || '#7ee8ff')}" data-presence-status="${safe(status)}">${avatarMarkup(employee, employee.name?.[0] || entry.employee_id?.[0] || 'A', 'presence-dp')}<span class="presence-copy"><b>${safe(employee.name || 'AI employee')}</b><small>${safe(employee.role || 'Specialist')} · <span class="presence-status ${safe(status)}">${safe(status.replace('_', ' '))}</span></small></span></a>`;
   }).join('') : '<p class="empty-state-sm">No active employees are available yet.</p>';
   renderWorkforceStage();
+  renderWorkroomIntroductions();
 }
 
 function messageKey(message) {
@@ -259,6 +267,8 @@ function messageTone(kind) {
   if (['blocked', 'action_failed', 'worker_failed'].includes(kind)) return 'failure';
   if (['completed', 'action_completed'].includes(kind)) return 'complete';
   if (kind === 'manager_response' || kind === 'manager_result') return 'result';
+  if (kind === 'introduction') return 'introduction';
+  if (['handoff', 'handoff_ack'].includes(kind)) return 'handoff';
   if (kind === 'received') return 'manager';
   if (kind === 'task_update') return 'system';
   return 'employee';
@@ -305,9 +315,11 @@ function renderRoomFeed(shouldFollow = roomAtLatest()) {
     const taskReference = message.task_id ? `<button class="message-task" data-task-id="${safe(message.task_id)}" type="button">Task #${safe(message.task_id)}</button>` : '';
     const approvalAction = message.approval_id ? `<button class="message-approval" data-approval-id="${safe(message.approval_id)}" data-approval-status="approved" type="button">Approve</button>` : '';
     const senderName = message.sender === 'Manager' ? 'You' : (senderEmployee?.name || message.sender || 'Caveworkers');
-    const recipient = message.receiver && message.receiver !== 'Manager' ? `<span>to ${safe(message.receiver)}</span>` : '';
-    const messageLabel = tone === 'result' ? 'Manager update' : tone === 'approval' ? 'Needs your attention' : tone === 'failure' ? 'Blocked' : tone === 'complete' ? 'Completed' : message.kind === 'team_context' ? 'Coordination' : '';
-    article.innerHTML = `${avatarMarkup(senderEmployee || { id: '', color: tone === 'approval' ? '#ffd78f' : '#82e9ff' }, senderName, 'message-dp')}<div class="message-body"><div class="message-meta"><b>${safe(senderName)}</b>${recipient}${messageLabel ? `<span class="message-label ${tone}">${safe(messageLabel)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}</div>${tone === 'result' ? '<span class="final-answer-label">Sarah’s update</span>' : ''}<p>${safe(cleanChatCopy(message.body || ''))}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
+    const recipient = message.receiver && message.receiver !== 'Manager' ? `<span class="message-recipient">to ${safe(message.receiver)}</span>` : '';
+    const mentionNames = Array.isArray(message.mentions) ? message.mentions.map((id) => employeeById(id)?.name || id).filter(Boolean) : [];
+    const mentionMarkup = mentionNames.length ? `<span class="message-mentions">${mentionNames.map((name) => `@${safe(name)}`).join(' ')}</span>` : '';
+    const messageLabel = tone === 'result' ? 'Manager update' : tone === 'approval' ? 'Needs your attention' : tone === 'failure' ? 'Blocked' : tone === 'complete' ? 'Completed' : tone === 'introduction' ? 'Introduces self' : tone === 'handoff' && message.kind === 'handoff_ack' ? 'Handoff received' : tone === 'handoff' ? 'Handoff' : message.kind === 'team_context' ? 'Coordination' : '';
+    article.innerHTML = `${avatarMarkup(senderEmployee || { id: '', color: tone === 'approval' ? '#ffd78f' : '#82e9ff' }, senderName, 'message-dp')}<div class="message-body"><div class="message-meta"><b>${safe(senderName)}</b>${recipient}${mentionMarkup}${messageLabel ? `<span class="message-label ${tone}">${safe(messageLabel)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}</div>${tone === 'result' ? '<span class="final-answer-label">Sarah’s update</span>' : ''}<p>${safe(cleanChatCopy(message.body || ''))}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
     fragment.append(article);
   });
   container.replaceChildren(fragment);
@@ -374,7 +386,7 @@ function applyWorkroomEvent(event) {
     rebuildWorkroomMessages();
     void Promise.all([loadTaskSummaries(), loadApprovals()]);
   }
-  setRoomConnection('LIVE', 'Realtime updates are flowing from your workforce.');
+  setRoomConnection('LIVE', `${employees.length || 10} employees can address one another in the room.`);
 }
 
 async function loadWorkroomSnapshot() {
@@ -384,7 +396,7 @@ async function loadWorkroomSnapshot() {
     workroomTasks = snapshot.tasks || [];
     renderWorkroomPresence();
     rebuildWorkroomMessages();
-    setRoomConnection('LIVE', 'Realtime updates are flowing from your workforce.');
+    setRoomConnection('LIVE', `${employees.length || 10} employees can address one another in the room.`);
   } catch (error) {
     console.error('Unable to load company workroom:', error);
     setRoomConnection('UNAVAILABLE', 'The room is temporarily unavailable. Retrying when the connection returns.');
@@ -528,6 +540,20 @@ function bindRoomInteractions() {
   document.addEventListener('click', (event) => {
     const approval = event.target.closest('[data-approval-id]');
     if (approval) resolveApproval(approval.dataset.approvalId, approval.dataset.approvalStatus);
+    const introButton = event.target.closest('[data-introduce-employee]');
+    if (introButton) {
+      const employee = employeeById(introButton.dataset.introduceEmployee);
+      const input = $('#request');
+      const select = $('#task-assignee');
+      if (employee && input) {
+        input.value = `@${employee.name}, introduce yourself to the team and explain how you will contribute to this request.`;
+        if (select) select.value = employee.id;
+        input.focus();
+        setRoomNotice(`${employee.name} is ready to introduce themselves when you start the work.`, 'success');
+        playCue('tick');
+      }
+      return;
+    }
     const task = event.target.closest('[data-task-id]');
     if (task) renderTaskInRoom(task.dataset.taskId);
   });
