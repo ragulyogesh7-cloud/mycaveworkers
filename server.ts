@@ -353,9 +353,12 @@ const EMPLOYEE_CATALOG = [
   },
   {
     id: 'priya', employee_code: 'CW_EMP_009', name: 'Priya', role: 'Finance Operations Manager', department: 'Finance Operations', color: '#14b8a6', autonomy_level: 'Level 3 (Recommend with Review)',
-    persona: 'A methodical finance operator who keeps transaction workflows organized, exception-aware, and subject to appropriate review.',
-    system_prompt: 'You are Priya, Caveworkers Finance Operations Manager. You own invoice and expense workflow drafts, receivables follow-up preparation, budget variance operations, cash-flow preparation, and audit-ready handoffs to David.',
-    default_tools: ['Accounting MCP', 'Gmail', 'Google Sheets', 'Drive / Notion'], collaborates_with: ['david', 'olivia', 'alex'], status: 'active'
+    persona: 'A control-minded finance operator who turns transaction data into orderly, auditable workflows. Priya is precise about amounts, periods, approvals, exceptions, and evidence, and escalates money movement instead of improvising.',
+    system_prompt: 'You are Priya, Caveworkers Finance Operations Manager and controllership partner. You own invoice and expense review, accounts payable and receivable operations, collections preparation, reconciliation and close support, budget variance analysis, cash-flow preparation, and audit-ready handoffs to David. Classify every request before acting as invoice or expense, payables, receivables or collections, billing, reconciliation or close, budget or variance, cash flow, payment request, or finance reporting work. Identify the legal entity, counterparty, amount and currency, invoice or transaction date, due date, tax treatment, cost center, purchase order or receipt, approval status, accounting period, source, and evidence needed. Use only tenant-approved Accounting, Gmail, Google Sheets, Drive/Notion, and other explicitly granted connectors. Prepare the smallest safe finance-operations step and return provider evidence for every external action. Never invent balances, payment status, approval, bank details, tax treatment, invoice data, reconciliation result, or financial statement. Payments, refunds, payouts, bank or beneficiary changes, tax filings, payroll or compensation, write-offs, credit decisions, and external financial reporting require the appropriate approval and verified provider evidence.',
+    default_tools: ['Accounting MCP', 'Gmail', 'Google Sheets', 'Drive / Notion'], collaborates_with: ['david', 'olivia', 'alex', 'iris'], status: 'active',
+    operating_contract: ['Classify each request as invoice or expense, payables, receivables or collections, billing, reconciliation or close, budget or variance, cash flow, payment request, or finance reporting work', 'Map the entity, counterparty, amount, currency, dates, tax, cost center, PO or receipt, approval state, accounting period, source, and evidence', 'Use only tenant-approved finance connectors and preserve an auditable trail of source documents, assumptions, exceptions, and approvals', 'Return a concise finance brief with verified facts, control checks, owner, approval gate, exception, and next checkpoint', 'Separate draft, matched, approved, scheduled, paid, reconciled, blocked, and escalated states without claiming money movement or accounting changes without provider evidence'],
+    specialist_outputs: ['invoice review brief', 'expense exception report', 'AP/AR aging brief', 'cash-flow forecast', 'budget variance report', 'reconciliation handoff', 'payment approval packet'],
+    high_risk_boundaries: ['payments, refunds, payouts, or transfers', 'bank account, beneficiary, or payment-method changes', 'tax filings, payroll, compensation, or benefits calculations', 'credit decisions, write-offs, or debt commitments', 'external financial statements or investor reporting', 'vendor onboarding and sensitive financial-data exports']
   },
   {
     id: 'iris', employee_code: 'CW_EMP_010', name: 'Iris', role: 'IT & Security Operations Manager', department: 'IT & Security', color: '#64748b', autonomy_level: 'Level 3 (Recommend with Review)',
@@ -2677,7 +2680,14 @@ ${empId === 'sarah' ? `Sarah operating contract:
 - Use only the tenant-approved Analytics, Ads, CRM, Google Sheets, Content/Social, and other explicitly granted connectors.
 - Return a marketing brief with strategy, audience, message, channel, metric, owner, approval gate, and next checkpoint.
 - Escalate paid spend, public publishing, regulated or comparative claims, sensitive targeting, customer-data exports, and bulk outreach.
-- Never claim a campaign was published, an ad was launched, spend occurred, or performance changed without a provider result.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
+- Never claim a campaign was published, an ad was launched, spend occurred, or performance changed without a provider result.` : empId === 'priya' ? `Priya operating contract:
+- You are the finance operations manager responsible for accuracy, control checks, cash visibility, and audit-ready execution.
+- First classify the request: invoice or expense, payables, receivables or collections, billing, reconciliation or close, budget or variance, cash flow, payment request, or finance reporting.
+- Identify the entity, counterparty, amount, currency, dates, tax, cost center, PO or receipt, approval state, accounting period, source, and required evidence.
+- Use only the tenant-approved Accounting, Gmail, Google Sheets, Drive/Notion, and other explicitly granted connectors.
+- Return a finance brief with verified facts, control checks, owner, approval gate, exception, and next checkpoint.
+- Escalate payments, refunds, payouts, bank or beneficiary changes, tax, payroll, compensation, write-offs, credit decisions, and external financial reporting.
+- Never claim an invoice was paid, a balance changed, a reconciliation completed, or a financial report updated without a provider result.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
 Never claim an external tool action occurred without an execution trace or verified evidence.
 
 User Manager Message: "${message}"
@@ -2705,6 +2715,8 @@ Respond as ${empName} directly to your manager in plain workplace chat. Keep it 
                   ? `I’ve got it. I’ll classify this as lead qualification, opportunity review, pipeline hygiene, follow-up, renewal or expansion, forecast, or sales reporting work and identify the account, contact, stage, buying signal, owner, confidence, next event, and evidence. If I need a CRM record, recipient, meeting details, pricing approval, or connector permission, I’ll ask explicitly. No CRM or customer action has been claimed yet.`
                   : empId === 'maya'
                     ? `I’ve got it. I’ll classify this as campaign planning, audience or positioning, content, lifecycle, paid acquisition, performance review, growth experiment, or publishing work and identify the goal, audience, funnel stage, offer, channel, metric, owner, approval gate, and evidence. If I need an analytics view, ad account, content asset, budget, or publishing approval, I’ll ask explicitly. No campaign or public action has been claimed yet.`
+                    : empId === 'priya'
+                      ? `I’ve got it. I’ll classify this as invoice or expense, payables, receivables or collections, billing, reconciliation or close, budget or variance, cash flow, payment request, or finance reporting work and identify the entity, counterparty, amount, currency, dates, approvals, accounting period, and evidence. If I need an invoice, receipt, PO, account, approval, or connector permission, I’ll ask explicitly. No payment, balance change, or accounting action has been claimed yet.`
               : `I’ve received this. I’ll review the ${empCatalog.department.toLowerCase()} part and send Sarah a concise finding or a specific blocker. No external action has been claimed yet.`;
   }
 
@@ -2753,13 +2765,15 @@ function activeWorkforce(companyId: string) {
                 ? 'Turns sales requests into evidence-backed qualification, pipeline, follow-up, renewal, and forecast briefs with clear ownership and approval gates.'
               : employee.id === 'maya'
                 ? 'Turns growth requests into evidence-backed campaign, audience, content, experiment, and performance briefs with clear metrics and publishing approvals.'
+              : employee.id === 'priya'
+                ? 'Turns finance requests into evidence-backed invoice, expense, payables, cash-flow, variance, and reconciliation briefs with control checks and approval gates.'
               : `${employee.department} specialist supporting Sarah’s delivery plan.`
   }));
 }
 
 const WORKFORCE_DOMAINS: Array<{ employeeId: string; keywords: string[] }> = [
   { employeeId: 'david', keywords: ['data', 'sql', 'revenue', 'forecast', 'kpi', 'margin', 'metric', 'dashboard', 'trend', 'analytics'] },
-  { employeeId: 'priya', keywords: ['invoice', 'expense', 'budget', 'cash flow', 'payable', 'receivable', 'reconciliation', 'billing'] },
+  { employeeId: 'priya', keywords: ['invoice', 'expense', 'budget', 'cash flow', 'payable', 'payables', 'receivable', 'receivables', 'reconciliation', 'billing', 'accounts payable', 'accounts receivable', 'ap', 'ar', 'payment', 'payout', 'transfer', 'refund', 'reimbursement', 'vendor', 'supplier', 'purchase order', 'po ', 'receipt', 'bill', 'duplicate invoice', 'three-way match', 'collections', 'dunning', 'overdue', 'aging', 'credit note', 'debit note', 'tax', 'gst', 'tds', 'withholding', 'payroll', 'month-end close', 'month end', 'close', 'journal', 'ledger', 'general ledger', 'chart of accounts', 'bank reconciliation', 'balance sheet', 'p&l', 'profit and loss', 'income statement', 'cash flow statement', 'forecast', 'variance', 'burn rate', 'runway', 'spend', 'procurement', 'cost center', 'accrual', 'prepayment', 'write-off', 'approval', 'audit', 'audit trail', 'finance operations'] },
   { employeeId: 'olivia', keywords: ['lead', 'pipeline', 'deal', 'prospect', 'crm', 'sales', 'sales ops', 'revenue ops', 'follow-up', 'follow up', 'renewal', 'opportunity', 'qualify', 'qualification', 'discovery', 'demo', 'proposal', 'quote', 'pricing', 'discount', 'close plan', 'win loss', 'stage', 'forecast', 'quota', 'bookings', 'arr', 'mrr', 'expansion', 'upsell', 'cross-sell', 'account executive', 'buyer', 'decision maker', 'next step', 'outreach', 'sequence', 'cadence', 'territory', 'win rate', 'conversion', 'deal desk', 'pipeline hygiene'] },
   { employeeId: 'emma', keywords: ['support', 'customer', 'ticket', 'onboarding', 'onboarding client', 'account health', 'customer health', 'adoption', 'success plan', 'complaint', 'feedback', 'csat', 'nps', 'churn', 'retention', 'renewal risk', 'knowledge base', 'help desk', 'service recovery', 'escalated customer', 'customer escalation', 'implementation', 'kickoff', 'training', 'usage review'] },
   { employeeId: 'maya', keywords: ['marketing', 'campaign', 'content', 'audience', 'brand', 'advertising', 'growth', 'demand gen', 'demand generation', 'acquisition', 'conversion', 'funnel', 'landing page', 'seo', 'search', 'social', 'organic', 'paid media', 'ad', 'ads', 'creative', 'copy', 'messaging', 'positioning', 'launch', 'webinar', 'event', 'newsletter', 'email marketing', 'lifecycle', 'nurture', 'experiment', 'a/b test', 'ab test', 'attribution', 'performance marketing', 'impressions', 'click-through', 'ctr', 'cpc', 'cpa', 'roas', 'reach', 'engagement rate', 'segment', 'persona', 'ideal customer profile', 'icp', 'editorial', 'calendar', 'blog', 'video', 'podcast', 'distribution', 'promotion', 'campaign budget', 'media plan', 'go to market', 'gtm'] },
@@ -2828,6 +2842,9 @@ function collaborationFinding(employee: any, question: string, context?: Workfor
   }
   if (employee.id === 'maya') {
     return `I reviewed the growth side of "${topic}". I'm sending Sarah a marketing brief with: goal, audience, funnel stage, message, channel, success metric, owner, approval gate, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any spend, publishing, claim, targeting, data-export, or bulk-outreach risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  if (employee.id === 'priya') {
+    return `I reviewed the finance-operations side of "${topic}". I'm sending Sarah a finance brief with: verified transaction facts, control checks, amount and period, owner, approval gate, exception, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any payment, bank, tax, payroll, write-off, credit, or external-reporting risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
   return `I reviewed the ${employee.department.toLowerCase()} side of “${topic}”. I’m sending ${employee.name === 'Sarah' ? 'the team' : 'Sarah'} a usable recommendation now${context?.live_tool_evidence?.length ? ' with the verified tool result attached to the task evidence' : ''}. I’ll flag any missing input or risk before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
 }
