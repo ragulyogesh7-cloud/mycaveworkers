@@ -469,4 +469,6 @@ window.addEventListener('DOMContentLoaded', async () => {
   activateTab(window.location.hash.slice(1), false);
   updateCustomMcpFields();
   await loadData();
+  const launchPreset = new URLSearchParams(window.location.search).get('connect');
+  if (launchPreset) applyConnectorPreset(launchPreset);
 });

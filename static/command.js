@@ -178,6 +178,31 @@ function employeeById(employeeId) {
   return employees.find((employee) => employee.id === employeeId);
 }
 
+function avatarMarkup(employee = {}, label = 'AI', extraClass = '') {
+  const color = employee.color || '#82e9ff';
+  const employeeId = employee.id || employee.employee_id || '';
+  return `<span class="employee-dp employee-orb ${extraClass}" style="--avatar-color:${safe(color)}" data-employee-id="${safe(employeeId)}" aria-hidden="true"><span class="orb-ears"></span><span class="orb-face"><i></i><i></i><b>${safe(label || employee.name?.[0] || 'AI')}</b></span></span>`;
+}
+
+function employeeStatus(employeeId) {
+  return workroomPresence.find((entry) => entry.employee_id === employeeId)?.status || 'idle';
+}
+
+function renderWorkforceStage() {
+  const coordinatorNode = $('#map-node-coordinator');
+  const rightNode = $('#map-node-right');
+  const roster = $('#stage-roster');
+  const activeCount = $('#stage-active-count');
+  if (!coordinatorNode || !rightNode || !roster) return;
+  const coordinator = employeeById('sarah') || employees[0] || { name: 'Sarah', role: 'Coordinator', color: '#82e9ff' };
+  const peers = employees.filter((employee) => employee.id !== coordinator.id).slice(0, 3);
+  const active = workroomPresence.filter((entry) => ['working', 'coordinating', 'reviewing'].includes(entry.status)).length;
+  if (activeCount) activeCount.textContent = `${active || employees.length ? active : 0} active`;
+  coordinatorNode.innerHTML = `<a class="map-person map-person-coordinator" href="/employee/${encodeURIComponent(coordinator.id || '')}" title="Open ${safe(coordinator.name)}’s workspace">${avatarMarkup(coordinator, coordinator.name?.[0] || 'S', 'map-avatar')}<span><b>${safe(coordinator.name || 'Sarah')}</b><small>${safe(coordinator.role || 'Coordinator')}</small></span></a>`;
+  rightNode.innerHTML = peers.map((employee, index) => `<a class="map-person map-person-peer peer-${index + 1}" href="/employee/${encodeURIComponent(employee.id || '')}" title="Open ${safe(employee.name)}’s workspace">${avatarMarkup(employee, employee.name?.[0] || 'AI', 'map-avatar')}<span><b>${safe(employee.name)}</b><small>${safe(employee.role || 'Specialist')}</small></span></a>`).join('');
+  roster.innerHTML = employees.slice(0, 8).map((employee, index) => { const status = employeeStatus(employee.id); return `<a class="stage-roster-item" style="--roster-delay:${Math.min(index, 7) * 35}ms;--avatar-color:${safe(employee.color || '#82e9ff')}" href="/employee/${encodeURIComponent(employee.id)}" data-stage-employee-id="${safe(employee.id)}">${avatarMarkup(employee, employee.name?.[0] || 'AI', 'roster-avatar')}<span><b>${safe(employee.name)}</b><small>${safe(employee.role || 'Specialist')}</small></span><em class="roster-state ${safe(status)}">${safe(status.replace(/_/g, ' '))}</em></a>`; }).join('');
+}
+
 function renderAssignmentOptions() {
   const select = $('#task-assignee');
   if (!select) return;
@@ -190,7 +215,7 @@ function renderAvatarStack() {
   const container = $('#room-avatar-stack');
   if (!container) return;
   const visible = employees.slice(0, 5);
-  container.innerHTML = visible.map((employee) => `<a href="/employee/${encodeURIComponent(employee.id)}" class="stack-avatar employee-orb" title="${safe(employee.name)} · ${safe(employee.role)}" style="--avatar-color:${safe(employee.color || '#7ee8ff')}" data-employee-id="${safe(employee.id)}"><span class="orb-ears" aria-hidden="true"></span><span class="orb-face"><i></i><i></i><b>${safe(employee.name?.[0] || 'A')}</b></span></a>`).join('') + (employees.length > visible.length ? `<span class="stack-avatar overflow">+${employees.length - visible.length}</span>` : '');
+  container.innerHTML = visible.map((employee) => `<a href="/employee/${encodeURIComponent(employee.id)}" class="stack-avatar" title="${safe(employee.name)} · ${safe(employee.role)}" style="--avatar-color:${safe(employee.color || '#7ee8ff')}" data-employee-id="${safe(employee.id)}">${avatarMarkup(employee, employee.name?.[0] || 'A', 'stack-dp')}</a>`).join('') + (employees.length > visible.length ? `<span class="stack-avatar overflow">+${employees.length - visible.length}</span>` : '');
 }
 
 async function loadEmployees() {
@@ -199,6 +224,7 @@ async function loadEmployees() {
     renderAssignmentOptions();
     renderAvatarStack();
     renderWorkroomPresence();
+    renderWorkforceStage();
   } catch (error) {
     console.error('Unable to load employees:', error);
     setRoomNotice('Your employee list could not be loaded. Reconnect and try again.', 'error');
@@ -216,8 +242,9 @@ function renderWorkroomPresence() {
   container.innerHTML = roster.length ? roster.map((entry, index) => {
     const employee = employeeById(entry.employee_id) || {};
     const status = entry.status || 'idle';
-    return `<a class="presence-row" href="/employee/${encodeURIComponent(entry.employee_id || '')}" style="--presence-delay:${Math.min(index, 8) * 35}ms;--avatar-color:${safe(employee.color || '#7ee8ff')}" data-presence-status="${safe(status)}"><span class="presence-avatar employee-orb"><span class="orb-ears" aria-hidden="true"></span><span class="orb-face"><i></i><i></i><b>${safe(employee.name?.[0] || entry.employee_id?.[0] || 'A')}</b></span></span><span class="presence-copy"><b>${safe(employee.name || 'AI employee')}</b><small>${safe(employee.role || 'Specialist')} · <span class="presence-status ${safe(status)}">${safe(status.replace('_', ' '))}</span></small></span></a>`;
+    return `<a class="presence-row" href="/employee/${encodeURIComponent(entry.employee_id || '')}" style="--presence-delay:${Math.min(index, 8) * 35}ms;--avatar-color:${safe(employee.color || '#7ee8ff')}" data-presence-status="${safe(status)}">${avatarMarkup(employee, employee.name?.[0] || entry.employee_id?.[0] || 'A', 'presence-dp')}<span class="presence-copy"><b>${safe(employee.name || 'AI employee')}</b><small>${safe(employee.role || 'Specialist')} · <span class="presence-status ${safe(status)}">${safe(status.replace('_', ' '))}</span></small></span></a>`;
   }).join('') : '<p class="empty-state-sm">No active employees are available yet.</p>';
+  renderWorkforceStage();
 }
 
 function messageKey(message) {
@@ -258,7 +285,7 @@ function renderRoomFeed(shouldFollow = roomAtLatest()) {
     article.style.setProperty('--message-delay', `${Math.min(index, 10) * 35}ms`);
     const taskReference = message.task_id ? `<button class="message-task" data-task-id="${safe(message.task_id)}" type="button">Task #${safe(message.task_id)}</button>` : '';
     const approvalAction = message.approval_id ? `<button class="message-approval" data-approval-id="${safe(message.approval_id)}" data-approval-status="approved" type="button">Approve</button>` : '';
-    article.innerHTML = `<span class="message-avatar employee-orb"><span class="orb-ears" aria-hidden="true"></span><span class="orb-face"><i></i><i></i><b>${safe(messageInitial(message))}</b></span></span><div class="message-body"><div class="message-meta"><b>${safe(message.sender || 'Caveworkers')}</b>${message.receiver ? `<span>to ${safe(message.receiver)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}</div>${tone === 'result' ? '<span class="final-answer-label">Sarah’s final answer</span>' : ''}<p>${safe(message.body || '')}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
+    article.innerHTML = `${avatarMarkup(senderEmployee || { color: tone === 'approval' ? '#ffd78f' : '#82e9ff' }, messageInitial(message), 'message-dp')}<div class="message-body"><div class="message-meta"><b>${safe(message.sender || 'Caveworkers')}</b>${message.receiver ? `<span>to ${safe(message.receiver)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}</div>${tone === 'result' ? '<span class="final-answer-label">Sarah’s final answer</span>' : ''}<p>${safe(message.body || '')}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
     fragment.append(article);
   });
   container.replaceChildren(fragment);
@@ -469,6 +496,13 @@ function bindRoomInteractions() {
   $('#refresh-tasks')?.addEventListener('click', () => Promise.all([loadTaskSummaries(), loadApprovals(), loadWorkroomSnapshot()]));
   $('#menuButton')?.addEventListener('click', () => document.querySelector('.side-rail')?.classList.toggle('is-open'));
   $('#sound-toggle')?.addEventListener('click', () => { soundEnabled = !soundEnabled; window.localStorage.setItem('caveworkers-sound', soundEnabled ? 'on' : 'off'); setSoundToggle(); if (soundEnabled) playCue('complete'); });
+  const connectorButton = $('#connector-plus');
+  const connectorPopover = $('#connector-popover');
+  const closeConnectorPopover = () => { if (!connectorPopover || !connectorButton) return; connectorPopover.hidden = true; connectorButton.setAttribute('aria-expanded', 'false'); };
+  connectorButton?.addEventListener('click', (event) => { event.stopPropagation(); if (!connectorPopover) return; connectorPopover.hidden = !connectorPopover.hidden; connectorButton.setAttribute('aria-expanded', String(!connectorPopover.hidden)); if (!connectorPopover.hidden) playCue('tick'); });
+  $('#connector-popover-close')?.addEventListener('click', closeConnectorPopover);
+  document.addEventListener('click', (event) => { if (connectorPopover && !connectorPopover.hidden && !event.target.closest('#connector-popover, #connector-plus')) closeConnectorPopover(); });
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeConnectorPopover(); });
   document.addEventListener('click', (event) => {
     const approval = event.target.closest('[data-approval-id]');
     if (approval) resolveApproval(approval.dataset.approvalId, approval.dataset.approvalStatus);
