@@ -268,6 +268,29 @@ describe('Caveworkers security invariants', () => {
     expect(emma.system_prompt).toBeUndefined();
   });
 
+  it('routes people-operations work to Arav and exposes only safe specialist metadata', async () => {
+    db.orgEmployees.set('company-a', [
+      { id: 'arav', name: 'Arav', role: 'People Operations Manager', department: 'People Operations', status: 'active', tools: ['HRIS MCP', 'Google Calendar', 'Drive / Notion'], permissions: [] },
+      { id: 'sarah', name: 'Sarah', role: 'Talent & HR Manager', department: 'People Operations', status: 'active', tools: [], permissions: [] }
+    ]);
+
+    const result = await workforceTestHooks!.handleTaskRoutingAsync('Prepare an onboarding plan for a new hire with policy acknowledgement, leave setup, and an employee handoff', 'company-a');
+    expect(result.participants).toEqual(expect.arrayContaining(['Manager', 'Sarah', 'Arav']));
+    expect(result.plan).toContain('Arav');
+
+    const workforceResponse = await request(app)
+      .get('/api/workforce/workroom')
+      .set('x-caveworkers-test-user', 'user-a')
+      .expect(200);
+    const arav = workforceResponse.body.employees.find((employee: any) => employee.id === 'arav');
+    expect(arav).toMatchObject({
+      id: 'arav',
+      capability_summary: expect.stringContaining('privacy-aware people-operations'),
+      avatar_url: '/static/assets/employee-avatars/arav.webp'
+    });
+    expect(arav.system_prompt).toBeUndefined();
+  });
+
   it('truthfully blocks Sarah email delivery until a tenant Gmail send capability is connected', async () => {
     const result = await workforceTestHooks!.handleTaskRoutingAsync('Send an email to ops@example.com confirming the weekly handoff', 'company-a', 'alex');
     expect(result).toMatchObject({ company_id: 'company-a', owner: 'sarah', status: 'blocked' });

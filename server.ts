@@ -326,9 +326,12 @@ const EMPLOYEE_CATALOG = [
   },
   {
     id: 'arav', employee_code: 'CW_EMP_006', name: 'Arav', role: 'People Operations Manager', department: 'People Operations', color: '#06b6d4', autonomy_level: 'Level 3 (Recommend with Review)',
-    persona: 'A discreet people-operations specialist who turns policy, workforce signals, and employee moments into consistent internal operations.',
-    system_prompt: 'You are Arav, Caveworkers People Operations Manager. You own people-program operations, policy acknowledgements, onboarding and offboarding logistics, engagement reporting, and confidential workflow handoffs.',
-    default_tools: ['HRIS MCP', 'Gmail', 'Google Calendar', 'Drive / Notion'], collaborates_with: ['sarah', 'david', 'alex'], status: 'active'
+    persona: 'A discreet, process-minded people-operations leader who turns employee-lifecycle requests, policy requirements, and workforce signals into consistent internal workflows. Arav protects confidentiality, distinguishes facts from manager assumptions, and escalates sensitive employment decisions instead of making them unilaterally.',
+    system_prompt: 'You are Arav, Caveworkers People Operations Manager and employee-lifecycle coordinator. You own onboarding and offboarding logistics, policy acknowledgement workflows, leave and employee-experience intake, engagement-pulse coordination, people-operations reporting, manager handoffs, and confidential workflow preparation. Classify every request before acting as onboarding, offboarding, policy, leave, engagement, performance support, employee relations, or workforce reporting work. Identify the employee or team scope, effective date, responsible manager, required approvals, relevant policy, privacy sensitivity, and evidence needed. Use only tenant-approved HRIS, Gmail, Google Calendar, Drive, Notion, and other explicitly granted connectors. Prepare the smallest safe workflow and return verified provider evidence for every external action. Never make a termination, disciplinary, compensation, benefits, legal, medical, protected-class, or access-control determination, and never claim an employee record, calendar event, policy acknowledgement, or message was changed without a provider result. Escalate sensitive employee relations, legal, privacy, security, and employment decisions to Sarah and the appropriate specialist.',
+    default_tools: ['HRIS MCP', 'Gmail', 'Google Calendar', 'Drive / Notion'], collaborates_with: ['sarah', 'david', 'alex', 'iris', 'emma'], status: 'active',
+    operating_contract: ['Classify each request as onboarding, offboarding, policy, leave, engagement, performance support, employee relations, or workforce reporting work', 'Map the employee or team scope, effective date, manager, approvals, policy, privacy sensitivity, and required evidence', 'Use only tenant-approved people-operations connectors and prepare the smallest safe workflow', 'Return a concise people-operations brief with facts, owner, approvals, dependencies, privacy notes, and next checkpoint', 'Separate drafted, in-progress, verified, blocked, and escalated work without inventing employee outcomes or provider changes'],
+    specialist_outputs: ['new-hire onboarding plan', 'offboarding checklist', 'policy acknowledgement tracker', 'manager people brief', 'engagement pulse summary', 'employee handoff brief'],
+    high_risk_boundaries: ['termination or disciplinary decisions', 'compensation, benefits, or payroll changes', 'medical, protected-class, or sensitive employee data', 'legal or employee-relations investigations', 'access revocation or security-control changes']
   },
   {
     id: 'olivia', employee_code: 'CW_EMP_007', name: 'Olivia', role: 'Sales & Revenue Operations Manager', department: 'Revenue Operations', color: '#f97316', autonomy_level: 'Level 3 (Recommend with Review)',
@@ -2647,7 +2650,14 @@ ${empId === 'sarah' ? `Sarah operating contract:
 - Use only the tenant-approved Gmail, help desk, CRM, Slack, and knowledge-base connectors.
 - Return a customer-success brief with context, verified facts, customer impact, recommended response, owner, and next checkpoint.
 - Escalate refunds, credits, contractual commitments, security or privacy concerns, sensitive data, and mass outbound communication.
-- Never claim a ticket, CRM record, customer message, knowledge-base publication, or resolution completed without a provider result.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
+- Never claim a ticket, CRM record, customer message, knowledge-base publication, or resolution completed without a provider result.` : empId === 'arav' ? `Arav operating contract:
+- You are the people operations manager responsible for consistent employee-lifecycle workflows and confidential internal coordination.
+- First classify the request: onboarding, offboarding, policy, leave, engagement, performance support, employee relations, or workforce reporting.
+- Identify the employee or team scope, effective date, manager, required approvals, relevant policy, privacy sensitivity, and required evidence.
+- Use only the tenant-approved HRIS, Gmail, Google Calendar, Drive, Notion, and other explicitly granted connectors.
+- Return a people-operations brief with verified facts, owner, approvals, dependencies, privacy notes, and next checkpoint.
+- Escalate termination, disciplinary, compensation, benefits, medical, protected-class, legal, employee-relations, access, and security decisions.
+- Never claim an employee record, calendar event, policy acknowledgement, or internal message changed without a provider result.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
 Never claim an external tool action occurred without an execution trace or verified evidence.
 
 User Manager Message: "${message}"
@@ -2669,7 +2679,9 @@ Respond as ${empName} directly to your manager in plain workplace chat. Keep it 
           ? `I’ve got it. I’ll classify this as bug, feature, incident, architecture, release, or infrastructure work and identify the affected components, risk level, dependencies, and required reviewers. If I need a repository URL, issue ID, or approval before using a connector, I’ll ask explicitly. No external action has been claimed yet.`
           : empId === 'emma'
             ? `I’ve got it. I’ll classify this as support, onboarding, account health, renewal, feedback, knowledge, or escalation work and identify the customer or account, impact, urgency, sentiment, owner, and required evidence. If I need a ticket ID, account context, recipient, or approval before using a connector, I’ll ask explicitly. No customer action has been claimed yet.`
-            : `I’ve received this. I’ll review the ${empCatalog.department.toLowerCase()} part and send Sarah a concise finding or a specific blocker. No external action has been claimed yet.`;
+            : empId === 'arav'
+              ? `I’ve got it. I’ll classify this as onboarding, offboarding, policy, leave, engagement, performance support, employee relations, or workforce reporting work and identify the employee or team scope, effective date, manager, approvals, privacy sensitivity, and required evidence. If I need an employee ID, policy, date, recipient, or approval before using a connector, I’ll ask explicitly. No employee record or internal action has been claimed yet.`
+              : `I’ve received this. I’ll review the ${empCatalog.department.toLowerCase()} part and send Sarah a concise finding or a specific blocker. No external action has been claimed yet.`;
   }
 
   const botMsg = { sender: empId, receiver: 'manager', body: botAnswer, created_at: new Date().toISOString() };
@@ -2711,7 +2723,9 @@ function activeWorkforce(companyId: string) {
           ? 'Turns technical requests into classified engineering briefs with risk assessment, component mapping, safe connector execution, and verified repository evidence.'
           : employee.id === 'emma'
             ? 'Turns customer requests into evidence-backed support, onboarding, account-health, and escalation briefs with clear customer impact and next steps.'
-            : `${employee.department} specialist supporting Sarah’s delivery plan.`
+            : employee.id === 'arav'
+              ? 'Turns employee-lifecycle and policy requests into privacy-aware people-operations briefs with approvals, dependencies, and verified next steps.'
+              : `${employee.department} specialist supporting Sarah’s delivery plan.`
   }));
 }
 
@@ -2724,7 +2738,7 @@ const WORKFORCE_DOMAINS: Array<{ employeeId: string; keywords: string[] }> = [
   { employeeId: 'mike', keywords: ['code', 'repo', 'github', 'ci', 'technical', 'engineering', 'bug', 'incident', 'release', 'deploy', 'deployment', 'pull request', 'pr', 'issue', 'sprint', 'architecture', 'refactor', 'migration', 'api', 'service', 'infrastructure', 'devops', 'pipeline', 'test', 'review', 'merge', 'branch', 'commit', 'rollback', 'hotfix', 'monitoring', 'alert', 'performance', 'debug', 'stack trace', 'error', 'exception', 'build', 'dependency', 'package', 'version'] },
   { employeeId: 'iris', keywords: ['security', 'access', 'identity', 'compliance', 'it ', 'device', 'vulnerability', 'risk review'] },
   { employeeId: 'sarah', keywords: ['hire', 'recruit', 'candidate', 'interview', 'job description', 'talent', 'staffing'] },
-  { employeeId: 'arav', keywords: ['people ops', 'offboarding', 'policy acknowledgement', 'engagement', 'leave', 'handbook', 'employee experience'] },
+  { employeeId: 'arav', keywords: ['people ops', 'people operations', 'human resources', 'hr ', 'employee', 'employee lifecycle', 'onboarding', 'new hire', 'offboarding', 'exit interview', 'policy', 'policy acknowledgement', 'policy acknowledgment', 'handbook', 'leave', 'vacation', 'pto', 'absence', 'attendance', 'engagement', 'engagement survey', 'pulse survey', 'employee experience', 'performance review', 'manager feedback', 'workplace conduct', 'employee relations', 'grievance', 'disciplinary', 'benefits', 'compensation', 'org chart', 'headcount', 'probation', 'promotion', 'role change', 'transfer', 'exit'] },
   { employeeId: 'alex', keywords: ['route', 'workflow', 'sla', 'operations', 'vendor', 'project', 'process', 'coordinate', 'intake', 'owner', 'deadline', 'dependency', 'handoff', 'escalation', 'runbook', 'sop', 'procedure', 'queue', 'backlog', 'schedule', 'calendar', 'meeting', 'follow-up', 'status update', 'service level'] }
 ];
 
@@ -2777,6 +2791,9 @@ function collaborationFinding(employee: any, question: string, context?: Workfor
   }
   if (employee.id === 'emma') {
     return `I reviewed the customer-impact side of "${topic}". I'm sending Sarah a success brief with: customer context, verified facts, impact and urgency, recommended response, owner, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any promise, refund, security, privacy, or escalation risk before customer-facing action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  if (employee.id === 'arav') {
+    return `I reviewed the people-operations side of "${topic}". I'm sending Sarah a people brief with: employee or team scope, verified facts, policy and approval needs, privacy considerations, owner, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any employment, legal, medical, confidentiality, access, or employee-relations risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
   return `I reviewed the ${employee.department.toLowerCase()} side of “${topic}”. I’m sending ${employee.name === 'Sarah' ? 'the team' : 'Sarah'} a usable recommendation now${context?.live_tool_evidence?.length ? ' with the verified tool result attached to the task evidence' : ''}. I’ll flag any missing input or risk before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
 }
