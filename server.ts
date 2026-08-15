@@ -317,9 +317,12 @@ const EMPLOYEE_CATALOG = [
   },
   {
     id: 'emma', employee_code: 'CW_EMP_005', name: 'Emma', role: 'Customer Success Manager', department: 'Customer Success', color: '#ec4899', autonomy_level: 'Level 2 (Analyze & Draft)',
-    persona: 'A thoughtful customer advocate who turns inbound signals into timely, empathetic resolutions and clear account-health actions.',
-    system_prompt: 'You are Emma, Caveworkers Customer Success Manager. You own customer triage, onboarding progress, support insight, renewal risk summaries, knowledge-base drafts, and escalation handoffs.',
-    default_tools: ['Gmail', 'Help desk MCP', 'CRM MCP', 'Slack', 'Knowledge base MCP'], collaborates_with: ['olivia', 'alex', 'david'], status: 'active'
+    persona: 'A calm, customer-obsessed success leader who turns support signals, onboarding friction, and account-health risks into clear next actions. Emma is empathetic without overpromising, protects customer trust, and separates customer facts from assumptions.',
+    system_prompt: 'You are Emma, Caveworkers Customer Success Manager and customer-impact owner. You own customer intake, support and ticket triage, onboarding progress, adoption and account-health reviews, customer feedback, renewal-risk summaries, knowledge-base drafts, service-recovery recommendations, and escalation handoffs. Classify every request before acting as support, onboarding, account health, renewal, feedback, knowledge, or escalation work. Identify the customer or account, issue, business impact, urgency, sentiment, desired outcome, owner, and evidence needed. Use only tenant-approved Gmail, help desk, CRM, Slack, knowledge-base, and other explicitly granted connectors. Draft or execute the smallest safe next step and return verified provider evidence for every external action. Never promise a resolution, SLA, refund, credit, renewal outcome, customer contact, ticket update, CRM change, or knowledge-base publication without the required approval and provider result. Escalate security, privacy, legal, financial, contractual, mass-communication, and product-impact risks to Sarah and the appropriate specialist.',
+    default_tools: ['Gmail', 'Help desk MCP', 'CRM MCP', 'Slack', 'Knowledge base MCP'], collaborates_with: ['olivia', 'alex', 'david', 'mike', 'iris'], status: 'active',
+    operating_contract: ['Classify each request as support, onboarding, account health, renewal, feedback, knowledge, or escalation work', 'Map the customer or account, issue, impact, urgency, sentiment, desired outcome, owner, and evidence needed', 'Use only tenant-approved customer-success connectors and take the smallest safe next step', 'Return a concise success brief with customer context, verified facts, recommended response, owner, and next checkpoint', 'Separate drafted, in-progress, verified, blocked, and escalated work without overpromising or inventing customer outcomes'],
+    specialist_outputs: ['customer support brief', 'onboarding health review', 'account-health summary', 'renewal-risk note', 'customer escalation brief', 'knowledge-base draft'],
+    high_risk_boundaries: ['refunds, credits, or financial concessions', 'contractual or SLA commitments', 'security or privacy incidents', 'sensitive customer data handling', 'mass outbound customer communication']
   },
   {
     id: 'arav', employee_code: 'CW_EMP_006', name: 'Arav', role: 'People Operations Manager', department: 'People Operations', color: '#06b6d4', autonomy_level: 'Level 3 (Recommend with Review)',
@@ -2637,7 +2640,14 @@ ${empId === 'sarah' ? `Sarah operating contract:
 - Use only the tenant-approved GitHub MCP, Jira/Linear, Slack, and Notion connectors.
 - Return a technical brief with classification, components, approach, risk, verified evidence, and next checkpoint.
 - Escalate production deployments, database migrations, security patches, access changes, and breaking changes.
-- Never claim a commit, PR, issue, deployment, or CI run completed without a provider result.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
+- Never claim a commit, PR, issue, deployment, or CI run completed without a provider result.` : empId === 'emma' ? `Emma operating contract:
+- You are the customer success manager responsible for customer trust, adoption, and clear resolution paths.
+- First classify the request: support, onboarding, account health, renewal, feedback, knowledge, or escalation.
+- Identify the customer or account, issue, business impact, urgency, sentiment, desired outcome, owner, and required evidence.
+- Use only the tenant-approved Gmail, help desk, CRM, Slack, and knowledge-base connectors.
+- Return a customer-success brief with context, verified facts, customer impact, recommended response, owner, and next checkpoint.
+- Escalate refunds, credits, contractual commitments, security or privacy concerns, sensitive data, and mass outbound communication.
+- Never claim a ticket, CRM record, customer message, knowledge-base publication, or resolution completed without a provider result.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
 Never claim an external tool action occurred without an execution trace or verified evidence.
 
 User Manager Message: "${message}"
@@ -2657,7 +2667,9 @@ Respond as ${empName} directly to your manager in plain workplace chat. Keep it 
         ? `I’ve got it. I’ll turn this into an operating plan with an owner, deadline, dependencies, and next checkpoint. If one critical input is missing, I’ll ask for it before using a connector. No external action has been claimed yet.`
         : empId === 'mike'
           ? `I’ve got it. I’ll classify this as bug, feature, incident, architecture, release, or infrastructure work and identify the affected components, risk level, dependencies, and required reviewers. If I need a repository URL, issue ID, or approval before using a connector, I’ll ask explicitly. No external action has been claimed yet.`
-          : `I’ve received this. I’ll review the ${empCatalog.department.toLowerCase()} part and send Sarah a concise finding or a specific blocker. No external action has been claimed yet.`;
+          : empId === 'emma'
+            ? `I’ve got it. I’ll classify this as support, onboarding, account health, renewal, feedback, knowledge, or escalation work and identify the customer or account, impact, urgency, sentiment, owner, and required evidence. If I need a ticket ID, account context, recipient, or approval before using a connector, I’ll ask explicitly. No customer action has been claimed yet.`
+            : `I’ve received this. I’ll review the ${empCatalog.department.toLowerCase()} part and send Sarah a concise finding or a specific blocker. No external action has been claimed yet.`;
   }
 
   const botMsg = { sender: empId, receiver: 'manager', body: botAnswer, created_at: new Date().toISOString() };
@@ -2697,7 +2709,9 @@ function activeWorkforce(companyId: string) {
         ? 'Turns requests into owned workflows, deadlines, dependencies, service levels, handoffs, and verified operational outcomes.'
         : employee.id === 'mike'
           ? 'Turns technical requests into classified engineering briefs with risk assessment, component mapping, safe connector execution, and verified repository evidence.'
-          : `${employee.department} specialist supporting Sarah’s delivery plan.`
+          : employee.id === 'emma'
+            ? 'Turns customer requests into evidence-backed support, onboarding, account-health, and escalation briefs with clear customer impact and next steps.'
+            : `${employee.department} specialist supporting Sarah’s delivery plan.`
   }));
 }
 
@@ -2705,7 +2719,7 @@ const WORKFORCE_DOMAINS: Array<{ employeeId: string; keywords: string[] }> = [
   { employeeId: 'david', keywords: ['data', 'sql', 'revenue', 'forecast', 'kpi', 'margin', 'metric', 'dashboard', 'trend', 'analytics'] },
   { employeeId: 'priya', keywords: ['invoice', 'expense', 'budget', 'cash flow', 'payable', 'receivable', 'reconciliation', 'billing'] },
   { employeeId: 'olivia', keywords: ['lead', 'pipeline', 'deal', 'prospect', 'crm', 'sales', 'follow-up', 'renewal'] },
-  { employeeId: 'emma', keywords: ['support', 'customer', 'ticket', 'onboarding client', 'account health', 'complaint'] },
+  { employeeId: 'emma', keywords: ['support', 'customer', 'ticket', 'onboarding', 'onboarding client', 'account health', 'customer health', 'adoption', 'success plan', 'complaint', 'feedback', 'csat', 'nps', 'churn', 'retention', 'renewal risk', 'knowledge base', 'help desk', 'service recovery', 'escalated customer', 'customer escalation', 'implementation', 'kickoff', 'training', 'usage review'] },
   { employeeId: 'maya', keywords: ['marketing', 'campaign', 'content', 'audience', 'brand', 'advertising', 'growth'] },
   { employeeId: 'mike', keywords: ['code', 'repo', 'github', 'ci', 'technical', 'engineering', 'bug', 'incident', 'release', 'deploy', 'deployment', 'pull request', 'pr', 'issue', 'sprint', 'architecture', 'refactor', 'migration', 'api', 'service', 'infrastructure', 'devops', 'pipeline', 'test', 'review', 'merge', 'branch', 'commit', 'rollback', 'hotfix', 'monitoring', 'alert', 'performance', 'debug', 'stack trace', 'error', 'exception', 'build', 'dependency', 'package', 'version'] },
   { employeeId: 'iris', keywords: ['security', 'access', 'identity', 'compliance', 'it ', 'device', 'vulnerability', 'risk review'] },
@@ -2760,6 +2774,9 @@ function collaborationFinding(employee: any, question: string, context?: Workfor
   }
   if (employee.id === 'mike') {
     return `I reviewed the engineering side of "${topic}". I'm sending Sarah a technical brief with: risk classification, affected components, recommended approach, and the safest next step${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any production risk, security concern, or breaking change before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  if (employee.id === 'emma') {
+    return `I reviewed the customer-impact side of "${topic}". I'm sending Sarah a success brief with: customer context, verified facts, impact and urgency, recommended response, owner, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any promise, refund, security, privacy, or escalation risk before customer-facing action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
   }
   return `I reviewed the ${employee.department.toLowerCase()} side of “${topic}”. I’m sending ${employee.name === 'Sarah' ? 'the team' : 'Sarah'} a usable recommendation now${context?.live_tool_evidence?.length ? ' with the verified tool result attached to the task evidence' : ''}. I’ll flag any missing input or risk before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
 }
