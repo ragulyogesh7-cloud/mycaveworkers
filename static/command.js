@@ -162,6 +162,24 @@ async function loadBilling() {
   }
 }
 
+async function loadRoiDashboard() {
+  const ids = ['roi-hours-saved', 'roi-tasks-completed', 'roi-actions-automated', 'roi-approvals', 'roi-value-inr', 'roi-note'];
+  if (!ids.some((id) => document.getElementById(id))) return;
+  try {
+    const roi = await responseJson('/api/roi');
+    const set = (id, value) => { const node = document.getElementById(id); if (node) node.textContent = value; };
+    set('roi-hours-saved', `${Number(roi.estimated_hours_saved || 0).toLocaleString()}h`);
+    set('roi-tasks-completed', Number(roi.tasks_completed || 0).toLocaleString());
+    set('roi-actions-automated', Number(roi.actions_automated || 0).toLocaleString());
+    set('roi-approvals', Number(roi.approvals_requested || 0).toLocaleString());
+    set('roi-value-inr', `₹${Number(roi.estimated_value_inr || 0).toLocaleString('en-IN')}`);
+    set('roi-note', roi.evidence_note || 'Based on this workspace activity and the displayed assumptions.');
+  } catch (error) {
+    const note = document.getElementById('roi-note');
+    if (note) note.textContent = 'Value metrics will appear after the first workspace task.';
+  }
+}
+
 async function loadHealth() {
   const railStatus = $('#rail-system-status');
   const railDetail = $('#rail-system-detail');
@@ -391,7 +409,7 @@ function applyWorkroomEvent(event) {
     else if (taskStatus === 'pending_approval') setExecutionLive('approval', 'Approval required', 'A consequential action is paused for your review.');
     else setExecutionLive('working', 'Work is moving', 'The workforce is coordinating and preparing the next step.');
     rebuildWorkroomMessages();
-    void Promise.all([loadTaskSummaries(), loadApprovals()]);
+    void Promise.all([loadTaskSummaries(), loadApprovals(), loadRoiDashboard()]);
   }
   setRoomConnection('LIVE', `${employees.length || 10} employees can address one another in the room.`);
 }
@@ -759,7 +777,7 @@ async function initializeRoom() {
   setSoundToggle();
   setExecutionLive();
   bindRoomInteractions();
-  await Promise.all([loadEmployees(), loadBilling(), loadHealth(), loadWorkroomSnapshot(), loadApprovals(), loadTaskSummaries()]);
+  await Promise.all([loadEmployees(), loadBilling(), loadHealth(), loadRoiDashboard(), loadWorkroomSnapshot(), loadApprovals(), loadTaskSummaries()]);
   connectWorkroom();
 }
 

@@ -1112,3 +1112,18 @@ body.room-directory-open { overflow: hidden; }
 @media (max-width: 860px) { .room-directory-featured-grid, .room-directory-all-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 @media (max-width: 620px) { .composer-quickbar { align-items: flex-start; flex-direction: column; gap: 8px; } .room-directory-modal { padding: 8px; } .room-directory-inner { max-height: calc(100vh - 16px); border-radius: 20px; } .room-directory-header, .room-directory-toolbar, .room-directory-section, .room-directory-setup { padding-left: 16px; padding-right: 16px; } .room-directory-featured-grid, .room-directory-all-grid, .room-directory-setup-grid { grid-template-columns: 1fr; } .room-directory-card { min-height: 0; } .room-directory-setup-actions, .room-directory-setup-heading { align-items: stretch; flex-direction: column; } .room-directory-back { align-self: flex-start; } }
 @media (prefers-reduced-motion: reduce) { .room-directory-inner, .room-directory-card { animation: none; } .room-directory-card, .room-directory-category-chip, .room-directory-connect-button, .room-directory-close, .room-directory-back, .connector-plus { transition: none; } }
+
+
+/* Evidence-led value tracker */
+.roi-card { position: relative; overflow: hidden; }
+.roi-card::after { content: ''; position: absolute; width: 130px; height: 130px; right: -50px; top: -60px; border-radius: 50%; background: rgba(126,232,255,.14); filter: blur(20px); pointer-events: none; }
+.roi-period { color: #91f5c8; font: 500 8px/1 var(--mono, 'DM Mono', monospace); letter-spacing: .08em; }
+.roi-primary { display: grid; gap: 2px; margin: 16px 0 14px; }
+.roi-primary strong { color: #effcff; font: 700 clamp(1.75rem, 4vw, 2.35rem)/1 var(--font, 'Space Grotesk', sans-serif); letter-spacing: -.06em; }
+.roi-primary span, .roi-metric-grid small { color: #8fa8b7; font-size: .7rem; }
+.roi-metric-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.roi-metric-grid div { display: grid; gap: 4px; padding: 9px; border: 1px solid rgba(126,232,255,.10); border-radius: 10px; background: rgba(255,255,255,.035); }
+.roi-metric-grid b { color: #c9f7ff; font: 700 1rem/1 var(--font, 'Space Grotesk', sans-serif); }
+.roi-note { margin: 12px 0 0; color: #738d9d; font-size: .68rem; line-height: 1.45; }
+@media (max-width: 620px) { .roi-metric-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } .roi-metric-grid div { padding: 7px; } .roi-metric-grid small { font-size: .58rem; } }
+@media (prefers-reduced-motion: reduce) { .roi-card::after { display: none; } }

@@ -280,9 +280,9 @@ try {
 
 const SUBSCRIPTION_PLANS: Record<string, any> = {
   free_trial: { name: 'Free Trial', price: 0, price_inr: 0, trial_days: 3, max_employees: 2, description: '3-day trial with 2 AI employees', features: ['2 AI employees', 'Permissioned tools', 'HITL Approvals'] },
-  starter: { name: 'Starter', price: 25, price_inr: 1999, max_employees: 3, description: 'Essential AI workforce for small teams', features: ['3 AI employees', 'SQL & Gmail tools', 'Audit logging'] },
-  growth: { name: 'Growth', price: 85, price_inr: 6999, max_employees: 6, description: 'Expanded capacity for growing companies', features: ['6 AI employees', 'Custom MCP Connectors', 'Priority routing'] },
-  enterprise: { name: 'Enterprise', price: 180, price_inr: 14999, max_employees: 10, description: 'Full workforce OS with priority routing', features: ['10 AI employees', 'Unlimited MCP skills', '24/7 dedicated lead'] }
+  starter: { name: 'Starter', price: 5 / 83, price_inr: 5, max_employees: 3, description: 'Low-cost test tier for a small AI workforce', features: ['3 AI employees', 'SQL & Gmail tools', 'Audit logging'] },
+  growth: { name: 'Growth', price: 10 / 83, price_inr: 10, max_employees: 6, description: 'Expanded test tier for growing workspaces', features: ['6 AI employees', 'Custom MCP Connectors', 'Priority routing'] },
+  enterprise: { name: 'Enterprise', price: 15 / 83, price_inr: 15, max_employees: 10, description: 'Full workforce test tier with advanced controls', features: ['10 AI employees', 'Unlimited MCP skills', '24/7 dedicated lead'] }
 };
 
 const EMPLOYEE_CATALOG = [
@@ -2260,6 +2260,8 @@ app.get('/api/billing', async (req, res) => {
     company_name: company.name,
     tier_name: plan.name,
     tier_key: company.tier,
+    price_inr: Number(plan.price_inr || 0),
+    available_plans: Object.entries(SUBSCRIPTION_PLANS).filter(([key]) => key !== 'free_trial').map(([key, value]: [string, any]) => ({ key, name: value.name, price_inr: Number(value.price_inr || 0), max_employees: value.max_employees })),
     active_employees: activeEmps,
     max_employees: plan.max_employees,
     quota_remaining: Math.max(0, plan.max_employees - activeEmps),
@@ -3851,24 +3853,43 @@ app.post('/api/payments/verify', async (req, res) => {
 app.get('/api/roi', (req, res) => {
   const user = getAuthUser(req);
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const emps = db.orgEmployees.get(companyId) || db.orgEmployees.get(DEFAULT_COMPANY_ID) || [];
-  const activeCount = emps.length || 3;
-
-  const humanEquivalentMonthlySalary = activeCount * 4500; // $4,500/mo avg specialist
-  const caveworkersPlanCost = activeCount <= 2 ? 0 : activeCount <= 3 ? 25 : activeCount <= 6 ? 85 : 180;
-  const netMonthlySavings = humanEquivalentMonthlySalary - caveworkersPlanCost;
-  const roiMultiplier = Math.round((humanEquivalentMonthlySalary / Math.max(1, caveworkersPlanCost)) * 10) / 10;
-
+  const employees = db.orgEmployees.get(companyId) || [];
+  const tasks = Array.from(db.tasks.values()).filter((task: any) => task.company_id === companyId);
+  const approvals = Array.from(db.approvals.values()).filter((approval: any) => approval.company_id === companyId);
+  const now = Date.now();
+  const monthStart = new Date(now);
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const inThisMonth = (value: unknown) => {
+    const timestamp = new Date(String(value || '')).getTime();
+    return Number.isFinite(timestamp) && timestamp >= monthStart.getTime();
+  };
+  const monthTasks = tasks.filter((task: any) => inThisMonth(task.created_at));
+  const completedTasks = monthTasks.filter((task: any) => ['completed', 'succeeded'].includes(String(task.status || task.execution?.status)));
+  const successfulActions = approvals.filter((approval: any) => approval.status === 'succeeded' && inThisMonth(approval.decided_at || approval.updated_at || approval.created_at));
+  const approvalsThisMonth = approvals.filter((approval: any) => inThisMonth(approval.created_at || approval.requested_at));
+  const toolAssistedTasks = completedTasks.filter((task: any) => Array.isArray(task.live_tool_evidence) && task.live_tool_evidence.length > 0);
+  const hoursPerCompletedTask = Math.max(0.1, Number(process.env.ROI_HOURS_PER_COMPLETED_TASK || 0.5));
+  const hourlyValueInr = Math.max(1, Number(process.env.ROI_HOURLY_VALUE_INR || 500));
+  const estimatedHoursSaved = Math.round(completedTasks.length * hoursPerCompletedTask * 10) / 10;
+  const estimatedValueInr = Math.round(estimatedHoursSaved * hourlyValueInr);
+  const companyTier = String((db.companies.get(companyId) as any)?.tier || (user as any).selected_tier || 'free_trial');
+  const billing = SUBSCRIPTION_PLANS[companyTier] || SUBSCRIPTION_PLANS.free_trial;
   res.json({
-    active_employees: activeCount,
-    human_equivalent_monthly_cost: `$${humanEquivalentMonthlySalary.toLocaleString()}`,
-    caveworkers_subscription_cost: `$${caveworkersPlanCost.toLocaleString()}`,
-    net_monthly_savings: `$${netMonthlySavings.toLocaleString()}`,
-    roi_multiplier: `${roiMultiplier}x`,
-    annual_projected_savings: `$${(netMonthlySavings * 12).toLocaleString()}`
+    period: 'current_month',
+    active_employees: employees.length,
+    tasks_completed: completedTasks.length,
+    tasks_started: monthTasks.length,
+    tool_assisted_tasks: toolAssistedTasks.length,
+    approvals_requested: approvalsThisMonth.length,
+    actions_automated: successfulActions.length,
+    estimated_hours_saved: estimatedHoursSaved,
+    estimated_value_inr: estimatedValueInr,
+    subscription_cost_inr: Number(billing.price_inr || 0),
+    assumptions: { hours_per_completed_task: hoursPerCompletedTask, hourly_value_inr: hourlyValueInr },
+    evidence_note: 'Value is an estimate derived from this workspace activity and the displayed assumptions; it is not a guaranteed financial return.'
   });
 });
-
 app.get('/api/office/status', (req, res) => {
   const user = getAuthUser(req);
   const companyId = user.company_id || DEFAULT_COMPANY_ID;

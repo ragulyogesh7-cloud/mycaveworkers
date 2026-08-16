@@ -760,6 +760,24 @@ describe('Caveworkers security invariants', () => {
     expect(approvals.body.map((approval: any) => approval.id)).toEqual([601]);
   });
 
+  it('returns tenant-scoped ROI evidence and transparent assumptions', async () => {
+    db.tasks.set(701, { id: 701, company_id: 'company-a', question: 'Completed evidence task', owner: 'david', status: 'completed', answer: 'Verified', plan: 'A', created_at: now, trace: [], live_tool_evidence: [{ connector: 'Sheets', result: 'verified' }] });
+    db.tasks.set(702, { id: 702, company_id: 'company-b', question: 'Other tenant task', owner: 'david', status: 'completed', answer: 'B', plan: 'B', created_at: now, trace: [] });
+    db.approvals.set(703, { id: 703, company_id: 'company-a', task_id: 701, employee_id: 'david', tool_name: 'Sheets', action_summary: 'Read sheet', status: 'succeeded', created_at: now, decided_at: now });
+    const response = await request(app).get('/api/roi').set('x-caveworkers-test-user', 'user-a').expect(200);
+    expect(response.body).toMatchObject({ tasks_completed: 1, tool_assisted_tasks: 1, actions_automated: 1, estimated_hours_saved: 0.5, estimated_value_inr: 250, subscription_cost_inr: 10 });
+    expect(response.body.evidence_note).toMatch(/estimate/i);
+    expect(response.body).not.toHaveProperty('human_equivalent_monthly_cost');
+  });
+  it('exposes the ₹5, ₹10, and ₹15 plans through the authenticated billing contract', async () => {
+    const response = await request(app).get('/api/billing').set('x-caveworkers-test-user', 'user-a').expect(200);
+    expect(response.body.price_inr).toBe(10);
+    expect(response.body.available_plans).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'starter', price_inr: 5 }),
+      expect.objectContaining({ key: 'growth', price_inr: 10 }),
+      expect.objectContaining({ key: 'enterprise', price_inr: 15 })
+    ]));
+  });
   it('rejects unsafe API requests without a matching CSRF cookie and header', async () => {
     const response = await request(app)
       .post('/api/tasks')
