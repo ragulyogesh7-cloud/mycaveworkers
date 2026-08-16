@@ -20,3 +20,7 @@ The first migration milestone should be a staging branch with a Firestore adapte
 ## Decision boundary
 
 Firebase Hosting plus Firebase Functions is a more natural all-in-one target for this workload than Vercel plus Firebase because the worker, Firestore triggers, scheduler, and Auth are in one user-owned Google project. Vercel is still suitable for the UI and request API if the user strongly prefers it, but it would require a separate Firebase Functions worker or another persistent execution service. No production migration has been performed yet.
+
+## Live custom-domain readiness check — 2026-08-16
+
+The public custom domain `https://caveworkers.ai.studio/` returned HTTP 404 with the generic `404 Page not found` response. The same response occurred for `/api/health` and `/health`, even though the repository source defines `/api/health`. DNS resolves the domain to IPv6 addresses in the `2600:1900:*` range, and the TLS certificate subject is `CN = ai.studio`, indicating the custom domain is currently terminating at the AI Studio-managed edge rather than serving the new owned Cloud Run revision. No live Gmail, Drive, Sheets, or MCP connector verification is possible until a deployed service is mapped to the domain or its temporary Cloud Run `run.app` URL is used. No credentials were exposed or changed during this check.
