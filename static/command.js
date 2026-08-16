@@ -565,8 +565,9 @@ function roomDirectoryConnectorCard(connector) {
   const connectedEmployees = connector.connected_employee_ids || [];
   const connected = Boolean(connector.connected);
   const employeeNames = connectedEmployees.map((id) => employeeById(id)?.name || id).slice(0, 2);
-  const statusCopy = connected ? `Connected${employeeNames.length ? ` · ${employeeNames.join(', ')}` : ''}` : 'Ready to connect';
-  const actionCopy = connected ? 'Reuse' : 'Connect';
+  const needsSecureSetup = connector.connection_mode !== 'google_oauth';
+  const statusCopy = connected ? `Connected${employeeNames.length ? ` · ${employeeNames.join(', ')}` : ''}` : (needsSecureSetup ? 'Secure setup required' : 'Ready to connect');
+  const actionCopy = connected ? 'Reuse' : (needsSecureSetup ? 'Configure' : 'Connect');
   const actions = (connector.supported_actions || []).slice(0, 3).map((action) => `<span>${safe(action)}</span>`).join('');
   return `<article class="room-directory-card ${connected ? 'is-connected' : ''}" style="--directory-color:${safe(connector.icon_tone || 'custom')}"><div class="room-directory-card-top"><span class="room-directory-icon room-directory-icon-${safe(connector.icon_tone || 'custom')}">${safe(connector.icon_label || connector.short_name?.[0] || '?')}</span><div class="room-directory-card-heading"><div><h4>${safe(connector.name)}</h4>${connector.verified ? '<span class="room-directory-verified">✓</span>' : '<span class="room-directory-custom">Custom</span>'}</div><span>${safe(connector.category)}</span></div></div><p class="room-directory-card-description">${safe(connector.description)}</p><div class="room-directory-action-chips">${actions}</div><p class="room-directory-card-setup">${safe(connector.setup_copy)}</p><div class="room-directory-card-footer"><span class="room-directory-connection-state ${connected ? 'is-connected' : ''}"><i></i>${safe(statusCopy)}</span><button class="room-directory-connect-button ${connected ? 'is-connected' : ''}" type="button" data-room-directory-id="${safe(connector.id)}" aria-label="${safe(actionCopy)} ${safe(connector.name)}"><span>${connected ? '✓' : '+'}</span>${safe(actionCopy)}</button></div></article>`;
 }
@@ -600,7 +601,7 @@ function renderRoomDirectory() {
   const toggle = $('#room-directory-toggle-all');
   if (toggle) { toggle.hidden = filtered.length <= 6; toggle.textContent = roomDirectoryState.showAll ? 'Show fewer' : `Show all ${filtered.length}`; toggle.setAttribute('aria-expanded', String(roomDirectoryState.showAll)); }
   const summary = $('#room-directory-summary');
-  if (summary) { const connected = filtered.filter((connector) => connector.connected).length; summary.textContent = connected ? `${connected} connector${connected === 1 ? '' : 's'} already connected in this workspace. Reuse it or connect another tool.` : 'Browse verified apps and connect them to the workforce from this room.'; }
+  if (summary) { const connected = filtered.filter((connector) => connector.connected).length; summary.textContent = connected ? `${connected} connector${connected === 1 ? '' : 's'} already connected in this workspace. Reuse it or configure another secure tool.` : 'Browse verified apps, connect Google services, or configure a tenant-approved MCP remote from this room.'; }
 }
 
 function closeRoomDirectory() {
@@ -682,14 +683,7 @@ async function connectFromRoomDirectory(connectorId) {
     }
     if (connector.connection_mode === 'mcp_registry') {
       const detail = await responseJson(`/api/mcp/directory/${encodeURIComponent(connector.id)}`);
-      try {
-        await connectRegistryFromRoom(connector, detail.server || {});
-        setRoomNotice(`${connector.name} is connected for the active workforce. Read tools are available and write actions remain policy-gated.`, 'success');
-        await refreshRoomDirectoryCatalog();
-        closeRoomDirectory();
-      } catch (error) {
-        showRoomDirectorySetup(connector, detail.server || {}, error.message || connector.setup_copy);
-      }
+      showRoomDirectorySetup(connector, detail.server || {}, 'Review the advertised secure remote and provide the tenant-approved credential before connecting this MCP server.');
       return;
     }
     showRoomDirectorySetup(connector, null);

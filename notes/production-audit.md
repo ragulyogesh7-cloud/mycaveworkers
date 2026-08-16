@@ -26,3 +26,13 @@
 - Never commit credentials.
 - Maintain tenant isolation and approval-gated external writes.
 - Do not claim a 10/10 score until automated checks and runtime/deployment requirements pass.
+
+## Latest verified connector review — 2026-08-16
+
+- The connector directory total is now derived from the curated catalog at runtime; the product no longer presents the screenshot-derived `1,870` value.
+- Google connectors use the existing OAuth flow. Registry-backed and custom MCP connectors now present an explicit secure-configuration step before connection instead of attempting an unauthenticated connection and falling back silently.
+- The directory remains a curated tenant-facing catalog, not a complete marketplace inventory. External provider OAuth implementations and credentials remain provider-specific work and are not claimed as complete.
+- A credential or service-account private key previously exposed to a chat session must be rotated by the project operator and replaced in the deployment secret store. The repository cannot safely rotate an external credential without access to the owning provider account.
+- Durable persistence, Cloud Run IAM/Secret Manager configuration, Google OAuth publishing, Razorpay live-mode verification, and legal review remain launch-gate actions outside this code change.
+
+The production claim remains intentionally conservative: automated repository checks can validate security and isolation invariants, but they cannot prove that external cloud permissions, provider verification, payment mode, or legal content are configured in a live deployment.

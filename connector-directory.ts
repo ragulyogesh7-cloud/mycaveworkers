@@ -147,4 +147,5 @@ export function connectorDirectoryPublicView(entry: ConnectorDirectoryEntry) {
 }
 
 export const CONNECTOR_DIRECTORY_CATEGORIES = Array.from(new Set(CONNECTOR_DIRECTORY.map((entry) => entry.category)));
-export const CONNECTOR_DIRECTORY_COUNT = 1870;
+// Keep this count derived from the curated catalog; never copy a marketplace or screenshot total into the product UI.
+export const CONNECTOR_DIRECTORY_COUNT = CONNECTOR_DIRECTORY.length;

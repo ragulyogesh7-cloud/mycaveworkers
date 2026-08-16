@@ -505,7 +505,8 @@ describe('Caveworkers security invariants', () => {
     });
     expect(response.body.catalog.find((entry: any) => entry.id === 'github')).toMatchObject({ connected: true, connected_employee_ids: ['alex'] });
     expect(response.body.catalog[0].auth_token_encrypted).toBeUndefined();
-    expect(response.body.total).toBeGreaterThan(response.body.catalog.length);
+    expect(response.body.total).toBe(response.body.catalog.length);
+    expect(response.body.total).not.toBe(1870);
 
     const aliasResponse = await request(app)
       .get('/api/connectors/catalog?q=GitHub')
