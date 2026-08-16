@@ -1127,3 +1127,52 @@ body.room-directory-open { overflow: hidden; }
 .roi-note { margin: 12px 0 0; color: #738d9d; font-size: .68rem; line-height: 1.45; }
 @media (max-width: 620px) { .roi-metric-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } .roi-metric-grid div { padding: 7px; } .roi-metric-grid small { font-size: .58rem; } }
 @media (prefers-reduced-motion: reduce) { .roi-card::after { display: none; } }
+
+
+/* Final workplace feed treatment: messages read as one shared room timeline, not chat bubbles. */
+.room-feed { background: linear-gradient(180deg, rgba(7, 14, 28, .54), rgba(5, 12, 24, .34)); }
+.room-message {
+  grid-template-columns: 38px minmax(0, 1fr);
+  margin: 0;
+  padding: 15px 10px 16px;
+  border-bottom: 1px solid rgba(171, 201, 230, .10);
+  border-radius: 0;
+  background: transparent;
+  transition: background 160ms var(--ease-out), border-color 160ms var(--ease-out);
+}
+.room-message:first-child { padding-top: 10px; }
+.room-message:last-child { border-bottom-color: transparent; }
+.room-message:hover { background: rgba(126, 232, 255, .045); }
+.room-message .message-dp { margin-top: 1px; }
+.message-body,
+.room-message:nth-child(even) .message-body,
+.room-message.result .message-body,
+.room-message.failure .message-body,
+.room-message.introduction .message-body,
+.room-message.handoff .message-body,
+.room-message.complete .message-body {
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+.message-meta { min-height: 22px; }
+.message-meta b { color: #f1f7ff; font-size: 13px; letter-spacing: -.01em; }
+.message-meta time { color: #7087a6; }
+.message-body p { margin: 5px 0 0; max-width: 76ch; color: #c0d0e7; font-size: 14px; line-height: 1.68; }
+.room-message.result .message-body p { color: #edf7ff; font-size: 15px; }
+.room-message.pending .message-body { opacity: .74; }
+.room-message.introduction { margin: 0; padding-block: 15px 16px; border-left: 2px solid rgba(126, 232, 255, .46); background: linear-gradient(90deg, rgba(126, 232, 255, .055), transparent 72%); }
+.room-message.handoff { padding-block: 15px 16px; border-left: 2px solid rgba(174, 182, 255, .46); background: linear-gradient(90deg, rgba(174, 182, 255, .055), transparent 72%); }
+.room-message.complete { background: linear-gradient(90deg, rgba(185, 255, 176, .055), transparent 72%); }
+.message-delete { opacity: .35; }
+.room-message:hover .message-delete, .message-delete:focus-visible { opacity: 1; }
+@media (max-width: 640px) {
+  .room-message { grid-template-columns: 32px minmax(0, 1fr); padding-inline: 3px; }
+  .message-body p, .room-message.result .message-body p { font-size: 14px; line-height: 1.62; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .room-message { transition: none; }
+}

@@ -8,6 +8,7 @@ let workroomTasks = [];
 let taskSummaries = [];
 let pendingMessages = [];
 let deletedChatIds = new Set();
+let lastRenderedFeedSignature = '';
 let roomDirectoryState = { catalog: [], categories: [], query: '', category: '', showAll: false, open: false, setupConnector: null, setupServer: null };
 let trialCountdownTimer = null;
 let soundEnabled = false;
@@ -284,6 +285,10 @@ function messageKey(message) {
 
 function chatMessageId(message) { return String(message?.chat_id || messageKey(message)); }
 
+function feedMessageSignature(message) {
+  return [chatMessageId(message), message.kind || '', message.created_at || '', message.body || '', message.pending ? 'pending' : 'settled', message.chat_visible === false ? 'hidden' : 'visible'].join('¦');
+}
+
 function messageTone(kind) {
   if (kind === 'approval_required') return 'approval';
   if (['blocked', 'action_failed', 'worker_failed'].includes(kind)) return 'failure';
@@ -321,9 +326,17 @@ function cleanChatCopy(value) {
 function renderRoomFeed(shouldFollow = roomAtLatest()) {
   const container = $('#workroom-thread');
   if (!container) return;
+  const previousScrollTop = container.scrollTop;
   const all = [...workroomMessages, ...pendingMessages].filter((message) => message.chat_visible !== false && message.sender !== 'You' && !deletedChatIds.has(chatMessageId(message))).sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()).slice(-140);
+  const signature = all.map(feedMessageSignature).join('‖');
+  if (signature === lastRenderedFeedSignature && container.childElementCount) {
+    updateJumpButton();
+    return;
+  }
+  lastRenderedFeedSignature = signature;
   if (!all.length) {
     container.innerHTML = `<div class="room-empty"><span class="room-empty-mark">✦</span><h3>Your company room is ready.</h3><p>Assign a task below and your team’s routing, collaboration, and review steps will appear here in realtime.</p></div>`;
+    updateJumpButton();
     return;
   }
   const fragment = document.createDocumentFragment();
@@ -348,6 +361,7 @@ function renderRoomFeed(shouldFollow = roomAtLatest()) {
   });
   container.replaceChildren(fragment);
   if (shouldFollow) container.scrollTop = container.scrollHeight;
+  else container.scrollTop = Math.min(previousScrollTop, Math.max(0, container.scrollHeight - container.clientHeight));
   updateJumpButton();
 }
 
