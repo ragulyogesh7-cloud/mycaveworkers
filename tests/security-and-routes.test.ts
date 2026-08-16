@@ -452,8 +452,8 @@ describe('Caveworkers security invariants', () => {
     expect(result.execution).toMatchObject({ action_type: 'gmail.send', status: 'blocked' });
     expect(result.execution.summary).toMatch(/Gmail|connect/i);
     const approval = Array.from(db.approvals.values()).find((entry: any) => entry.task_id === result.id) as any;
-    expect(approval).toMatchObject({ company_id: 'company-a', employee_id: 'sarah', status: 'rejected' });
-    expect(approval.payload.action_type).toBe('gmail.send');
+    expect(approval).toBeUndefined();
+    expect(result.answer).toMatch(/BLOCKED/i);
   });
 
   it('returns normalized official Registry results with an MCP.Directory detail link', async () => {
@@ -712,6 +712,11 @@ describe('Caveworkers security invariants', () => {
     const approval = Array.from(db.approvals.values()).find((entry: any) => entry.task_id === prepared.id) as any;
     expect(approval).toMatchObject({ company_id: 'company-a', employee_id: 'mike', tool_name: 'create_or_update_file', status: 'pending' });
     expect(approval.payload).toMatchObject({ action_type: 'mcp.tool', connection_id: connectionId, employee_id: 'mike', tool_name: 'create_or_update_file', arguments: { owner: 'ragulyogesh7-cloud', repo: 'caveworkers-employee-mcp-test', path: 'employee-mcp-test.txt', content: 'Hello World' } });
+
+    const workroom = await request(app).get('/api/workforce/workroom').set('x-caveworkers-test-user', 'user-a').expect(200);
+    const approvalMessage = workroom.body.tasks.find((task: any) => task.id === prepared.id)?.chat_messages?.find((message: any) => message.approval_id === approval.id);
+    expect(approvalMessage).toMatchObject({ approval_id: approval.id, pending: true, task_id: prepared.id });
+    expect(workroom.body.tasks.find((task: any) => task.id === prepared.id)).toMatchObject({ has_pending_approval: true, approval_id: approval.id });
 
     const commitSha = '0123456789abcdef0123456789abcdef01234567';
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input: any, init?: any) => {

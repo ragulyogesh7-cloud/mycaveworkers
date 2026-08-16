@@ -856,8 +856,13 @@ function chatMessageId(taskId: number, message: any) {
   return crypto.createHash('sha1').update(JSON.stringify({ taskId, kind: message?.kind || 'employee_message', sender: message?.sender || '', receiver: message?.receiver || '', created_at: message?.created_at || '', body: message?.body || '' })).digest('hex').slice(0, 24);
 }
 
+function pendingWorkforceApprovalForTask(task: TaskRecord) {
+  return Array.from(db.approvals.values()).find((approval) => approval.company_id === task.company_id && approval.task_id === task.id && approval.status === 'pending' && approval.payload?.origin === 'workforce');
+}
+
 function publicEmployeeChat(task: TaskRecord) {
   const deleted = new Set(task.deleted_chat_message_ids || []);
+  const pendingApproval = pendingWorkforceApprovalForTask(task);
   const messages: any[] = [];
   const seen = new Set<string>();
   const add = (message: any) => {
@@ -868,7 +873,7 @@ function publicEmployeeChat(task: TaskRecord) {
     if (deleted.has(chat_id) || seen.has(chat_id)) return;
     seen.add(chat_id);
     const employee = employeeForChatMessage(message);
-    messages.push({ ...message, chat_id, task_id: task.id, sender_id: message.sender_id || employee?.id, chat_visible: true });
+    messages.push({ ...message, chat_id, task_id: task.id, sender_id: message.sender_id || employee?.id, chat_visible: true, ...(pendingApproval && kind === 'final_answer' ? { approval_id: pendingApproval.id, pending: true } : {}) });
   };
   (task.trace || []).forEach(add);
   if (task.answer && !['queued', 'processing'].includes(task.status)) {
@@ -878,6 +883,7 @@ function publicEmployeeChat(task: TaskRecord) {
 }
 
 function workroomSnapshot(task: TaskRecord) {
+  const pendingApproval = pendingWorkforceApprovalForTask(task);
   return {
     id: task.id,
     company_id: task.company_id,
@@ -892,6 +898,8 @@ function workroomSnapshot(task: TaskRecord) {
     live_tool_evidence: task.live_tool_evidence || [],
     web_research: task.web_research || [],
     execution: task.execution,
+    has_pending_approval: Boolean(pendingApproval),
+    approval_id: pendingApproval?.id,
     queued_at: task.queued_at,
     started_at: task.started_at,
     completed_at: task.completed_at,
@@ -1593,6 +1601,8 @@ async function recordWorkforceApprovalOutcome(approval: ApprovalRecord, status: 
   const task = db.tasks.get(approval.task_id);
   if (!task || task.company_id !== approval.company_id) return;
   task.execution = { action_type: String(approval.payload?.action_type || 'external.action'), status, summary: summary.slice(0, 1200), updated_at: new Date().toISOString(), result };
+  const answerBeforeExecutionUpdate = String(task.answer || '').split('\n\nSarah’s execution update:')[0].trim();
+  task.answer = `${answerBeforeExecutionUpdate}\n\nSarah’s execution update: ${status === 'succeeded' ? 'COMPLETED' : status === 'failed' ? 'FAILED' : status === 'blocked' ? 'BLOCKED' : status.toUpperCase()} — ${summary.slice(0, 1200)}`;
   task.status = status === 'succeeded' || status === 'cancelled' ? 'completed' : status === 'failed' ? 'failed' : status === 'blocked' ? 'blocked' : 'pending_approval';
   const actor = EMPLOYEE_CATALOG.find((employee) => employee.id === approval.payload?.employee_id) || EMPLOYEE_CATALOG.find((employee) => employee.id === 'sarah');
   task.trace = [...(task.trace || []), { kind: status === 'succeeded' ? 'action_completed' : status === 'cancelled' ? 'approval_declined' : status === 'failed' || status === 'blocked' ? 'action_failed' : 'action_update', sender: actor?.name || 'Sarah', sender_id: actor?.id || 'sarah', receiver: 'Company room', receiver_id: 'company-room', body: summary.slice(0, 1200), created_at: new Date().toISOString() }];
@@ -2614,6 +2624,7 @@ app.get('/api/tasks/:id/group-chat', async (req, res) => {
   const companyId = getTenantIdOrFail(req, res);
   if (!companyId) return;
   await hydrateTenantTasks(companyId);
+  await hydrateTenantApprovals(companyId);
   const task = db.tasks.get(Number(req.params.id));
   if (!task || task.company_id !== companyId) return res.status(404).json({ error: 'Task room not found.' });
   res.json({ task_id: task.id, question: task.question, owner: task.owner, participants: task.participants || ['Manager', task.owner], messages: publicEmployeeChat(task) });
@@ -2625,6 +2636,7 @@ app.get('/api/workforce/workroom', async (req, res) => {
   const companyId = getTenantIdOrFail(req, res);
   if (!user || !companyId) return;
   await hydrateTenantTasks(companyId);
+  await hydrateTenantApprovals(companyId);
   const tasks = Array.from(db.tasks.values()).filter((task) => task.company_id === companyId).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).slice(0, 30).map(workroomSnapshot);
   res.json({ company: { id: companyId, name: user.company_name || 'Your company' }, employees: activeWorkforce(companyId), presence: companyPresence(companyId), tasks, worker: { enabled: ALWAYS_ON_WORKER_ENABLED, instance: WORKER_INSTANCE_ID, poll_ms: WORKER_POLL_MS }, research: { enabled: WEB_RESEARCH_ENABLED && Boolean(TAVILY_API_KEY || BRAVE_SEARCH_API_KEY) } });
 });
@@ -3036,21 +3048,33 @@ Next step: configure a valid OpenRouter or Gemini model key, then rerun this req
     const emailAction = isEmailAction ? await prepareEmployeeEmailAction(companyId, question, taskId, emailEmployeeId || 'sarah') : null;
     const mcpAction = !emailAction && isGitHubWriteAction ? await prepareEmployeeMcpWriteAction(companyId, question, taskId, preferredEmployeeId || lead.id) : null;
     execution = emailAction ? { action_type: 'gmail.send', status: emailAction.status, summary: emailAction.summary, updated_at: new Date().toISOString() } : mcpAction ? { action_type: 'mcp.tool', status: mcpAction.status, summary: mcpAction.summary, updated_at: new Date().toISOString() } : { action_type: 'external.action', status: 'awaiting_approval', summary: 'The requested external action is prepared and awaiting your approval. No external action has been performed.', updated_at: new Date().toISOString() };
-    const approvalId = db.nextApprovalId++;
-    const approval: ApprovalRecord = { id: approvalId, company_id: companyId, task_id: taskId, employee_id: emailAction?.payload?.employee_id || mcpAction?.payload?.employee_id || manager.id, tool_name: isEmailAction ? 'Gmail send' : mcpAction?.payload?.tool_name || (lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action'), action_summary: emailAction?.summary || mcpAction?.summary || `${manager.name} requests manager sign-off for: "${question}"`, status: emailAction?.status === 'blocked' || mcpAction?.status === 'blocked' ? 'rejected' : 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', action_type: isEmailAction ? 'gmail.send' : mcpAction?.payload?.action_type || 'external.action', manager_id: manager.id, delivery_lead_id: lead.id, collaborators: collaborators.map((employee) => employee.id), ...(emailAction?.payload || {}), ...(mcpAction?.payload || {}) } };
-    await persistApprovalRecord(approval);
-    workforceApproval = approval;
-    autoExecuteAction = approval.status === 'pending' && ['gmail.send', 'mcp.tool'].includes(String(approval.payload?.action_type || '')) && await autonomousActionAllowed(companyId, approval.payload);
-    if (autoExecuteAction) {
-      approval.status = 'approved';
-      approval.decided_at = new Date().toISOString();
-      approval.payload = { ...(approval.payload || {}), authorization_mode: 'employee_autopilot', execution_status: 'processing' };
-      execution = { ...execution, status: 'processing', summary: `${lead.name} is executing the tenant-authorized ${approval.tool_name} action automatically. A verified result will be posted here.` };
-      await persistApprovalRecord(approval);
-      trace.push({ kind: 'autopilot_started', sender: lead.name, receiver: 'Company workroom', body: `${lead.name} is running ${approval.tool_name} under the employee and connector autopilot policy.`, created_at: new Date(Date.now() + 3100).toISOString() });
+    const actionBlocked = emailAction?.status === 'blocked' || mcpAction?.status === 'blocked';
+    if (actionBlocked) {
+      trace.push({ kind: 'blocked', sender: manager.name, receiver: 'Manager', body: emailAction?.summary || mcpAction?.summary || 'The requested external action is blocked until its connector is configured.', created_at: new Date(Date.now() + 3100).toISOString() });
     } else {
-      trace.push({ kind: approval.status === 'rejected' ? 'blocked' : 'approval_required', sender: manager.name, receiver: 'Manager approval queue', body: emailAction?.summary || mcpAction?.summary || 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
+      const approvalId = db.nextApprovalId++;
+      const approval: ApprovalRecord = { id: approvalId, company_id: companyId, task_id: taskId, employee_id: emailAction?.payload?.employee_id || mcpAction?.payload?.employee_id || manager.id, tool_name: isEmailAction ? 'Gmail send' : mcpAction?.payload?.tool_name || (lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action'), action_summary: emailAction?.summary || mcpAction?.summary || `${manager.name} requests manager sign-off for: "${question}"`, status: 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', action_type: isEmailAction ? 'gmail.send' : mcpAction?.payload?.action_type || 'external.action', manager_id: manager.id, delivery_lead_id: lead.id, collaborators: collaborators.map((employee) => employee.id), ...(emailAction?.payload || {}), ...(mcpAction?.payload || {}) } };
+      await persistApprovalRecord(approval);
+      workforceApproval = approval;
+      autoExecuteAction = ['gmail.send', 'mcp.tool'].includes(String(approval.payload?.action_type || '')) && await autonomousActionAllowed(companyId, approval.payload);
+      if (autoExecuteAction) {
+        approval.status = 'approved';
+        approval.decided_at = new Date().toISOString();
+        approval.payload = { ...(approval.payload || {}), authorization_mode: 'employee_autopilot', execution_status: 'processing' };
+        execution = { ...execution, status: 'processing', summary: `${lead.name} is executing the tenant-authorized ${approval.tool_name} action automatically. A verified result will be posted here.` };
+        await persistApprovalRecord(approval);
+        trace.push({ kind: 'autopilot_started', sender: lead.name, receiver: 'Company workroom', body: `${lead.name} is running ${approval.tool_name} under the employee and connector autopilot policy.`, created_at: new Date(Date.now() + 3100).toISOString() });
+      } else {
+        trace.push({ kind: 'approval_required', sender: manager.name, receiver: 'Manager approval queue', body: emailAction?.summary || mcpAction?.summary || 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
+      }
     }
+  }
+  if (execution.status === 'blocked') {
+    answer = `${answer}\n\nSarah’s execution update: BLOCKED — ${execution.summary}`;
+  } else if (execution.status === 'awaiting_approval') {
+    answer = `${answer}\n\nSarah’s execution update: APPROVAL REQUIRED — ${execution.summary}`;
+  } else if (execution.status === 'processing') {
+    answer = `${answer}\n\nSarah’s execution update: IN PROGRESS — ${execution.summary}`;
   }
   trace.push({ kind: 'group_message', sender: manager.name, receiver: 'Manager', body: `I reviewed ${lead.name}’s delivery. ${execution.summary}`, created_at: new Date(Date.now() + 3400).toISOString() });
   trace.push({ kind: 'completed', sender: manager.name, receiver: 'Task ledger', body: requiresApproval ? `Work product completed; execution state: ${execution.status}.` : 'Work product completed with a tenant-scoped audit trace.', created_at: new Date(Date.now() + 3600).toISOString() });
@@ -3112,6 +3136,7 @@ app.get('/api/tasks', async (req, res) => {
   if (!user) return res.status(401).json({ error: 'Authentication required' });
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   await hydrateTenantTasks(companyId);
+  await hydrateTenantApprovals(companyId);
   const taskList = Array.from(db.tasks.values()).filter((task) => task.company_id === companyId).reverse().map((t: any) => {
     const ownerEmp = EMPLOYEE_CATALOG.find((e) => e.id === t.owner) || {
       id: t.owner,
