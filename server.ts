@@ -68,6 +68,7 @@ const GOOGLE_OAUTH_CLIENT_ID = (process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim()
 const GOOGLE_OAUTH_CLIENT_SECRET = (process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
 const GOOGLE_OAUTH_REDIRECT_URI = (process.env.GOOGLE_OAUTH_REDIRECT_URI || `${PUBLIC_APP_URL}/api/google/oauth/callback`).replace(/\/$/, '');
 const MCP_TOKEN_ENCRYPTION_KEY = (process.env.MCP_TOKEN_ENCRYPTION_KEY || '').trim();
+const COMPANY_EMAIL = (process.env.COMPANY_EMAIL || '').trim().toLowerCase();
 const OAUTH_STATE_SECRET = (process.env.FLASK_SECRET || process.env.OAUTH_STATE_SECRET || '').trim();
 const GOOGLE_OAUTH_CONFIGURED = Boolean(GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET && GOOGLE_OAUTH_REDIRECT_URI && (!IS_PRODUCTION || OAUTH_STATE_SECRET));
 const ALWAYS_ON_WORKER_ENABLED = process.env.ALWAYS_ON_WORKER_ENABLED !== 'false';
@@ -526,7 +527,7 @@ interface TenantConnector {
   company_id: string;
   employee_id: string;
   name: string;
-  connection_type: 'google_gmail' | 'google_sheets' | 'streamable_http' | 'git_repository' | 'custom_skill';
+  connection_type: 'google_gmail' | 'google_drive' | 'google_sheets' | 'streamable_http' | 'git_repository' | 'custom_skill';
   server_url?: string;
   access_level: 'read_only' | 'requires_approval' | 'read_write';
   /** Connector-level default for newly discovered tools; individual grants remain authoritative. */
@@ -1176,6 +1177,7 @@ function sanitizeConnectorConfig(config: Record<string, any> = {}) {
   return {
     notes: typeof config.notes === 'string' ? config.notes.slice(0, 800) : '',
     repo_path: typeof config.repo_path === 'string' ? config.repo_path.slice(0, 400) : undefined,
+    company_email: typeof config.company_email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(config.company_email.trim()) ? config.company_email.trim().toLowerCase().slice(0, 254) : (COMPANY_EMAIL || undefined),
     // Gmail write access is an explicit opt-in. It is still approval-gated per message.
     gmail_send_enabled: config.gmail_send_enabled === true,
     registry_server_name: typeof config.registry_server_name === 'string' ? config.registry_server_name.slice(0, 180) : undefined,
@@ -1290,6 +1292,9 @@ function googleScopesFor(connection: TenantConnector) {
     const scopes = ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/gmail.readonly'];
     if (connection.config?.gmail_send_enabled === true) scopes.push('https://www.googleapis.com/auth/gmail.send');
     return scopes;
+  }
+  if (connection.connection_type === 'google_drive') {
+    return ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/drive.file'];
   }
   return ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/spreadsheets.readonly'];
 }
@@ -1472,7 +1477,7 @@ async function executeEmployeeReadTools(companyId: string, employee: any, questi
   return results;
 }
 
-async function getGoogleConnection(companyId: string, employeeId: string, connectionId: number, type: 'google_gmail' | 'google_sheets') {
+async function getGoogleConnection(companyId: string, employeeId: string, connectionId: number, type: 'google_gmail' | 'google_drive' | 'google_sheets') {
   const connections = await loadMcpConnections(companyId, employeeId);
   const connection = connections.find((entry) => entry.id === connectionId && entry.connection_type === type && entry.status === 'connected');
   if (!connection || !connection.auth_token_encrypted) throw new Error(`The requested Google connector is not connected for ${employeeId}.`);
@@ -1483,8 +1488,34 @@ async function getGoogleConnection(companyId: string, employeeId: string, connec
   return { connection, oauth2 };
 }
 
-async function readGoogleSheetValues(companyId: string, connectionId: number, sheetReference: string, range?: string) {
-  const { oauth2 } = await getGoogleConnection(companyId, 'david', connectionId, 'google_sheets');
+async function propagateCompanyGoogleConnection(connection: TenantConnector) {
+  const companyEmail = String(connection.config?.company_email || '').trim().toLowerCase();
+  const authorizedEmail = String(connection.oauth_email || '').trim().toLowerCase();
+  if (!companyEmail || !authorizedEmail || companyEmail !== authorizedEmail || !['google_gmail', 'google_drive', 'google_sheets'].includes(connection.connection_type)) return 0;
+  const employees = activeWorkforce(connection.company_id);
+  let created = 0;
+  for (const employee of employees) {
+    if (employee.id === connection.employee_id) continue;
+    const existing = (await loadMcpConnections(connection.company_id, employee.id)).find((entry) => entry.connection_type === connection.connection_type && String(entry.config?.company_email || '').toLowerCase() === companyEmail);
+    if (existing) continue;
+    const now = new Date().toISOString();
+    const shared: TenantConnector = {
+      ...connection,
+      id: Date.now() + created + 1,
+      employee_id: employee.id,
+      name: `${connection.name} · Company account`,
+      tool_grants: (connection.tool_grants || []).map((grant) => ({ ...grant })),
+      created_at: now,
+      updated_at: now
+    };
+    await persistMcpConnection(shared);
+    created += 1;
+  }
+  return created;
+}
+
+async function readGoogleSheetValues(companyId: string, connectionId: number, sheetReference: string, range?: string, employeeId = 'david') {
+  const { oauth2 } = await getGoogleConnection(companyId, employeeId, connectionId, 'google_sheets');
   const sheets = google.sheets({ version: 'v4', auth: oauth2 });
   const spreadsheetId = parseSpreadsheetId(sheetReference);
   if (!spreadsheetId || spreadsheetId.length < 10) throw new Error('A valid Google Sheets URL or spreadsheet ID is required.');
@@ -1496,8 +1527,8 @@ async function readGoogleSheetValues(companyId: string, connectionId: number, sh
   return { spreadsheet_id: spreadsheetId, title: metadata.data.properties?.title || 'Google Sheet', range: boundedRange, values };
 }
 
-async function searchGmail(companyId: string, connectionId: number, query: string, maxResults = 10) {
-  const { oauth2 } = await getGoogleConnection(companyId, 'david', connectionId, 'google_gmail');
+async function searchGmail(companyId: string, connectionId: number, query: string, maxResults = 10, employeeId = 'david') {
+  const { oauth2 } = await getGoogleConnection(companyId, employeeId, connectionId, 'google_gmail');
   const gmail = google.gmail({ version: 'v1', auth: oauth2 });
   const listed = await gmail.users.messages.list({ userId: 'me', q: String(query || '').slice(0, 500), maxResults: Math.min(Math.max(Number(maxResults) || 10, 1), 10) });
   const messages = await Promise.all((listed.data.messages || []).slice(0, 10).map(async (message) => {
@@ -1506,6 +1537,16 @@ async function searchGmail(companyId: string, connectionId: number, query: strin
     return { id: message.id, thread_id: message.threadId, snippet: detail.data.snippet || '', headers };
   }));
   return { query: String(query || '').slice(0, 500), messages };
+}
+
+async function searchGoogleDriveFiles(companyId: string, employeeId: string, connectionId: number, query = '', maxResults = 10) {
+  const { oauth2 } = await getGoogleConnection(companyId, employeeId, connectionId, 'google_drive');
+  const drive = google.drive({ version: 'v3', auth: oauth2 });
+  const safeQuery = String(query || '').replace(/[\\'\\r\\n]/g, ' ').trim().slice(0, 120);
+  const escapedQuery = safeQuery.replace(/'/g, "\\\\'");
+  const q = `trashed = false${escapedQuery ? ` and name contains '${escapedQuery}'` : ''}`;
+  const listed = await drive.files.list({ q, pageSize: Math.min(Math.max(Number(maxResults) || 10, 1), 25), orderBy: 'modifiedTime desc', fields: 'files(id,name,mimeType,modifiedTime,webViewLink,size)' });
+  return { query: safeQuery, files: (listed.data.files || []).slice(0, 25).map((file) => ({ id: file.id, name: file.name, mime_type: file.mimeType, modified_time: file.modifiedTime, web_view_link: file.webViewLink, size: file.size })) };
 }
 
 const EMAIL_ADDRESS_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
@@ -1529,6 +1570,25 @@ function hasEnabledGmailSend(connection: TenantConnector) {
     && ['requires_approval', 'read_write'].includes(String(grant?.access_level || ''));
 }
 
+function isCompanyMailboxConnection(connection: TenantConnector) {
+  if (!COMPANY_EMAIL || connection.connection_type !== 'google_gmail') return false;
+  return connection.config?.company_email === COMPANY_EMAIL || connection.oauth_email?.toLowerCase() === COMPANY_EMAIL;
+}
+
+async function findGmailSendConnection(companyId: string, employeeId: string) {
+  const preferred = await loadMcpConnections(companyId, employeeId);
+  const direct = preferred.find(hasEnabledGmailSend);
+  if (direct) return { connection: direct, mailbox_employee_id: employeeId, shared: false };
+  if (!COMPANY_EMAIL) return null;
+  const otherEmployees = activeWorkforce(companyId).filter((employee) => employee.id !== employeeId);
+  const lists = await Promise.all(otherEmployees.map(async (employee) => ({ employeeId: employee.id, connections: await loadMcpConnections(companyId, employee.id) })));
+  for (const entry of lists) {
+    const shared = entry.connections.find((connection) => hasEnabledGmailSend(connection) && isCompanyMailboxConnection(connection));
+    if (shared) return { connection: shared, mailbox_employee_id: entry.employeeId, shared: true };
+  }
+  return null;
+}
+
 async function prepareEmployeeEmailAction(companyId: string, question: string, taskId: number, requestedEmployeeId = 'sarah') {
   const workforce = activeWorkforce(companyId);
   const employee = workforce.find((entry) => entry.id === requestedEmployeeId) || workforce.find((entry) => entry.id === 'sarah') || EMPLOYEE_CATALOG.find((entry) => entry.id === 'sarah');
@@ -1537,17 +1597,20 @@ async function prepareEmployeeEmailAction(companyId: string, question: string, t
   const company = db.companies.get(companyId);
   const draft = emailDraftFromRequest(question, company?.name || 'your workspace', employeeName);
   if (!draft.recipients.length) return { status: 'blocked' as const, summary: `${employeeName} prepared the work but cannot draft an executable email because no recipient address was included. Add a recipient such as name@company.com and try again.` };
-  const connections = await loadMcpConnections(companyId, employeeId);
-  const gmailConnection = connections.find(hasEnabledGmailSend);
-  if (!gmailConnection) {
+  const mailbox = await findGmailSendConnection(companyId, employeeId);
+  const gmailConnection = mailbox?.connection;
+  if (!gmailConnection || !mailbox) {
+    const connections = await loadMcpConnections(companyId, employeeId);
     const hasConfiguredGmail = connections.some((connection) => connection.connection_type === 'google_gmail' && connection.config?.gmail_send_enabled === true);
-    return { status: 'blocked' as const, summary: hasConfiguredGmail ? `${employeeName}’s Gmail connection needs to be reconnected with the Gmail send permission before an email can be sent.` : `${employeeName} has no enabled Gmail send connection. In Settings, connect Gmail to ${employeeName}, enable sending, then complete Google OAuth.` };
+    return { status: 'blocked' as const, summary: hasConfiguredGmail ? `${employeeName}’s Gmail connection needs to be reconnected with the Gmail send permission before an email can be sent.` : `${employeeName} has no enabled Gmail send connection. Connect Gmail to ${employeeName}, enable sending, and complete Google OAuth${COMPANY_EMAIL ? ` for the company mailbox ${COMPANY_EMAIL}` : ''}.` };
   }
   const gmailGrant = gmailConnection.tool_grants.find((grant) => grant.tool_name === 'gmail.send');
+  const sender = gmailConnection.oauth_email || gmailConnection.config?.company_email || COMPANY_EMAIL || 'the authorized Gmail account';
+  const mailboxNote = mailbox.shared ? ` through the tenant company mailbox ${sender}` : ` from ${sender}`;
   return {
     status: gmailGrant?.access_level === 'read_write' ? 'processing' as const : 'awaiting_approval' as const,
-    summary: gmailGrant?.access_level === 'read_write' ? `${employeeName} drafted an email to ${draft.recipients.join(', ')} and is ready to send it under the tenant-authorized autopilot policy.` : `${employeeName} drafted an email to ${draft.recipients.join(', ')}. It will not be sent until you approve it.`,
-    payload: { action_type: 'gmail.send', connection_id: gmailConnection.id, employee_id: employeeId, to: draft.recipients, subject: draft.subject, body: draft.body, execution_status: 'pending', idempotency_key: crypto.randomUUID() }
+    summary: gmailGrant?.access_level === 'read_write' ? `${employeeName} drafted an email to ${draft.recipients.join(', ')}${mailboxNote} and is ready to send it under the tenant-authorized autopilot policy.` : `${employeeName} drafted an email to ${draft.recipients.join(', ')}${mailboxNote}. It will not be sent until you approve it.`,
+    payload: { action_type: 'gmail.send', connection_id: gmailConnection.id, employee_id: employeeId, mailbox_employee_id: mailbox.mailbox_employee_id, company_email: sender, to: draft.recipients, subject: draft.subject, body: draft.body, execution_status: 'pending', idempotency_key: crypto.randomUUID() }
   };
 }
 
@@ -1602,10 +1665,11 @@ async function dispatchApprovedEmployeeEmail(approval: ApprovalRecord) {
   approval.payload = { ...payload, execution_status: 'processing' };
   await persistApprovalRecord(approval);
   const employeeId = typeof payload.employee_id === 'string' && EMPLOYEE_CATALOG.some((employee) => employee.id === payload.employee_id) ? payload.employee_id : approval.employee_id || 'sarah';
-  const { oauth2 } = await getGoogleConnection(approval.company_id, employeeId, Number(payload.connection_id), 'google_gmail');
+  const mailboxEmployeeId = typeof payload.mailbox_employee_id === 'string' && EMPLOYEE_CATALOG.some((employee) => employee.id === payload.mailbox_employee_id) ? payload.mailbox_employee_id : employeeId;
+  const { connection, oauth2 } = await getGoogleConnection(approval.company_id, mailboxEmployeeId, Number(payload.connection_id), 'google_gmail');
   const gmail = google.gmail({ version: 'v1', auth: oauth2 });
   const sent = await gmail.users.messages.send({ userId: 'me', requestBody: { raw: gmailRawMessage(recipients, String(payload.subject || ''), String(payload.body || '')) } });
-  const result = { employee_id: employeeId, message_id: String(sent.data.id || ''), thread_id: String(sent.data.threadId || ''), recipients: recipients.join(', '), subject: String(payload.subject || '').slice(0, 160) };
+  const result = { employee_id: employeeId, mailbox_employee_id: mailboxEmployeeId, sender: connection.oauth_email || connection.config?.company_email || COMPANY_EMAIL || '', message_id: String(sent.data.id || ''), thread_id: String(sent.data.threadId || ''), recipients: recipients.join(', '), subject: String(payload.subject || '').slice(0, 160) };
   approval.payload = { ...approval.payload, execution_status: 'succeeded', execution_result: result };
   approval.executed_at = new Date().toISOString();
   await persistApprovalRecord(approval);
@@ -3551,7 +3615,7 @@ app.post('/api/employees/:id/mcp-connections', async (req, res) => {
     context7: { name: 'Context7 Docs', tools: [{ name: 'context7.search', description: 'Search documentation', risk: 'read' as const }] }
   } as Record<string, { name: string; tools: Array<{ name: string; description: string; risk: 'read' | 'write' }> }>)[String(req.body?.marketplace_id || '')];
   const connectionType = (marketplace ? 'custom_skill' : String(req.body?.connection_type || 'streamable_http')) as TenantConnector['connection_type'];
-  const allowedTypes: TenantConnector['connection_type'][] = ['google_gmail', 'google_sheets', 'streamable_http', 'git_repository', 'custom_skill'];
+  const allowedTypes: TenantConnector['connection_type'][] = ['google_gmail', 'google_drive', 'google_sheets', 'streamable_http', 'git_repository', 'custom_skill'];
   if (!allowedTypes.includes(connectionType)) return res.status(400).json({ error: 'Unsupported connector type.' });
   const name = String(req.body?.name || marketplace?.name || 'Custom Connector').trim().slice(0, 120);
   if (!name) return res.status(400).json({ error: 'A connector name is required.' });
@@ -3571,13 +3635,14 @@ app.post('/api/employees/:id/mcp-connections', async (req, res) => {
     server_url: serverUrl, access_level: ['read_only', 'requires_approval', 'read_write'].includes(req.body?.access_level) ? req.body.access_level : 'requires_approval',
     autonomy_mode: req.body?.autonomy_mode === 'copilot' ? 'copilot' : 'autopilot',
     status: marketplace ? 'connected' : 'needs_configuration',
-    config: sanitizeConnectorConfig({ notes: req.body?.config?.notes, repo_path: req.body?.config?.repo_path, gmail_send_enabled: gmailSendEnabled, marketplace_id: req.body?.marketplace_id }),
+    config: sanitizeConnectorConfig({ notes: req.body?.config?.notes, repo_path: req.body?.config?.repo_path, company_email: req.body?.config?.company_email, repo_owner: req.body?.config?.repo_owner, gmail_send_enabled: gmailSendEnabled, marketplace_id: req.body?.marketplace_id }),
     discovered_tools: marketplace?.tools || [], tool_grants: marketplace?.tools?.map((tool) => ({ tool_name: tool.name, access_level: req.body?.access_level === 'read_write' && tool.risk === 'read' ? 'read_write' : tool.risk === 'write' ? 'requires_approval' : 'read_only' })) || [], created_at: now, updated_at: now
   };
   await persistMcpConnection(connection);
     const employeeName = employee.name || empId;
     const googleNotice = connectionType === 'google_gmail'
       ? `Connector saved for ${employeeName}. Start Google OAuth${connection.config.gmail_send_enabled ? ` to grant read access and ${employeeName}'s approval-gated Gmail send permission` : ' to grant read-only Gmail access'}.`
+      : connectionType === 'google_drive' ? `Connector saved for ${employeeName}. Start Google OAuth to grant per-file Google Drive access.`
       : connectionType === 'google_sheets' ? `Connector saved for ${employeeName}. Start Google OAuth to grant read-only Sheets access.` : '';
     res.status(201).json({ ok: true, connection: connectorPublicView(connection), tools_discovered: false, notice: googleNotice || 'Connector saved. Discover tools and grant them per-tool before this employee can use the server.' });
 });
@@ -3588,11 +3653,11 @@ app.get('/api/employees/:id/mcp-connections/:connectionId/google/start', async (
   const companyId = user?.company_id || DEFAULT_COMPANY_ID;
   const connectionId = Number(req.params.connectionId);
   const requestedService = String(req.query.service || '').trim().toLowerCase();
-  const requestedType = (requestedService === 'gmail' ? 'google_gmail' : requestedService === 'sheets' ? 'google_sheets' : requestedService) as 'google_gmail' | 'google_sheets' | '';
+  const requestedType = (requestedService === 'gmail' ? 'google_gmail' : requestedService === 'drive' ? 'google_drive' : requestedService === 'sheets' ? 'google_sheets' : requestedService) as 'google_gmail' | 'google_drive' | 'google_sheets' | '';
   const connections = await loadMcpConnections(companyId, req.params.id);
-  const connection = connections.find((entry) => entry.id === connectionId && (entry.connection_type === requestedType || (!requestedType && ['google_gmail', 'google_sheets'].includes(entry.connection_type))));
-  const type = connection?.connection_type as 'google_gmail' | 'google_sheets';
-  if (!connection || !['google_gmail', 'google_sheets'].includes(type)) return res.status(400).json({ error: 'Choose Gmail or Google Sheets.' });
+  const connection = connections.find((entry) => entry.id === connectionId && (entry.connection_type === requestedType || (!requestedType && ['google_gmail', 'google_drive', 'google_sheets'].includes(entry.connection_type))));
+  const type = connection?.connection_type as 'google_gmail' | 'google_drive' | 'google_sheets';
+  if (!connection || !['google_gmail', 'google_drive', 'google_sheets'].includes(type)) return res.status(400).json({ error: 'Choose Gmail, Google Drive, or Google Sheets.' });
   if (!connection) return res.status(404).json({ error: 'Google connector not found.' });
   try {
     const oauth2 = googleOAuthClient();
@@ -3633,7 +3698,7 @@ app.get('/api/google/oauth/callback', async (req, res) => {
     connection.status = 'connected';
     connection.last_error = undefined;
     connection.updated_at = new Date().toISOString();
-    const defaultTool = payload.connection_type === 'google_gmail' ? 'gmail.search' : 'sheets.read';
+    const defaultTool = payload.connection_type === 'google_gmail' ? 'gmail.search' : payload.connection_type === 'google_drive' ? 'drive.files.read' : 'sheets.read';
     if (!connection.tool_grants.some((grant) => grant.tool_name === defaultTool)) connection.tool_grants.push({ tool_name: defaultTool, access_level: 'read_only' });
     if (payload.connection_type === 'google_gmail' && connection.config?.gmail_send_enabled && !connection.tool_grants.some((grant) => grant.tool_name === 'gmail.send')) connection.tool_grants.push({ tool_name: 'gmail.send', access_level: 'requires_approval' });
     try {
@@ -3642,9 +3707,11 @@ app.get('/api/google/oauth/callback', async (req, res) => {
       connection.oauth_email = identity.data.email || undefined;
     } catch (_identityError) { /* identity is optional; the token remains valid for the requested API */ }
     await persistMcpConnection(connection);
+    await propagateCompanyGoogleConnection(connection);
     res.clearCookie('cw_google_oauth_state', { path: '/' });
     const returnTo = payload.return_to === '/command' ? '/command' : '/settings';
-    return res.redirect(`${returnTo}?connector=connected&service=${payload.connection_type === 'google_gmail' ? 'gmail' : 'sheets'}`);
+    const serviceName = payload.connection_type === 'google_gmail' ? 'gmail' : payload.connection_type === 'google_drive' ? 'drive' : 'sheets';
+    return res.redirect(`${returnTo}?connector=connected&service=${serviceName}`);
   } catch (error: any) {
     console.warn('Google OAuth callback failed:', error?.message || error);
     return res.status(502).send('Google connection could not be completed. Check the OAuth client, redirect URI, and requested API scopes.');
@@ -3716,7 +3783,7 @@ app.post('/api/employees/:id/mcp-connections/:connectionId/test', async (req, re
     try { const tools = await discoverMcpTools(connection); connection.discovered_tools = tools; connection.status = 'connected'; connection.last_error = undefined; await persistMcpConnection(connection); return res.json({ ok: true, message: `Connection healthy. ${tools.length} tools discovered.` }); }
     catch (error: any) { reportOperationalFailure('connector.health_check', error, { tenant_hash: anonymizeIdentifier(companyId), employee_id: req.params.id, connector_type: connection.connection_type, request_id: getRequestId(req) }); return res.status(502).json({ ok: false, error: String(error?.message || 'MCP health check failed').slice(0, 240), request_id: getRequestId(req) }); }
   }
-  if (connection.connection_type === 'google_gmail' || connection.connection_type === 'google_sheets') return res.json({ ok: connection.status === 'connected', message: connection.status === 'connected' ? `Google ${connection.connection_type === 'google_gmail' ? 'Gmail' : 'Sheets'} connection is ready.` : 'Connect the Google account before testing.' });
+  if (connection.connection_type === 'google_gmail' || connection.connection_type === 'google_drive' || connection.connection_type === 'google_sheets') return res.json({ ok: connection.status === 'connected', message: connection.status === 'connected' ? `Google ${connection.connection_type === 'google_gmail' ? 'Gmail' : connection.connection_type === 'google_drive' ? 'Drive' : 'Sheets'} connection is ready.` : 'Connect the Google account before testing.' });
   res.json({ ok: true, message: 'Connection configuration is saved.' });
 });
 
@@ -3741,12 +3808,27 @@ app.get('/api/analyst/connectors', async (req, res) => {
   res.json({ connections: connections.map(connectorPublicView) });
 });
 
+app.post('/api/employees/:id/google-drive/search', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const employeeId = String(req.params.id || '').trim();
+  if (!activeWorkforce(user.company_id || DEFAULT_COMPANY_ID).some((employee) => employee.id === employeeId)) return res.status(404).json({ error: 'Employee not found in this workspace.' });
+  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  try {
+    const connections = await loadMcpConnections(companyId, employeeId);
+    const connection = connections.find((entry) => entry.connection_type === 'google_drive' && entry.status === 'connected' && entry.tool_grants.some((grant) => grant.tool_name === 'drive.files.read' && grant.access_level !== 'requires_approval'));
+    if (!connection) return res.status(409).json({ error: 'A connected read-only Google Drive capability is required for this employee.' });
+    const result = await searchGoogleDriveFiles(companyId, employeeId, connection.id, String(req.body?.query || ''), req.body?.max_results);
+    res.json({ ok: true, result });
+  } catch (error: any) { reportOperationalFailure('connector.google_drive_search', error, { tenant_hash: anonymizeIdentifier(companyId), employee_id: employeeId, request_id: getRequestId(req) }); res.status(502).json({ error: String(error?.message || 'Google Drive search failed').slice(0, 240), request_id: getRequestId(req) }); }
+});
+
 app.post('/api/analyst/google-sheets/read', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user?.company_id || DEFAULT_COMPANY_ID;
   try {
-    const result = await readGoogleSheetValues(companyId, Number(req.body?.connection_id), String(req.body?.sheet_url || ''), req.body?.range);
+    const result = await readGoogleSheetValues(companyId, Number(req.body?.connection_id), String(req.body?.sheet_url || ''), req.body?.range, String(req.body?.employee_id || 'david'));
     res.json({ ok: true, result });
   } catch (error: any) { reportOperationalFailure('connector.google_sheets_read', error, { tenant_hash: anonymizeIdentifier(companyId), request_id: getRequestId(req) }); res.status(502).json({ error: String(error?.message || 'Google Sheets read failed').slice(0, 240), request_id: getRequestId(req) }); }
 });
@@ -3756,7 +3838,7 @@ app.post('/api/analyst/gmail/search', async (req, res) => {
   if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user?.company_id || DEFAULT_COMPANY_ID;
   try {
-    const result = await searchGmail(companyId, Number(req.body?.connection_id), String(req.body?.query || ''), req.body?.max_results);
+    const result = await searchGmail(companyId, Number(req.body?.connection_id), String(req.body?.query || ''), req.body?.max_results, String(req.body?.employee_id || 'david'));
     res.json({ ok: true, result });
   } catch (error: any) { reportOperationalFailure('connector.gmail_search', error, { tenant_hash: anonymizeIdentifier(companyId), request_id: getRequestId(req) }); res.status(502).json({ error: String(error?.message || 'Gmail search failed').slice(0, 240), request_id: getRequestId(req) }); }
 });

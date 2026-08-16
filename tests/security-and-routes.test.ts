@@ -531,6 +531,7 @@ describe('Caveworkers security invariants', () => {
       connected: expect.any(Boolean)
     });
     expect(response.body.catalog.find((entry: any) => entry.id === 'github')).toMatchObject({ connected: true, connected_employee_ids: ['alex'] });
+    expect(response.body.catalog.find((entry: any) => entry.id === 'google-drive')).toMatchObject({ connection_type: 'google_drive', supported_actions: expect.arrayContaining(['Search files']) });
     expect(response.body.catalog[0].auth_token_encrypted).toBeUndefined();
     expect(response.body.total).toBe(response.body.catalog.length);
     expect(response.body.total).not.toBe(1870);
@@ -543,6 +544,12 @@ describe('Caveworkers security invariants', () => {
     expect(aliasResponse.body.catalog[0]).toMatchObject({ id: 'github', connected: true });
   });
 
+  it('keeps employee-scoped Google Drive access tenant-safe and truthful before OAuth', async () => {
+    db.orgEmployees.set('company-a', [{ id: 'alex', name: 'Alex', role: 'Operations Lead', department: 'Operations', status: 'active', tools: [], permissions: [] }]);
+    db.orgEmployees.set('company-b', [{ id: 'iris', name: 'Iris', role: 'Security Analyst', department: 'Security', status: 'active', tools: [], permissions: [] }]);
+    await csrfRequest('user-a', 'post', '/api/employees/iris/google-drive/search').send({ query: 'report' }).expect(404);
+    await csrfRequest('user-a', 'post', '/api/employees/alex/google-drive/search').send({ query: 'report' }).expect(409);
+  });
   it('rejects private Registry-advertised remotes before any MCP connection attempt', async () => {
     process.env.MCP_REGISTRY_URL = 'https://registry.mock/v0.1';
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: any) => {

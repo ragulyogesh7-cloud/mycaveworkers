@@ -21,7 +21,7 @@ export interface ConnectorDirectoryEntry {
   verified: boolean;
   featured: boolean;
   connection_mode: DirectoryConnectionMode;
-  connection_type?: 'google_gmail' | 'google_sheets' | 'streamable_http';
+  connection_type?: 'google_gmail' | 'google_drive' | 'google_sheets' | 'streamable_http';
   registry_name?: string;
   default_access_level: 'read_only' | 'requires_approval' | 'read_write';
   supported_actions: string[];
@@ -34,7 +34,7 @@ export interface ConnectorDirectoryEntry {
 export const CONNECTOR_DIRECTORY: ConnectorDirectoryEntry[] = [
   {
     id: 'google-drive', name: 'Google Drive', short_name: 'Drive', description: 'Search, read, and upload workspace files instantly.', category: 'Productivity', icon_label: 'D', icon_tone: 'drive', verified: true, featured: true,
-    connection_mode: 'google_oauth', connection_type: 'google_sheets', default_access_level: 'requires_approval',
+    connection_mode: 'google_oauth', connection_type: 'google_drive', default_access_level: 'requires_approval',
     supported_actions: ['Search files', 'Read documents', 'Upload files'], keywords: ['google', 'drive', 'files', 'documents', 'storage'], recommended_employee_ids: ['david', 'emma', 'arav', 'maya', 'iris'], setup_copy: 'Connect your Google Workspace once, then grant only the employees who need Drive.'
   },
   {

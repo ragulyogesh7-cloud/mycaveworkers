@@ -795,7 +795,8 @@ async function connectFromRoomDirectory(connectorId) {
       const employeeId = connector.recommended_employee_ids?.find((id) => employeeById(id)) || 'sarah';
       const saved = await responseJson(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: connector.name, connection_type: connector.connection_type, access_level: connector.default_access_level || 'requires_approval', config: { gmail_send_enabled: false, notes: 'Connected from the Company Room connector directory.' } }) });
       if (!saved.connection?.id) throw new Error('The connector was saved but Google authorization could not start.');
-      window.location.assign(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections/${encodeURIComponent(saved.connection.id)}/google/start?service=${connector.connection_type === 'google_gmail' ? 'gmail' : 'sheets'}&return_to=%2Fcommand`);
+      const googleService = connector.connection_type === 'google_gmail' ? 'gmail' : connector.connection_type === 'google_drive' ? 'drive' : 'sheets';
+      window.location.assign(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections/${encodeURIComponent(saved.connection.id)}/google/start?service=${googleService}&return_to=%2Fcommand`);
       return;
     }
     if (connector.connection_mode === 'mcp_registry') {
