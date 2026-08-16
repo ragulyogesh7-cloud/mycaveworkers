@@ -30,3 +30,11 @@ Caveworkers currently uses Gmail OAuth with `gmail.readonly` and optional `gmail
 Initial company account requested: `ragulordis@gmail.com`.
 
 No OAuth client ID/secret or Google Cloud project credentials were provided in the current request. The existing live deployment previously lacked Google OAuth client credentials, so the operator must inject them into the Cloud Run revision before OAuth can work.
+
+## Gmail SMTP research
+
+- Gmail Help: https://support.google.com/mail/answer/185833?hl=en — App passwords are 16-digit passcodes and require 2-Step Verification. Google may not expose App Passwords for some account configurations, including certain organization-managed accounts or Advanced Protection.
+- Gmail SMTP documentation: https://developers.google.com/workspace/gmail/imap/imap-smtp — Gmail supports SMTP; `smtp.gmail.com` supports port 465 for SSL and port 587 for TLS. Google also documents OAuth/XOAUTH2 as the modern authorization mechanism.
+- Google Workspace administrator guidance: https://knowledge.workspace.google.com/admin/gmail/send-email-from-a-printer-scanner-or-app — For app-based Gmail SMTP, use `smtp.gmail.com`, port 465 with SSL or 587 with TLS, authenticate with the full mailbox address and an app password, and observe Gmail sending limits. Google recommends SMTP relay for managed Workspace organizations, but the temporary personal Gmail setup uses authenticated Gmail SMTP.
+
+Implementation decision: SMTP is an optional deployment-level fallback, not a per-tenant password field. The app password is read only from `SMTP_APP_PASSWORD`, never returned by health or connector APIs, and never committed to Git. Gmail OAuth remains the preferred transport when a tenant Gmail send connection exists; SMTP is used only when the approved company-mail SMTP configuration is enabled and no OAuth Gmail send connection is available. All SMTP sends remain approval-gated unless the existing explicit autopilot policy authorizes the action.

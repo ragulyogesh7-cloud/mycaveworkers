@@ -13,6 +13,7 @@ import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { GoogleGenAI } from '@google/genai';
 import { google } from 'googleapis';
+import nodemailer from 'nodemailer';
 import { Sentry, anonymizeIdentifier, reportOperationalFailure, sentryEnabled } from './instrument.js';
 import { isTrialExpired, verifyRazorpayPaymentSignature, verifyRazorpayWebhookSignature } from './security.js';
 import { getMcpRegistryServer, searchMcpRegistry } from './mcp-registry.js';
@@ -69,6 +70,13 @@ const GOOGLE_OAUTH_CLIENT_SECRET = (process.env.GOOGLE_OAUTH_CLIENT_SECRET || ''
 const GOOGLE_OAUTH_REDIRECT_URI = (process.env.GOOGLE_OAUTH_REDIRECT_URI || `${PUBLIC_APP_URL}/api/google/oauth/callback`).replace(/\/$/, '');
 const MCP_TOKEN_ENCRYPTION_KEY = (process.env.MCP_TOKEN_ENCRYPTION_KEY || '').trim();
 const COMPANY_EMAIL = (process.env.COMPANY_EMAIL || '').trim().toLowerCase();
+const SMTP_ENABLED = process.env.SMTP_ENABLED === 'true';
+const SMTP_HOST = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
+const SMTP_PORT = Math.min(Math.max(Number(process.env.SMTP_PORT || '587') || 587, 1), 65535);
+const SMTP_SECURE = process.env.SMTP_SECURE === 'true' || SMTP_PORT === 465;
+const SMTP_USER = (process.env.SMTP_USER || COMPANY_EMAIL).trim().toLowerCase();
+const SMTP_APP_PASSWORD = (process.env.SMTP_APP_PASSWORD || '').trim();
+const SMTP_CONFIGURED = SMTP_ENABLED && Boolean(COMPANY_EMAIL && SMTP_USER && SMTP_APP_PASSWORD && SMTP_USER === COMPANY_EMAIL && SMTP_HOST);
 const OAUTH_STATE_SECRET = (process.env.FLASK_SECRET || process.env.OAUTH_STATE_SECRET || '').trim();
 const GOOGLE_OAUTH_CONFIGURED = Boolean(GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET && GOOGLE_OAUTH_REDIRECT_URI && (!IS_PRODUCTION || OAUTH_STATE_SECRET));
 const ALWAYS_ON_WORKER_ENABLED = process.env.ALWAYS_ON_WORKER_ENABLED !== 'false';
@@ -1600,9 +1608,17 @@ async function prepareEmployeeEmailAction(companyId: string, question: string, t
   const mailbox = await findGmailSendConnection(companyId, employeeId);
   const gmailConnection = mailbox?.connection;
   if (!gmailConnection || !mailbox) {
+    if (SMTP_CONFIGURED) {
+      const sender = COMPANY_EMAIL;
+      return {
+        status: 'awaiting_approval' as const,
+        summary: `${employeeName} drafted an email to ${draft.recipients.join(', ')} through the temporary company SMTP mailbox ${sender}. It will not be sent until you approve it.`,
+        payload: { action_type: 'gmail.send', transport: 'smtp', employee_id: employeeId, mailbox_employee_id: employeeId, company_email: sender, to: draft.recipients, subject: draft.subject, body: draft.body, execution_status: 'pending', idempotency_key: crypto.randomUUID() }
+      };
+    }
     const connections = await loadMcpConnections(companyId, employeeId);
     const hasConfiguredGmail = connections.some((connection) => connection.connection_type === 'google_gmail' && connection.config?.gmail_send_enabled === true);
-    return { status: 'blocked' as const, summary: hasConfiguredGmail ? `${employeeName}’s Gmail connection needs to be reconnected with the Gmail send permission before an email can be sent.` : `${employeeName} has no enabled Gmail send connection. Connect Gmail to ${employeeName}, enable sending, and complete Google OAuth${COMPANY_EMAIL ? ` for the company mailbox ${COMPANY_EMAIL}` : ''}.` };
+    return { status: 'blocked' as const, summary: hasConfiguredGmail ? `${employeeName}’s Gmail connection needs to be reconnected with the Gmail send permission before an email can be sent.` : `${employeeName} has no enabled Gmail send connection. Connect Gmail to ${employeeName}, enable sending, and complete Google OAuth${COMPANY_EMAIL ? ` for the company mailbox ${COMPANY_EMAIL}` : ''}, or configure the approved SMTP fallback.` };
   }
   const gmailGrant = gmailConnection.tool_grants.find((grant) => grant.tool_name === 'gmail.send');
   const sender = gmailConnection.oauth_email || gmailConnection.config?.company_email || COMPANY_EMAIL || 'the authorized Gmail account';
@@ -1666,10 +1682,18 @@ async function dispatchApprovedEmployeeEmail(approval: ApprovalRecord) {
   await persistApprovalRecord(approval);
   const employeeId = typeof payload.employee_id === 'string' && EMPLOYEE_CATALOG.some((employee) => employee.id === payload.employee_id) ? payload.employee_id : approval.employee_id || 'sarah';
   const mailboxEmployeeId = typeof payload.mailbox_employee_id === 'string' && EMPLOYEE_CATALOG.some((employee) => employee.id === payload.mailbox_employee_id) ? payload.mailbox_employee_id : employeeId;
-  const { connection, oauth2 } = await getGoogleConnection(approval.company_id, mailboxEmployeeId, Number(payload.connection_id), 'google_gmail');
-  const gmail = google.gmail({ version: 'v1', auth: oauth2 });
-  const sent = await gmail.users.messages.send({ userId: 'me', requestBody: { raw: gmailRawMessage(recipients, String(payload.subject || ''), String(payload.body || '')) } });
-  const result = { employee_id: employeeId, mailbox_employee_id: mailboxEmployeeId, sender: connection.oauth_email || connection.config?.company_email || COMPANY_EMAIL || '', message_id: String(sent.data.id || ''), thread_id: String(sent.data.threadId || ''), recipients: recipients.join(', '), subject: String(payload.subject || '').slice(0, 160) };
+  let result: Record<string, string>;
+  if (payload.transport === 'smtp') {
+    if (!SMTP_CONFIGURED) throw new Error('The approved SMTP company mailbox is not configured on this deployment.');
+    const smtp = nodemailer.createTransport({ host: SMTP_HOST, port: SMTP_PORT, secure: SMTP_SECURE, requireTLS: !SMTP_SECURE, auth: { user: SMTP_USER, pass: SMTP_APP_PASSWORD } });
+    const sent = await smtp.sendMail({ from: COMPANY_EMAIL, to: recipients.join(', '), subject: String(payload.subject || '').slice(0, 160), text: String(payload.body || '').replace(/\r\n/g, '\n').slice(0, 3000) });
+    result = { employee_id: employeeId, mailbox_employee_id: mailboxEmployeeId, transport: 'gmail_smtp', sender: COMPANY_EMAIL, message_id: String(sent.messageId || ''), thread_id: '', recipients: recipients.join(', '), subject: String(payload.subject || '').slice(0, 160) };
+  } else {
+    const { connection, oauth2 } = await getGoogleConnection(approval.company_id, mailboxEmployeeId, Number(payload.connection_id), 'google_gmail');
+    const gmail = google.gmail({ version: 'v1', auth: oauth2 });
+    const sent = await gmail.users.messages.send({ userId: 'me', requestBody: { raw: gmailRawMessage(recipients, String(payload.subject || ''), String(payload.body || '')) } });
+    result = { employee_id: employeeId, mailbox_employee_id: mailboxEmployeeId, transport: 'gmail_api', sender: connection.oauth_email || connection.config?.company_email || COMPANY_EMAIL || '', message_id: String(sent.data.id || ''), thread_id: String(sent.data.threadId || ''), recipients: recipients.join(', '), subject: String(payload.subject || '').slice(0, 160) };
+  }
   approval.payload = { ...approval.payload, execution_status: 'succeeded', execution_result: result };
   approval.executed_at = new Date().toISOString();
   await persistApprovalRecord(approval);
@@ -2226,6 +2250,7 @@ app.get('/api/health', (_req, res) => {
       firebase: { status: firebaseAuth && firestoreDb ? 'active' : 'unconfigured' },
       analyst: { status: OPENROUTER_KEY_READY ? 'openrouter_configured' : genAIClient ? 'gemini_fallback' : 'preview_only', model: OPENROUTER_KEY_READY ? ANALYST_MODEL : undefined },
       google_oauth: { status: GOOGLE_OAUTH_CONFIGURED ? 'configured' : 'unconfigured' },
+      smtp: { status: SMTP_CONFIGURED ? 'configured' : 'unconfigured', host: SMTP_CONFIGURED ? SMTP_HOST : undefined, sender: SMTP_CONFIGURED ? COMPANY_EMAIL : undefined },
       mcp_bus: { status: 'active' },
       observability: { sentry: sentryEnabled ? 'configured' : 'unconfigured' }
     }
