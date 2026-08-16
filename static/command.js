@@ -311,6 +311,16 @@ function renderWorkforceStage() {
   roster.innerHTML = employees.slice(0, 8).map((employee, index) => { const status = employeeStatus(employee.id); return `<a class="stage-roster-item" style="--roster-delay:${Math.min(index, 7) * 35}ms;--avatar-color:${safe(employee.color || '#82e9ff')}" href="/employee/${encodeURIComponent(employee.id)}" data-stage-employee-id="${safe(employee.id)}">${avatarMarkup(employee, employee.name?.[0] || 'AI', 'roster-avatar')}<span><b>${safe(employee.name)}</b><small>${safe(employee.role || 'Specialist')}</small></span><em class="roster-state ${safe(status)}">${safe(status.replace(/_/g, ' '))}</em></a>`; }).join('');
 }
 
+function mentionedEmployeeId(request) {
+  const text = String(request || '').toLowerCase();
+  return employees.find((employee) => {
+    const name = String(employee.name || '').trim().toLowerCase();
+    if (!name) return false;
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|[^a-z])@?${escaped}(?:$|[^a-z])`, 'i').test(text);
+  })?.id || '';
+}
+
 function renderAssignmentOptions() {
   const select = $('#task-assignee');
   if (!select) return;
@@ -635,17 +645,19 @@ async function submitTask(event) {
   const button = $('#run');
   const request = input?.value.trim();
   if (!request) { input?.focus(); return; }
-  const preferred = select?.value || '';
+  const selectedPreferred = select?.value || '';
+  const mentioned = !selectedPreferred ? mentionedEmployeeId(request) : '';
+  const preferred = selectedPreferred || mentioned;
   const target = preferred === '__whole_team__' ? 'the whole team' : employeeById(preferred)?.name || 'the best available team';
-  const pending = { kind: 'employee_typing', sender: 'Sarah', sender_id: 'sarah', receiver: target, body: 'Sarah is bringing the right people into this conversation…', created_at: new Date().toISOString(), pending: true, chat_visible: true };
+  const pending = { kind: 'employee_typing', sender: 'Sarah', sender_id: 'sarah', receiver: target, body: preferred && preferred !== '__whole_team__' ? `Sarah is bringing ${target} into this conversation…` : 'Sarah is bringing the right people into this conversation…', created_at: new Date().toISOString(), pending: true, chat_visible: true };
   pendingMessages.push(pending);
   renderRoomFeed(true);
   input.value = '';
   button.disabled = true;
   button.innerHTML = '<span class="button-spinner" aria-hidden="true"></span> Working…';
   playCue('submit');
-  setExecutionLive('working', 'Routing your outcome', `Sarah is preparing the workforce for ${target}.`);
-  setRoomNotice(`Routing this task to ${target}.`, '');
+  setExecutionLive('working', 'Routing your outcome', preferred && preferred !== '__whole_team__' ? `${target} is preparing a direct response with Sarah overseeing.` : `Sarah is preparing the workforce for ${target}.`);
+  setRoomNotice(preferred && preferred !== '__whole_team__' ? `Speaking with ${target} directly. Sarah will remain available for coordination.` : `Routing this task to ${target}.`, '');
   try {
     const task = await responseJson('/api/tasks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ request, preferred_employee_id: preferred || undefined }) });
     pendingMessages = pendingMessages.filter((entry) => entry !== pending);

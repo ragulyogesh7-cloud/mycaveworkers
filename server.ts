@@ -462,6 +462,8 @@ interface TaskRecord {
   collaboration_summary?: string;
   live_tool_evidence?: WorkforceLiveToolEvidence[];
   web_research?: WebResearchEvidence[];
+  /** Employee explicitly addressed by the user in Company Room, when applicable. Sarah remains task owner. */
+  direct_employee_id?: string;
   queued_at?: string;
   started_at?: string;
   completed_at?: string;
@@ -876,7 +878,8 @@ function publicEmployeeChat(task: TaskRecord) {
     messages.push({ ...message, chat_id, task_id: task.id, sender_id: message.sender_id || employee?.id, chat_visible: true, ...(pendingApproval && kind === 'final_answer' ? { approval_id: pendingApproval.id, pending: true } : {}) });
   };
   (task.trace || []).forEach(add);
-  if (task.answer && !['queued', 'processing'].includes(task.status)) {
+  const hasTraceFinalAnswer = (task.trace || []).some((message: any) => message?.kind === 'final_answer' && employeeForChatMessage(message));
+  if (task.answer && !['queued', 'processing'].includes(task.status) && !hasTraceFinalAnswer) {
     add({ kind: 'final_answer', thread_role: 'final_answer', sender: 'Sarah', receiver: 'Company room', sender_id: 'sarah', receiver_id: 'company-room', body: task.answer, created_at: task.completed_at || task.created_at });
   }
   return messages.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
@@ -959,13 +962,24 @@ async function loadQueuedJobs() {
   }
 }
 
+function directEmployeeIdForQuestion(question: string, companyId: string, preferredEmployeeId?: string) {
+  const workforce = activeWorkforce(companyId);
+  if (preferredEmployeeId && preferredEmployeeId !== '__whole_team__' && workforce.some((employee) => employee.id === preferredEmployeeId)) return preferredEmployeeId;
+  const lower = String(question || '').toLowerCase();
+  return workforce.find((employee) => {
+    const name = employee.name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|[^a-z])${name}(?:$|[^a-z])`, 'i').test(lower);
+  })?.id;
+}
+
 async function enqueueWorkforceTask(companyId: string, question: string, preferredEmployeeId?: string, emailEmployeeId?: string) {
   await loadOrgEmployees(companyId);
   await hydrateTenantTasks(companyId);
   const taskId = db.nextTaskId++;
   const now = new Date().toISOString();
+  const routedEmployeeId = directEmployeeIdForQuestion(question || 'Operations review', companyId, preferredEmployeeId) || (preferredEmployeeId === '__whole_team__' ? '__whole_team__' : undefined);
   const validEmailEmployeeId = typeof emailEmployeeId === 'string' && activeWorkforce(companyId).some((employee) => employee.id === emailEmployeeId) ? emailEmployeeId : undefined;
-  const { manager, lead, collaborators } = selectCollaborativeTeam(question || 'Operations review', companyId, preferredEmployeeId);
+  const { manager, lead, collaborators } = selectCollaborativeTeam(question || 'Operations review', companyId, routedEmployeeId);
   const trace = [{ kind: 'queued', sender: 'Sarah', receiver: 'Company workroom', body: `I received this request and assigned ${lead.name} as delivery lead. I will return the final result and any execution blocker here.`, created_at: now }];
   const task: TaskRecord = {
     id: taskId,
@@ -974,7 +988,8 @@ async function enqueueWorkforceTask(companyId: string, question: string, preferr
     owner: manager.id,
     status: 'queued',
     answer: 'Sarah has accepted your request and is assigning the delivery team…',
-    plan: `Sarah intake → ${lead.name} delivery lead → ${collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'role assessment'} → evidence → Sarah’s manager response`,
+    plan: `${routedEmployeeId && routedEmployeeId !== '__whole_team__' ? `${lead.name} direct response → Sarah manager oversight` : `Sarah intake → ${lead.name} delivery lead → ${collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'role assessment'} → evidence → Sarah’s manager response`}`,
+    direct_employee_id: routedEmployeeId && routedEmployeeId !== '__whole_team__' ? routedEmployeeId : undefined,
     created_at: now,
     queued_at: now,
     trace,
@@ -986,7 +1001,8 @@ async function enqueueWorkforceTask(companyId: string, question: string, preferr
   };
   db.tasks.set(taskId, task);
   await persistTaskRecord(task);
-  const job: WorkforceQueueJob = { id: `${companyId}:${taskId}`, task_id: taskId, company_id: companyId, question: task.question, preferred_employee_id: preferredEmployeeId, email_employee_id: validEmailEmployeeId, status: 'queued', attempts: 0, created_at: now, updated_at: now };
+  const job: WorkforceQueueJob = { id: `${companyId}:${taskId}`, task_id: taskId, company_id: companyId, question: task.question,     preferred_employee_id: routedEmployeeId, email_employee_id: validEmailEmployeeId, status: 'queued',
+ attempts: 0, created_at: now, updated_at: now };
   await persistWorkforceJob(job);
   await persistActivityLog(companyId, { id: Date.now(), sender: 'Manager', receiver: 'Caveworkers worker', kind: 'task.queued', body: `Task #${taskId} entered the always-on employee queue.`, created_at: now });
   emitWorkroomEvent(companyId, taskId, { type: 'task_update', task: workroomSnapshot(task) });
@@ -1601,10 +1617,12 @@ async function recordWorkforceApprovalOutcome(approval: ApprovalRecord, status: 
   const task = db.tasks.get(approval.task_id);
   if (!task || task.company_id !== approval.company_id) return;
   task.execution = { action_type: String(approval.payload?.action_type || 'external.action'), status, summary: summary.slice(0, 1200), updated_at: new Date().toISOString(), result };
-  const answerBeforeExecutionUpdate = String(task.answer || '').split('\n\nSarah’s execution update:')[0].trim();
-  task.answer = `${answerBeforeExecutionUpdate}\n\nSarah’s execution update: ${status === 'succeeded' ? 'COMPLETED' : status === 'failed' ? 'FAILED' : status === 'blocked' ? 'BLOCKED' : status.toUpperCase()} — ${summary.slice(0, 1200)}`;
+  const answerBeforeExecutionUpdate = String(task.answer || '').split(/\n\n[^\n]+ execution update:/)[0].trim();
+  task.answer = `${answerBeforeExecutionUpdate}\n\n${task.direct_employee_id ? (EMPLOYEE_CATALOG.find((employee) => employee.id === task.direct_employee_id)?.name || 'Employee') : 'Sarah'}’s execution update: ${status === 'succeeded' ? 'COMPLETED' : status === 'failed' ? 'FAILED' : status === 'blocked' ? 'BLOCKED' : status.toUpperCase()} — ${summary.slice(0, 1200)}`;
   task.status = status === 'succeeded' || status === 'cancelled' ? 'completed' : status === 'failed' ? 'failed' : status === 'blocked' ? 'blocked' : 'pending_approval';
   const actor = EMPLOYEE_CATALOG.find((employee) => employee.id === approval.payload?.employee_id) || EMPLOYEE_CATALOG.find((employee) => employee.id === 'sarah');
+  const directFinalAnswer = [...(task.trace || [])].reverse().find((message: any) => message?.kind === 'final_answer' && message?.sender_id === task.direct_employee_id);
+  if (directFinalAnswer) directFinalAnswer.body = task.answer;
   task.trace = [...(task.trace || []), { kind: status === 'succeeded' ? 'action_completed' : status === 'cancelled' ? 'approval_declined' : status === 'failed' || status === 'blocked' ? 'action_failed' : 'action_update', sender: actor?.name || 'Sarah', sender_id: actor?.id || 'sarah', receiver: 'Company room', receiver_id: 'company-room', body: summary.slice(0, 1200), created_at: new Date().toISOString() }];
   task.completed_at = new Date().toISOString();
   db.tasks.set(task.id, task);
@@ -2990,7 +3008,9 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   const taskId = existingTaskId || db.nextTaskId++;
   const existingTask = existingTaskId ? db.tasks.get(existingTaskId) : undefined;
   const now = new Date().toISOString();
-  const { manager, lead, collaborators, workforce } = selectCollaborativeTeam(question || 'Operations review', companyId, preferredEmployeeId);
+  const routedEmployeeId = directEmployeeIdForQuestion(question || 'Operations review', companyId, preferredEmployeeId) || (preferredEmployeeId === '__whole_team__' ? '__whole_team__' : undefined);
+  const directEmployeeId = routedEmployeeId && routedEmployeeId !== '__whole_team__' ? routedEmployeeId : undefined;
+  const { manager, lead, collaborators, workforce } = selectCollaborativeTeam(question || 'Operations review', companyId, routedEmployeeId);
   const lowerQ = (question || '').toLowerCase();
   const executionTeam = [lead, ...collaborators].filter((employee, index, list) => list.findIndex((entry) => entry.id === employee.id) === index);
   const specialistContexts = await Promise.all(executionTeam.map((employee) => loadWorkforceTaskContext(companyId, employee)));
@@ -3033,7 +3053,8 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
   });
   const teamBrief = `Public research evidence:\n${webText}\n\n` + specialistContexts.map((context) => `${context.employee.name}: ${context.employee.role} — ${context.employee.persona}\nGranted tools: ${context.tools.join(', ') || 'none'}\nConnected tenant tools: ${context.connectors.join(', ') || 'none'}\nRole memory: ${context.memory.join(' | ') || 'none'}\nLive MCP evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} [${entry.status}] ${entry.summary.slice(0, 900)}`).join(' | ') || 'none'}`).join('\n\n');
   const deliveryTeam = [lead, ...collaborators].filter((employee, index, list) => list.findIndex((entry) => entry.id === employee.id) === index);
-  const narrative = await generateWorkforceNarrative(`Manager: ${manager.name} (${manager.role})\nDelivery lead: ${lead.name} (${lead.role})\nTask: "${question}"\n\nActive specialist evidence:\n${teamBrief}\n\nWorkspace knowledge:\n${knowText}\n\nWrite a concise workplace chat update for the manager. Use plain language and short paragraphs, not a report, checklist, Markdown headings, or a long preamble. Start with either the answer, a single precise question if required information is missing, or a single clear blocker. Then state what the team did, what is actually verified, and the next action. Mention the delivery lead and contributors naturally. Never invent an attachment, file, message body, link, recipient, tool call, or completed external action. Do not claim that an email, write, payment, publication, access change, or other external action happened unless execution evidence explicitly confirms it. Keep the update under 120 words unless the user asks for detail.`, companyId);
+    const narrative = await generateWorkforceNarrative(`${directEmployeeId ? `Addressed employee: ${lead.name} (${lead.role})\nRespond directly to the manager as ${lead.name}. Do not answer as Sarah.\n` : `Manager: ${manager.name} (${manager.role})\nDelivery lead: ${lead.name} (${lead.role})\n`}Task: "${question}"\n\nActive specialist evidence:
+\n${teamBrief}\n\nWorkspace knowledge:\n${knowText}\n\nWrite a concise workplace chat update for the manager. Use plain language and short paragraphs, not a report, checklist, Markdown headings, or a long preamble. Start with either the answer, a single precise question if required information is missing, or a single clear blocker. Then state what the team did, what is actually verified, and the next action. Mention the delivery lead and contributors naturally. Never invent an attachment, file, message body, link, recipient, tool call, or completed external action. Do not claim that an email, write, payment, publication, access change, or other external action happened unless execution evidence explicitly confirms it. Keep the update under 120 words unless the user asks for detail.`, companyId);
   let answer = narrative.text;
   if (!answer) {
     answer = `I’ve routed this to ${lead.name}, with ${collaborators.length ? collaborators.map((employee) => employee.name).join(' and ') + ' supporting.' : 'Sarah coordinating the work.'}
@@ -3080,10 +3101,14 @@ Next step: configure a valid OpenRouter or Gemini model key, then rerun this req
   } else if (execution.status === 'processing') {
     answer = `${answer}\n\nSarah’s execution update: IN PROGRESS — ${execution.summary}`;
   }
-  trace.push({ kind: 'group_message', sender: manager.name, receiver: 'Manager', body: `I reviewed ${lead.name}’s delivery. ${execution.summary}`, created_at: new Date(Date.now() + 3400).toISOString() });
-  trace.push({ kind: 'completed', sender: manager.name, receiver: 'Task ledger', body: requiresApproval ? `Work product completed; execution state: ${execution.status}.` : 'Work product completed with a tenant-scoped audit trace.', created_at: new Date(Date.now() + 3600).toISOString() });
+  if (directEmployeeId) {
+    trace.push({ kind: 'final_answer', thread_role: 'final_answer', sender: lead.name, receiver: 'Manager', sender_id: lead.id, receiver_id: 'manager', mentions: [lead.id], body: answer, created_at: new Date(Date.now() + 3400).toISOString() });
+  } else {
+    trace.push({ kind: 'group_message', sender: manager.name, receiver: 'Manager', body: `I reviewed ${lead.name}’s delivery. ${execution.summary}`, created_at: new Date(Date.now() + 3400).toISOString() });
+  }
+  trace.push({ kind: 'completed', sender: directEmployeeId ? lead.name : manager.name, receiver: 'Task ledger', body: requiresApproval ? `Work product completed; execution state: ${execution.status}.` : 'Work product completed with a tenant-scoped audit trace.', created_at: new Date(Date.now() + 3600).toISOString() });
   const liveToolEvidence = specialistContexts.flatMap((context) => context.live_tool_evidence);
-  const taskRecord: TaskRecord = { id: taskId, company_id: companyId, question, owner: manager.id, status: execution.status === 'awaiting_approval' ? 'pending_approval' : execution.status === 'blocked' ? 'blocked' : 'completed', answer, plan: `1. Sarah intake → 2. Delegate ${lead.name} → 3. Specialist delivery${collaborators.length ? ` (${collaborators.map((employee) => employee.name).join(', ')})` : ''} → 4. Permissioned evidence → 5. Sarah manager response → 6. Approval-gated external execution when requested`, created_at: now, trace, participants: ['Manager', manager.name, ...deliveryTeam.map((employee) => employee.name).filter((name, index, list) => list.indexOf(name) === index)], collaboration_summary: `${manager.name} managed ${lead.name}${collaborators.length ? ` with ${collaborators.length} supporting specialist${collaborators.length === 1 ? '' : 's'}` : ''}.`, live_tool_evidence: liveToolEvidence, web_research: webResearch, queued_at: existingTask?.queued_at, started_at: existingTask?.started_at || now, completed_at: new Date().toISOString(), execution };
+  const taskRecord: TaskRecord = { id: taskId, company_id: companyId, question, owner: manager.id, direct_employee_id: directEmployeeId, status: execution.status === 'awaiting_approval' ? 'pending_approval' : execution.status === 'blocked' ? 'blocked' : 'completed', answer, plan: directEmployeeId ? `1. ${lead.name} direct response → 2. Sarah manager oversight → 3. Permissioned evidence → 4. Approval-gated external execution when requested` : `1. Sarah intake → 2. Delegate ${lead.name} → 3. Specialist delivery${collaborators.length ? ` (${collaborators.map((employee) => employee.name).join(', ')})` : ''} → 4. Permissioned evidence → 5. Sarah manager response → 6. Approval-gated external execution when requested`, created_at: now, trace, participants: ['Manager', manager.name, ...deliveryTeam.map((employee) => employee.name).filter((name, index, list) => list.indexOf(name) === index)], collaboration_summary: `${directEmployeeId ? `${lead.name} responded directly with Sarah overseeing` : `${manager.name} managed ${lead.name}${collaborators.length ? ` with ${collaborators.length} supporting specialist${collaborators.length === 1 ? '' : 's'}` : ''}`}.`, live_tool_evidence: liveToolEvidence, web_research: webResearch, queued_at: existingTask?.queued_at, started_at: existingTask?.started_at || now, completed_at: new Date().toISOString(), execution };
   db.tasks.set(taskId, taskRecord);
   await persistTaskRecord(taskRecord);
   if (autoExecuteAction && workforceApproval) {
@@ -3102,7 +3127,7 @@ Next step: configure a valid OpenRouter or Gemini model key, then rerun this req
     }
   }
   await persistActivityLog(companyId, { id: Date.now(), sender: manager.name, receiver: lead.name, kind: 'task.managed', body: `Task #${taskId} was managed by Sarah with execution state ${execution.status}.`, created_at: now });
-  return { id: taskId, company_id: companyId, question, status: taskRecord.status, owner: manager.id, participants: taskRecord.participants, plan: taskRecord.plan, answer, execution, trace: taskRecord.trace, live_tool_evidence: liveToolEvidence, web_research: webResearch, collaboration_summary: taskRecord.collaboration_summary, workforce_size: workforce.length };
+  return { id: taskId, company_id: companyId, question, status: taskRecord.status, owner: manager.id, direct_employee_id: directEmployeeId, participants: taskRecord.participants, plan: taskRecord.plan, answer, execution, trace: taskRecord.trace, live_tool_evidence: liveToolEvidence, web_research: webResearch, collaboration_summary: taskRecord.collaboration_summary, workforce_size: workforce.length };
 }
 
 // This is deliberately absent outside the test runtime. It lets regression tests

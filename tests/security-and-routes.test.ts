@@ -182,7 +182,7 @@ describe('Caveworkers security invariants', () => {
     expect(queued.participants).toEqual(expect.arrayContaining(['Sarah', 'Alex', 'Emma', 'David']));
   });
 
-  it('has Sarah own the completed result and delivers a visible manager response', async () => {
+  it('keeps Sarah accountable while delivering an explicit Alex assignment directly to Alex', async () => {
     db.orgEmployees.set('company-a', [
       { id: 'alex', name: 'Alex', role: 'Operations Lead', department: 'Operations', status: 'active', tools: [], permissions: [] },
       { id: 'david', name: 'David', role: 'Data Analyst', department: 'Analytics', status: 'active', tools: [], permissions: [] }
@@ -192,10 +192,36 @@ describe('Caveworkers security invariants', () => {
     expect(result).toMatchObject({ company_id: 'company-a', owner: 'sarah', status: 'completed' });
     expect(result.answer.length).toBeGreaterThan(80);
     expect(result.participants).toEqual(expect.arrayContaining(['Manager', 'Sarah', 'Alex']));
+    expect(result).toMatchObject({ direct_employee_id: 'alex' });
     expect(result.trace).toEqual(expect.arrayContaining([
-      expect.objectContaining({ sender: 'Sarah', receiver: 'Manager', kind: 'group_message' })
+      expect.objectContaining({ sender: 'Alex', sender_id: 'alex', receiver: 'Manager', kind: 'final_answer' })
     ]));
     expect(db.tasks.get(result.id)).toMatchObject({ company_id: 'company-a', owner: 'sarah', status: 'completed' });
+  });
+
+  it('routes a natural-language direct mention to the addressed employee in Company Room', async () => {
+    db.orgEmployees.set('company-a', [
+      { id: 'sarah', name: 'Sarah', role: 'Talent & HR Manager', department: 'People Operations', status: 'active', tools: [], permissions: [] },
+      { id: 'alex', name: 'Alex', role: 'Operations Manager', department: 'Operations', status: 'active', tools: [], permissions: [] },
+      { id: 'david', name: 'David', role: 'Data Analyst', department: 'Analytics', status: 'active', tools: [], permissions: [] }
+    ]);
+
+    const result = await workforceTestHooks!.handleTaskRoutingAsync('Alex, are you there?', 'company-a');
+    expect(result).toMatchObject({ company_id: 'company-a', owner: 'sarah', direct_employee_id: 'alex' });
+    expect(result.trace).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'final_answer', sender: 'Alex', sender_id: 'alex' })
+    ]));
+    expect(result.trace.find((message: any) => message.kind === 'final_answer')?.sender).toBe('Alex');
+
+    const response = await request(app)
+      .get('/api/tasks')
+      .set('x-caveworkers-test-user', 'user-a')
+      .expect(200);
+    const task = response.body.tasks.find((entry: any) => entry.id === result.id);
+    expect(task).toMatchObject({ owner: 'sarah', direct_employee_id: 'alex' });
+    expect(task.chat_messages).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'final_answer', sender_id: 'alex', sender: 'Alex' })
+    ]));
   });
 
   it('routes operations work to Alex and exposes his specialist operating capability', async () => {
