@@ -250,11 +250,12 @@ if (!getApps().length) {
           privateKey: firebasePrivateKey
         })
       });
-    } else if (IS_PRODUCTION || process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    } else if (firebaseProjectId || IS_PRODUCTION || process.env.GOOGLE_APPLICATION_CREDENTIALS) {
       // Cloud Run and other Google-managed environments provide Application Default Credentials.
-      // Restrict implicit initialization to production or explicit ADC mode so local tests never
-      // contact a live Firebase project by accident.
-      initializeApp();
+      // Supplying FIREBASE_PROJECT_ID pins ADC to the intended Firebase project while keeping
+      // private service-account keys out of the deployment. Local development stays fail-closed
+      // unless a project is explicitly configured.
+      initializeApp(firebaseProjectId ? { projectId: firebaseProjectId } : {});
     } else {
       console.warn('Firebase Admin SDK is not configured; Google sign-in will fail closed until Firebase credentials are provided.');
     }
