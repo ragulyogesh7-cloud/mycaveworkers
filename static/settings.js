@@ -108,11 +108,19 @@ function renderBilling(billing) {
   const badge = $('#billing-status');
   const summary = $('#billing-summary');
   if (planName) planName.textContent = billing.tier_name || 'Free trial';
-  if (planDetail) planDetail.textContent = `${billing.active_employees || 0} of ${billing.max_employees || 0} employee slots in use`;
+  const activeEmployees = Number(billing.active_employees || 0);
+  const maxEmployees = Number(billing.max_employees || 0);
+  const overageCount = Number(billing.overage_count || Math.max(0, activeEmployees - maxEmployees));
+  if (planDetail) planDetail.textContent = overageCount > 0
+    ? `${activeEmployees} active · ${overageCount} legacy over plan limit`
+    : `${activeEmployees} of ${maxEmployees} employee slots in use`;
   if (badge) badge.textContent = billing.tier_key === 'free_trial' ? 'TRIAL' : 'ACTIVE';
   if (!summary) return;
   const trialEnd = billing.trial_ends_at ? new Date(billing.trial_ends_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : null;
-  summary.innerHTML = `<article><span>PLAN</span><b>${safe(billing.tier_name || 'Free Trial')}</b><small>${billing.tier_key === 'free_trial' && trialEnd ? `Trial ends ${safe(trialEnd)}` : 'Your active workspace plan'}</small></article><article><span>EMPLOYEES</span><b>${safe(billing.active_employees || 0)} / ${safe(billing.max_employees || 0)}</b><small>Active workforce capacity</small></article><article><span>AVAILABLE</span><b>${safe(billing.quota_remaining ?? 0)}</b><small>Employee slot${billing.quota_remaining === 1 ? '' : 's'} remaining</small></article>`;
+  const employeeSummary = overageCount > 0
+    ? `${activeEmployees} active; ${overageCount} legacy employee${overageCount === 1 ? '' : 's'} above today’s ${maxEmployees}-employee limit. New additions are locked until the workspace is upgraded or the roster is reduced.`
+    : 'Active workforce capacity';
+  summary.innerHTML = `<article><span>PLAN</span><b>${safe(billing.tier_name || 'Free Trial')}</b><small>${billing.tier_key === 'free_trial' && trialEnd ? `Trial ends ${safe(trialEnd)}` : 'Your active workspace plan'}</small></article><article><span>EMPLOYEES</span><b>${safe(activeEmployees)} / ${safe(maxEmployees)}</b><small>${safe(employeeSummary)}</small></article><article><span>AVAILABLE</span><b>${safe(billing.quota_remaining ?? 0)}</b><small>Employee slot${billing.quota_remaining === 1 ? '' : 's'} remaining</small></article>`;
 }
 
 function renderRegistryResults(servers = []) {

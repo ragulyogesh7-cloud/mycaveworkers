@@ -13,6 +13,21 @@ let roomDirectoryState = { catalog: [], categories: [], query: '', category: '',
 let trialCountdownTimer = null;
 let soundEnabled = false;
 let audioContext = null;
+let voiceEnabled = false;
+let availableSpeechVoices = [];
+
+const EMPLOYEE_VOICE_PROFILES = Object.freeze({
+  sarah: { label: 'Warm Indian English', locale: 'en-IN', gender: 'female', hints: ['heera', 'samantha', 'google us english female'], rate: 0.98, pitch: 1.04 },
+  david: { label: 'Measured British English', locale: 'en-GB', gender: 'male', hints: ['george', 'daniel', 'google uk english male'], rate: 0.91, pitch: 0.92 },
+  alex: { label: 'Calm American English', locale: 'en-US', gender: 'male', hints: ['guy', 'mark', 'google us english'], rate: 0.96, pitch: 0.97 },
+  mike: { label: 'Clear Australian English', locale: 'en-AU', gender: 'male', hints: ['lee', 'google australian english'], rate: 0.94, pitch: 0.9 },
+  emma: { label: 'Bright British English', locale: 'en-GB', gender: 'female', hints: ['hazel', 'susan', 'google uk english female'], rate: 1.01, pitch: 1.08 },
+  arav: { label: 'Confident Indian English', locale: 'en-IN', gender: 'male', hints: ['ravi', 'microsoft ravi', 'google indian english'], rate: 0.97, pitch: 0.95 },
+  olivia: { label: 'Polished Australian English', locale: 'en-AU', gender: 'female', hints: ['karen', 'google australian english female'], rate: 0.99, pitch: 1.02 },
+  maya: { label: 'Energetic American English', locale: 'en-US', gender: 'female', hints: ['ava', 'allison', 'google us english female'], rate: 1.05, pitch: 1.1 },
+  priya: { label: 'Grounded Indian English', locale: 'en-IN', gender: 'female', hints: ['raveena', 'microsoft heera', 'google indian english female'], rate: 0.9, pitch: 0.99 },
+  iris: { label: 'Precise British English', locale: 'en-GB', gender: 'female', hints: ['serena', 'kate', 'google uk english female'], rate: 0.88, pitch: 0.96 }
+});
 
 function getSoundContext() {
   if (!soundEnabled || !window.AudioContext) return null;
@@ -50,6 +65,75 @@ function setSoundToggle() {
   const icon = button.querySelector('.sound-toggle-icon');
   if (label) label.textContent = soundEnabled ? 'Sound on' : 'Sound off';
   if (icon) icon.textContent = soundEnabled ? '◉' : '◌';
+}
+
+function refreshSpeechVoices() {
+  if (!('speechSynthesis' in window)) return [];
+  availableSpeechVoices = window.speechSynthesis.getVoices() || [];
+  return availableSpeechVoices;
+}
+
+function speechVoiceProfile(employeeId) {
+  return EMPLOYEE_VOICE_PROFILES[String(employeeId || '').toLowerCase()] || { label: 'Natural workspace voice', locale: 'en-IN', gender: 'neutral', hints: [], rate: 0.96, pitch: 1 };
+}
+
+function chooseSpeechVoice(profile) {
+  const voices = refreshSpeechVoices();
+  if (!voices.length) return null;
+  const locale = profile.locale.toLowerCase();
+  const hints = profile.hints.map((hint) => hint.toLowerCase());
+  return [...voices].sort((a, b) => {
+    const score = (voice) => {
+      const name = String(voice.name || '').toLowerCase();
+      const voiceLocale = String(voice.lang || '').toLowerCase();
+      let value = voiceLocale === locale ? 70 : voiceLocale.startsWith(locale.slice(0, 2)) ? 42 : 0;
+      if (voice.localService === false) value += 18;
+      if (/natural|neural|premium|enhanced|online/.test(name)) value += 16;
+      if (hints.some((hint) => name.includes(hint))) value += 45;
+      if (profile.gender === 'female' && /female|woman|samantha|heera|hazel|serena|karen|susan|raveena|ava|allison|kate/.test(name)) value += 8;
+      if (profile.gender === 'male' && /male|man|george|daniel|guy|mark|lee|ravi/.test(name)) value += 8;
+      return value;
+    };
+    return score(b) - score(a);
+  })[0] || null;
+}
+
+function setVoiceToggle() {
+  const button = $('#voice-toggle');
+  if (!button) return;
+  button.disabled = !('speechSynthesis' in window);
+  button.setAttribute('aria-pressed', String(voiceEnabled));
+  button.classList.toggle('is-on', voiceEnabled);
+  const label = button.querySelector('.sound-toggle-label');
+  const icon = button.querySelector('.sound-toggle-icon');
+  if (label) label.textContent = voiceEnabled ? 'Voice on' : 'Voice off';
+  if (icon) icon.textContent = voiceEnabled ? '◉' : '◌';
+  button.title = voiceEnabled ? 'Voice mode is on. New final answers will be read aloud.' : 'Turn on voice mode for employee final answers.';
+}
+
+function speechText(value) {
+  return cleanChatCopy(value).replace(/\[[^\]]+\]/g, '').slice(0, 900).trim();
+}
+
+function speakEmployeeMessage(message, employee, force = false) {
+  if ((!voiceEnabled && !force) || !('speechSynthesis' in window) || !employee) return;
+  const text = speechText(message?.body || '');
+  if (!text) return;
+  const profile = speechVoiceProfile(employee.id);
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = profile.locale;
+  utterance.rate = profile.rate;
+  utterance.pitch = profile.pitch;
+  const voice = chooseSpeechVoice(profile);
+  if (voice) utterance.voice = voice;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(utterance);
+}
+
+function voiceActionMarkup(message, employee) {
+  if (!employee || message.pending || !message.body || message.kind === 'failure') return '';
+  const profile = speechVoiceProfile(employee.id);
+  return `<button class="message-voice" data-speak-message-id="${safe(chatMessageId(message))}" data-speak-employee="${safe(employee.id)}" type="button" aria-label="Play ${safe(employee.name)}'s voice" title="Play ${safe(employee.name)}'s voice · ${safe(profile.label)}">Voice</button>`;
 }
 
 function setExecutionLive(state = 'ready', title = 'Ready for an outcome', detail = 'Your team is standing by.') {
@@ -329,6 +413,7 @@ function renderRoomFeed(shouldFollow = roomAtLatest()) {
   const previousScrollTop = container.scrollTop;
   const all = [...workroomMessages, ...pendingMessages].filter((message) => message.chat_visible !== false && message.sender !== 'You' && !deletedChatIds.has(chatMessageId(message))).sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()).slice(-140);
   const signature = all.map(feedMessageSignature).join('‖');
+  const hadRenderedFeed = Boolean(lastRenderedFeedSignature);
   if (signature === lastRenderedFeedSignature && container.childElementCount) {
     updateJumpButton();
     return;
@@ -350,18 +435,24 @@ function renderRoomFeed(shouldFollow = roomAtLatest()) {
     const taskReference = message.task_id ? `<button class="message-task" data-task-id="${safe(message.task_id)}" type="button">Task #${safe(message.task_id)}</button>` : '';
     const approvalAction = message.approval_id ? `<button class="message-approval" data-approval-id="${safe(message.approval_id)}" data-approval-status="approved" type="button">Approve</button>` : '';
     const deleteAction = message.chat_id && message.task_id ? `<button class="message-delete" data-delete-chat-id="${safe(message.chat_id)}" data-delete-task-id="${safe(message.task_id)}" type="button" aria-label="Delete this message" title="Delete message">Delete</button>` : '';
+    const voiceAction = voiceActionMarkup(message, senderEmployee);
     const senderName = message.sender === 'Manager' ? 'You' : (senderEmployee?.name || message.sender || 'Caveworkers');
     const recipient = message.receiver && message.receiver !== 'Manager' ? `<span class="message-recipient">to ${safe(message.receiver)}</span>` : '';
     const mentionNames = Array.isArray(message.mentions) ? message.mentions.map((id) => employeeById(id)?.name || id).filter(Boolean) : [];
     const mentionMarkup = mentionNames.length ? `<span class="message-mentions">${mentionNames.map((name) => `@${safe(name)}`).join(' ')}</span>` : '';
     const messageLabel = tone === 'result' ? (message.kind === 'final_answer' ? 'Final answer' : 'Team update') : tone === 'approval' ? 'Needs your attention' : tone === 'failure' ? 'Blocked' : tone === 'complete' ? 'Completed' : tone === 'introduction' ? 'Introduces self' : tone === 'handoff' && message.kind === 'handoff_ack' ? 'Handoff received' : tone === 'handoff' ? 'Handoff' : message.kind === 'team_context' ? 'Team chat' : message.kind === 'queued' ? 'Sarah is coordinating' : '';
     article.dataset.chatId = message.chat_id || '';
-    article.innerHTML = `${avatarMarkup(senderEmployee || { id: '', color: tone === 'approval' ? '#ffd78f' : '#82e9ff' }, senderName, 'message-dp')}<div class="message-body"><div class="message-meta"><b>${safe(senderName)}</b>${recipient}${mentionMarkup}${messageLabel ? `<span class="message-label ${tone}">${safe(messageLabel)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}${deleteAction}</div>${tone === 'result' ? '<span class="final-answer-label">Final answer</span>' : ''}<p>${safe(cleanChatCopy(message.body || ''))}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
+    article.innerHTML = `${avatarMarkup(senderEmployee || { id: '', color: tone === 'approval' ? '#ffd78f' : '#82e9ff' }, senderName, 'message-dp')}<div class="message-body"><div class="message-meta"><b>${safe(senderName)}</b>${recipient}${mentionMarkup}${messageLabel ? `<span class="message-label ${tone}">${safe(messageLabel)}</span>` : ''}<time>${formatTime(message.created_at)}</time>${taskReference}${voiceAction}${deleteAction}</div>${tone === 'result' ? '<span class="final-answer-label">Final answer</span>' : ''}<p>${safe(cleanChatCopy(message.body || ''))}</p>${message.pending ? '<span class="typing-dots"><i></i><i></i><i></i></span>' : ''}${approvalAction}</div>`;
     fragment.append(article);
   });
   container.replaceChildren(fragment);
   if (shouldFollow) container.scrollTop = container.scrollHeight;
   else container.scrollTop = Math.min(previousScrollTop, Math.max(0, container.scrollHeight - container.clientHeight));
+  if (voiceEnabled && hadRenderedFeed) {
+    const latestAnswer = [...all].reverse().find((message) => message.sender !== 'Manager' && !message.pending && ['final_answer', 'result', 'complete'].includes(message.kind) && message.body);
+    const latestEmployee = latestAnswer ? employeeById(latestAnswer.sender) || employees.find((employee) => employee.name === latestAnswer.sender) : null;
+    if (latestAnswer && latestEmployee) window.setTimeout(() => speakEmployeeMessage(latestAnswer, latestEmployee), 80);
+  }
   updateJumpButton();
 }
 
@@ -583,7 +674,7 @@ function roomDirectoryConnectorCard(connector) {
   const statusCopy = connected ? `Connected${employeeNames.length ? ` · ${employeeNames.join(', ')}` : ''}` : (needsSecureSetup ? 'Secure setup required' : 'Ready to connect');
   const actionCopy = connected ? 'Reuse' : (needsSecureSetup ? 'Configure' : 'Connect');
   const actions = (connector.supported_actions || []).slice(0, 3).map((action) => `<span>${safe(action)}</span>`).join('');
-  return `<article class="room-directory-card ${connected ? 'is-connected' : ''}" style="--directory-color:${safe(connector.icon_tone || 'custom')}"><div class="room-directory-card-top"><span class="room-directory-icon room-directory-icon-${safe(connector.icon_tone || 'custom')}">${safe(connector.icon_label || connector.short_name?.[0] || '?')}</span><div class="room-directory-card-heading"><div><h4>${safe(connector.name)}</h4>${connector.verified ? '<span class="room-directory-verified">✓</span>' : '<span class="room-directory-custom">Custom</span>'}</div><span>${safe(connector.category)}</span></div></div><p class="room-directory-card-description">${safe(connector.description)}</p><div class="room-directory-action-chips">${actions}</div><p class="room-directory-card-setup">${safe(connector.setup_copy)}</p><div class="room-directory-card-footer"><span class="room-directory-connection-state ${connected ? 'is-connected' : ''}"><i></i>${safe(statusCopy)}</span><button class="room-directory-connect-button ${connected ? 'is-connected' : ''}" type="button" data-room-directory-id="${safe(connector.id)}" aria-label="${safe(actionCopy)} ${safe(connector.name)}"><span>${connected ? '✓' : '+'}</span>${safe(actionCopy)}</button></div></article>`;
+  return `<article class="room-directory-card ${connected ? 'is-connected' : ''}" style="--directory-color:${safe(connector.icon_tone || 'custom')}"><div class="room-directory-card-top"><span class="room-directory-icon room-directory-icon-${safe(connector.icon_tone || 'custom')}">${safe(connector.icon_label || connector.short_name?.[0] || '?')}</span><div class="room-directory-card-heading"><div><h4>${safe(connector.name)}</h4>${connector.verified ? '<span class="room-directory-verified">✓</span>' : '<span class="room-directory-custom">Custom</span>'}</div><span>${safe(connector.category)}</span></div><span class="room-directory-card-brand"><img src="${safe(connector.brand_logo_url || '/static/logo.jpeg')}" alt="Caveworkers"><small>WORKFORCE</small></span></div><p class="room-directory-card-description">${safe(connector.description)}</p><div class="room-directory-action-chips">${actions}</div><p class="room-directory-card-setup">${safe(connector.setup_copy)}</p><div class="room-directory-card-footer"><span class="room-directory-connection-state ${connected ? 'is-connected' : ''}"><i></i>${safe(statusCopy)}</span><button class="room-directory-connect-button ${connected ? 'is-connected' : ''}" type="button" data-room-directory-id="${safe(connector.id)}" aria-label="${safe(actionCopy)} ${safe(connector.name)}"><span>${connected ? '✓' : '+'}</span>${safe(actionCopy)}</button></div></article>`;
 }
 
 function roomDirectoryFiltered() {
@@ -755,8 +846,16 @@ function bindRoomInteractions() {
   $('#refresh-tasks')?.addEventListener('click', () => Promise.all([loadTaskSummaries(), loadApprovals(), loadWorkroomSnapshot()]));
   $('#menuButton')?.addEventListener('click', () => document.querySelector('.side-rail')?.classList.toggle('is-open'));
   $('#sound-toggle')?.addEventListener('click', () => { soundEnabled = !soundEnabled; window.localStorage.setItem('caveworkers-sound', soundEnabled ? 'on' : 'off'); setSoundToggle(); if (soundEnabled) playCue('complete'); });
+  $('#voice-toggle')?.addEventListener('click', () => { voiceEnabled = !voiceEnabled; window.localStorage.setItem('caveworkers-voice', voiceEnabled ? 'on' : 'off'); setVoiceToggle(); if (voiceEnabled) { const latest = [...workroomMessages].reverse().find((message) => message.sender !== 'Manager' && !message.pending && message.body); const employee = latest ? employeeById(latest.sender) || employees.find((entry) => entry.name === latest.sender) : null; if (latest && employee) speakEmployeeMessage(latest, employee, true); } else if ('speechSynthesis' in window) window.speechSynthesis.cancel(); });
   bindRoomDirectoryInteractions();
   document.addEventListener('click', (event) => {
+    const voiceButton = event.target.closest('[data-speak-message-id]');
+    if (voiceButton) {
+      const message = [...workroomMessages, ...pendingMessages].find((entry) => chatMessageId(entry) === voiceButton.dataset.speakMessageId);
+      const employee = employeeById(voiceButton.dataset.speakEmployee);
+      if (message && employee) speakEmployeeMessage(message, employee, true);
+      return;
+    }
     const approval = event.target.closest('[data-approval-id]');
     if (approval) resolveApproval(approval.dataset.approvalId, approval.dataset.approvalStatus);
     const deleteButton = event.target.closest('[data-delete-chat-id]');
@@ -791,7 +890,13 @@ function consumeConnectorCallbackNotice() {
 async function initializeRoom() {
   consumeConnectorCallbackNotice();
   soundEnabled = false;
+  voiceEnabled = window.localStorage.getItem('caveworkers-voice') === 'on';
   setSoundToggle();
+  setVoiceToggle();
+  if ('speechSynthesis' in window) {
+    refreshSpeechVoices();
+    window.speechSynthesis.addEventListener('voiceschanged', refreshSpeechVoices, { once: true });
+  }
   setExecutionLive();
   bindRoomInteractions();
   await Promise.all([loadEmployees(), loadBilling(), loadHealth(), loadRoiDashboard(), loadWorkroomSnapshot(), loadApprovals(), loadTaskSummaries()]);

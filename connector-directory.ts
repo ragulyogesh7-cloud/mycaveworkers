@@ -28,6 +28,7 @@ export interface ConnectorDirectoryEntry {
   keywords: string[];
   recommended_employee_ids: string[];
   setup_copy: string;
+  brand_logo_url?: string;
 }
 
 export const CONNECTOR_DIRECTORY: ConnectorDirectoryEntry[] = [
@@ -142,7 +143,8 @@ export function connectorDirectoryPublicView(entry: ConnectorDirectoryEntry) {
     supported_actions: entry.supported_actions,
     keywords: entry.keywords,
     recommended_employee_ids: entry.recommended_employee_ids,
-    setup_copy: entry.setup_copy
+    setup_copy: entry.setup_copy,
+    brand_logo_url: entry.brand_logo_url || '/static/logo.jpeg'
   };
 }
 

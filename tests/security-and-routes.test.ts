@@ -498,6 +498,7 @@ describe('Caveworkers security invariants', () => {
     expect(response.body.catalog.length).toBeGreaterThan(0);
     expect(response.body.categories.length).toBeGreaterThan(0);
     expect(response.body.catalog[0]).toMatchObject({
+      brand_logo_url: '/static/logo.jpeg',
       id: expect.any(String),
       name: expect.any(String),
       connection_mode: expect.any(String),
@@ -783,6 +784,18 @@ describe('Caveworkers security invariants', () => {
       expect.objectContaining({ key: 'growth', price_inr: 10 }),
       expect.objectContaining({ key: 'enterprise', price_inr: 15 })
     ]));
+  });
+  it('reports legacy over-capacity state without weakening the add-employee guard', async () => {
+    const company = db.companies.get('company-a');
+    if (company) db.companies.set('company-a', { ...company, tier: 'free_trial' });
+    db.orgEmployees.set('company-a', [
+      { id: 'sarah', name: 'Sarah', role: 'Talent & HR Manager', department: 'People Operations', status: 'active', tools: [], permissions: [] },
+      { id: 'david', name: 'David', role: 'Data Analyst', department: 'Analytics', status: 'active', tools: [], permissions: [] },
+      { id: 'alex', name: 'Alex', role: 'Operations Manager', department: 'Operations', status: 'active', tools: [], permissions: [] },
+      { id: 'mike', name: 'Mike', role: 'Finance Manager', department: 'Finance', status: 'active', tools: [], permissions: [] }
+    ]);
+    const response = await request(app).get('/api/billing').set('x-caveworkers-test-user', 'user-a').expect(200);
+    expect(response.body).toMatchObject({ active_employees: 4, max_employees: 2, overage_count: 2, legacy_overage: true, enrollment_locked: true, quota_remaining: 0 });
   });
   it('rejects unsafe API requests without a matching CSRF cookie and header', async () => {
     const response = await request(app)

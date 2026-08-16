@@ -2266,7 +2266,8 @@ app.get('/api/billing', async (req, res) => {
       created_at: new Date().toISOString()
     };
   const plan = SUBSCRIPTION_PLANS[company.tier] || SUBSCRIPTION_PLANS.growth;
-  const activeEmps = (db.orgEmployees.get(companyId) || []).length;
+  const activeEmps = (await loadOrgEmployees(companyId)).length;
+  const overageCount = Math.max(0, activeEmps - plan.max_employees);
 
   res.json({
     company_name: company.name,
@@ -2277,6 +2278,9 @@ app.get('/api/billing', async (req, res) => {
     active_employees: activeEmps,
     max_employees: plan.max_employees,
     quota_remaining: Math.max(0, plan.max_employees - activeEmps),
+    overage_count: overageCount,
+    legacy_overage: overageCount > 0,
+    enrollment_locked: activeEmps >= plan.max_employees,
     status: company.status,
     trial_started_at: company.trial_started_at,
     trial_ends_at: company.trial_ends_at,
@@ -2465,7 +2469,7 @@ app.post('/api/employees/configure', async (req, res) => {
   const companyId = user.company_id || DEFAULT_COMPANY_ID;
   const { employee_id, action } = req.body || {};
 
-  let emps = db.orgEmployees.get(companyId) || [];
+  let emps = await loadOrgEmployees(companyId);
   if (action === 'add') {
     const companyForPlan = user.company_id ? await loadCompanyFromFirebase(user.company_id) : null;
     const plan = SUBSCRIPTION_PLANS[user.selected_tier || companyForPlan?.tier || 'free_trial'] || SUBSCRIPTION_PLANS.free_trial;

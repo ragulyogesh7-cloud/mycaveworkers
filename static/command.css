@@ -711,6 +711,8 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .sound-toggle.is-on { color: var(--moss); border-color: rgba(182, 255, 182, .3); background: rgba(182, 255, 182, .08); }
 .sound-toggle-icon { display: inline-grid; place-items: center; width: 14px; height: 14px; color: var(--aqua); font-size: 14px; }
 .sound-toggle.is-on .sound-toggle-icon { color: var(--moss); text-shadow: 0 0 12px rgba(182, 255, 182, .75); animation: sound-ping 1.8s ease-in-out infinite; }
+.voice-toggle.is-on { color: var(--aqua); border-color: rgba(130, 233, 255, .4); background: rgba(130, 233, 255, .1); }
+.voice-toggle.is-on .sound-toggle-icon { color: var(--aqua); text-shadow: 0 0 12px rgba(130, 233, 255, .8); }
 .execution-live { position: relative; display: grid; grid-template-columns: 9px minmax(0, 1fr); gap: 8px; margin: 0 0 15px; padding: 11px 12px; border: 1px solid rgba(130, 233, 255, .15); border-radius: 15px; background: rgba(4, 12, 29, .34); overflow: hidden; }
 .execution-live::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(105deg, rgba(130, 233, 255, .11), transparent 48%); opacity: .5; }
 .execution-live-dot { width: 8px; height: 8px; margin-top: 4px; border-radius: 50%; background: var(--aqua); box-shadow: 0 0 0 4px rgba(130, 233, 255, .1), 0 0 15px var(--aqua); animation: live-breathe 1.8s ease-in-out infinite; }
@@ -1074,6 +1076,9 @@ body.room-directory-open { overflow: hidden; }
 .room-directory-card:hover { border-color: rgba(126,232,255,.42); background: linear-gradient(155deg, rgba(126,232,255,.12), rgba(255,255,255,.035)); transform: translateY(-2px); }
 .room-directory-card.is-connected { border-color: rgba(145,245,200,.29); }
 .room-directory-card-top { display: flex; align-items: flex-start; gap: 10px; }
+.room-directory-card-brand { display: inline-flex; align-items: center; gap: 5px; margin-left: auto; padding: 4px 6px 4px 4px; border: 1px solid rgba(130, 233, 255, .14); border-radius: 999px; color: rgba(211, 231, 255, .62); background: rgba(130, 233, 255, .045); font: 8px "DM Mono", ui-monospace, monospace; letter-spacing: .08em; white-space: nowrap; }
+.room-directory-card-brand img { width: 18px; height: 18px; border-radius: 6px; object-fit: cover; box-shadow: 0 0 0 1px rgba(255,255,255,.14); }
+.room-directory-card-brand small { font-size: 8px; }
 .room-directory-icon { display: grid; place-items: center; width: 38px; height: 38px; flex: 0 0 38px; border: 1px solid color-mix(in srgb, var(--directory-color, #7ee8ff) 50%, transparent); border-radius: 12px; background: color-mix(in srgb, var(--directory-color, #7ee8ff) 15%, #0c1421); color: #f7fdff; font-size: 11px; font-weight: 800; letter-spacing: -.04em; box-shadow: 0 8px 16px color-mix(in srgb, var(--directory-color, #7ee8ff) 14%, transparent); }
 .room-directory-icon-drive { --directory-color: #51a8ff; } .room-directory-icon-gmail { --directory-color: #ff766b; } .room-directory-icon-calendar { --directory-color: #7aabff; } .room-directory-icon-canva { --directory-color: #61e2ce; } .room-directory-icon-notion { --directory-color: #e7eff7; } .room-directory-icon-microsoft { --directory-color: #6a91ff; } .room-directory-icon-figma { --directory-color: #ff8d6b; } .room-directory-icon-atlassian { --directory-color: #6c9dff; } .room-directory-icon-slack { --directory-color: #e579ba; } .room-directory-icon-hubspot { --directory-color: #ff9565; } .room-directory-icon-linear { --directory-color: #b99bff; } .room-directory-icon-monday { --directory-color: #ffcc65; } .room-directory-icon-github { --directory-color: #dce8f2; } .room-directory-icon-sheets { --directory-color: #7fe19b; } .room-directory-icon-custom { --directory-color: #7ee8ff; }
 .room-directory-card-heading { min-width: 0; flex: 1; }
@@ -1167,8 +1172,10 @@ body.room-directory-open { overflow: hidden; }
 .room-message.introduction { margin: 0; padding-block: 15px 16px; border-left: 2px solid rgba(126, 232, 255, .46); background: linear-gradient(90deg, rgba(126, 232, 255, .055), transparent 72%); }
 .room-message.handoff { padding-block: 15px 16px; border-left: 2px solid rgba(174, 182, 255, .46); background: linear-gradient(90deg, rgba(174, 182, 255, .055), transparent 72%); }
 .room-message.complete { background: linear-gradient(90deg, rgba(185, 255, 176, .055), transparent 72%); }
-.message-delete { opacity: .35; }
-.room-message:hover .message-delete, .message-delete:focus-visible { opacity: 1; }
+.message-delete, .message-voice { opacity: .35; }
+.message-voice { padding: 2px 6px; border: 1px solid rgba(130, 233, 255, .2); border-radius: 999px; color: var(--aqua); background: rgba(130, 233, 255, .04); font: 9px "DM Mono", ui-monospace, monospace; letter-spacing: .04em; text-transform: uppercase; cursor: pointer; transition: opacity .16s ease, border-color .16s ease, background .16s ease, transform .16s ease; }
+.message-voice:hover, .message-voice:focus-visible { opacity: 1; border-color: rgba(130, 233, 255, .6); background: rgba(130, 233, 255, .12); transform: translateY(-1px); }
+.room-message:hover .message-delete, .room-message:hover .message-voice, .message-delete:focus-visible { opacity: 1; }
 @media (max-width: 640px) {
   .room-message { grid-template-columns: 32px minmax(0, 1fr); padding-inline: 3px; }
   .message-body p, .room-message.result .message-body p { font-size: 14px; line-height: 1.62; }
