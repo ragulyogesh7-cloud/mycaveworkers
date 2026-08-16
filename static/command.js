@@ -7,6 +7,8 @@ let workroomPresence = [];
 let workroomTasks = [];
 let taskSummaries = [];
 let pendingMessages = [];
+let deletedChatIds = new Set();
+let roomDirectoryState = { catalog: [], categories: [], query: '', category: '', showAll: false, open: false, setupConnector: null, setupServer: null };
 let trialCountdownTimer = null;
 let soundEnabled = false;
 let audioContext = null;
@@ -262,6 +264,8 @@ function messageKey(message) {
   return message.chat_id || `${message.task_id || 'room'}:${message.created_at || ''}:${message.sender_id || message.sender || ''}:${message.receiver_id || message.receiver || ''}:${message.body || ''}`;
 }
 
+function chatMessageId(message) { return String(message?.chat_id || messageKey(message)); }
+
 function messageTone(kind) {
   if (kind === 'approval_required') return 'approval';
   if (['blocked', 'action_failed', 'worker_failed'].includes(kind)) return 'failure';
@@ -299,7 +303,7 @@ function cleanChatCopy(value) {
 function renderRoomFeed(shouldFollow = roomAtLatest()) {
   const container = $('#workroom-thread');
   if (!container) return;
-  const all = [...workroomMessages, ...pendingMessages].filter((message) => message.chat_visible !== false && message.sender !== 'You').sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()).slice(-140);
+  const all = [...workroomMessages, ...pendingMessages].filter((message) => message.chat_visible !== false && message.sender !== 'You' && !deletedChatIds.has(chatMessageId(message))).sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime()).slice(-140);
   if (!all.length) {
     container.innerHTML = `<div class="room-empty"><span class="room-empty-mark">✦</span><h3>Your company room is ready.</h3><p>Assign a task below and your team’s routing, collaboration, and review steps will appear here in realtime.</p></div>`;
     return;
@@ -335,7 +339,7 @@ function rebuildWorkroomMessages() {
     (task.chat_messages || []).forEach((message) => { if (message?.body) source.push({ ...message, task_id: task.id, chat_visible: true }); });
   });
   const seen = new Set();
-  workroomMessages = source.filter((message) => {
+  workroomMessages = source.filter((message) => !deletedChatIds.has(chatMessageId(message))).filter((message) => {
     const key = messageKey(message);
     if (seen.has(key)) return false;
     seen.add(key);
@@ -368,12 +372,14 @@ function applyWorkroomEvent(event) {
   if (event.type === 'presence' && event.presence) upsertWorkroomPresence(event.presence);
   if (event.type === 'message' && event.message) {
     const key = messageKey(event.message);
-    if (event.message.chat_visible !== false && !workroomMessages.some((message) => messageKey(message) === key)) workroomMessages.push(event.message);
+    if (event.message.chat_visible !== false && !deletedChatIds.has(chatMessageId(event.message)) && !workroomMessages.some((message) => messageKey(message) === key)) workroomMessages.push(event.message);
     renderRoomFeed(follow);
   }
   if (event.type === 'chat_deleted' && event.chat_id) {
-    workroomMessages = workroomMessages.filter((message) => messageKey(message) !== event.chat_id);
-    workroomTasks = workroomTasks.map((task) => task.id === event.task_id ? { ...task, chat_messages: (task.chat_messages || []).filter((message) => messageKey(message) !== event.chat_id) } : task);
+    deletedChatIds.add(String(event.chat_id));
+    pendingMessages = pendingMessages.filter((message) => chatMessageId(message) !== String(event.chat_id));
+    workroomMessages = workroomMessages.filter((message) => chatMessageId(message) !== String(event.chat_id));
+    workroomTasks = workroomTasks.map((task) => String(task.id) === String(event.task_id) ? { ...task, chat_messages: (task.chat_messages || []).filter((message) => chatMessageId(message) !== String(event.chat_id)) } : task);
     renderRoomFeed(follow);
   }
   if (event.type === 'task_update' && event.task) {
@@ -439,7 +445,10 @@ async function deleteChatMessage(taskId, chatId) {
   if (!taskId || !chatId) return;
   try {
     await responseJson(`/api/workforce/tasks/${encodeURIComponent(taskId)}/chat/${encodeURIComponent(chatId)}`, { method: 'DELETE' });
-    workroomMessages = workroomMessages.filter((message) => messageKey(message) !== chatId);
+    deletedChatIds.add(String(chatId));
+    pendingMessages = pendingMessages.filter((message) => chatMessageId(message) !== String(chatId));
+    workroomMessages = workroomMessages.filter((message) => chatMessageId(message) !== String(chatId));
+    workroomTasks = workroomTasks.map((task) => String(task.id) === String(taskId) ? { ...task, chat_messages: (task.chat_messages || []).filter((message) => chatMessageId(message) !== String(chatId)) } : task);
     renderRoomFeed(false);
     setRoomNotice('Message deleted from your Company Room.', 'success');
   } catch (error) {
@@ -487,7 +496,7 @@ function renderTaskInRoom(taskId) {
   const task = taskSummaries.find((entry) => String(entry.id) === String(taskId)) || workroomTasks.find((entry) => String(entry.id) === String(taskId));
   if (!task) return;
   if ((task.chat_messages || []).length) {
-    const taskMessages = (task.chat_messages || []).filter((step) => step?.body).map((step) => ({ ...step, task_id: task.id }));
+    const taskMessages = (task.chat_messages || []).filter((step) => step?.body && !deletedChatIds.has(chatMessageId(step))).map((step) => ({ ...step, task_id: task.id }));
     const existingKeys = new Set(workroomMessages.map(messageKey));
     taskMessages.forEach((message) => { if (!existingKeys.has(messageKey(message))) workroomMessages.push(message); });
     renderRoomFeed(false);
@@ -533,6 +542,183 @@ async function submitTask(event) {
   }
 }
 
+
+function roomDirectoryConnectorCard(connector) {
+  const connectedEmployees = connector.connected_employee_ids || [];
+  const connected = Boolean(connector.connected);
+  const employeeNames = connectedEmployees.map((id) => employeeById(id)?.name || id).slice(0, 2);
+  const statusCopy = connected ? `Connected${employeeNames.length ? ` · ${employeeNames.join(', ')}` : ''}` : 'Ready to connect';
+  const actionCopy = connected ? 'Reuse' : 'Connect';
+  const actions = (connector.supported_actions || []).slice(0, 3).map((action) => `<span>${safe(action)}</span>`).join('');
+  return `<article class="room-directory-card ${connected ? 'is-connected' : ''}" style="--directory-color:${safe(connector.icon_tone || 'custom')}"><div class="room-directory-card-top"><span class="room-directory-icon room-directory-icon-${safe(connector.icon_tone || 'custom')}">${safe(connector.icon_label || connector.short_name?.[0] || '?')}</span><div class="room-directory-card-heading"><div><h4>${safe(connector.name)}</h4>${connector.verified ? '<span class="room-directory-verified">✓</span>' : '<span class="room-directory-custom">Custom</span>'}</div><span>${safe(connector.category)}</span></div></div><p class="room-directory-card-description">${safe(connector.description)}</p><div class="room-directory-action-chips">${actions}</div><p class="room-directory-card-setup">${safe(connector.setup_copy)}</p><div class="room-directory-card-footer"><span class="room-directory-connection-state ${connected ? 'is-connected' : ''}"><i></i>${safe(statusCopy)}</span><button class="room-directory-connect-button ${connected ? 'is-connected' : ''}" type="button" data-room-directory-id="${safe(connector.id)}" aria-label="${safe(actionCopy)} ${safe(connector.name)}"><span>${connected ? '✓' : '+'}</span>${safe(actionCopy)}</button></div></article>`;
+}
+
+function roomDirectoryFiltered() {
+  const query = roomDirectoryState.query.trim().toLowerCase();
+  const category = roomDirectoryState.category.trim().toLowerCase();
+  return roomDirectoryState.catalog.filter((connector) => {
+    const categoryMatch = !category || String(connector.category || '').toLowerCase() === category;
+    const haystack = [connector.name, connector.short_name, connector.description, connector.category, ...(connector.keywords || [])].join(' ').toLowerCase();
+    return categoryMatch && (!query || haystack.includes(query));
+  });
+}
+
+function renderRoomDirectory() {
+  const modal = $('#room-connector-directory');
+  if (!modal) return;
+  const filtered = roomDirectoryFiltered();
+  const search = $('#room-directory-search');
+  if (search && search.value !== roomDirectoryState.query) search.value = roomDirectoryState.query;
+  const categories = $('#room-directory-categories');
+  if (categories) categories.innerHTML = [`<button class="room-directory-category-chip ${!roomDirectoryState.category ? 'active' : ''}" type="button" role="tab" aria-selected="${!roomDirectoryState.category}" data-room-directory-category="">All</button>`, ...(roomDirectoryState.categories || []).map((item) => `<button class="room-directory-category-chip ${roomDirectoryState.category === item ? 'active' : ''}" type="button" role="tab" aria-selected="${roomDirectoryState.category === item}" data-room-directory-category="${safe(item)}">${safe(item)}</button>`)].join('');
+  const featured = filtered.filter((connector) => connector.featured).slice(0, 6);
+  const featuredGrid = $('#room-directory-featured-grid');
+  if (featuredGrid) featuredGrid.innerHTML = featured.length ? featured.map(roomDirectoryConnectorCard).join('') : '<p class="room-directory-empty">No featured connector matches this search.</p>';
+  const allGrid = $('#room-directory-all-grid');
+  const visible = roomDirectoryState.showAll ? filtered : filtered.slice(0, 6);
+  if (allGrid) allGrid.innerHTML = visible.length ? visible.map(roomDirectoryConnectorCard).join('') : '<p class="room-directory-empty">No connectors match these filters.</p>';
+  const count = $('#room-directory-result-count');
+  if (count) count.textContent = `${filtered.length} match${filtered.length === 1 ? '' : 'es'} · ${roomDirectoryState.catalog.length} curated`;
+  const toggle = $('#room-directory-toggle-all');
+  if (toggle) { toggle.hidden = filtered.length <= 6; toggle.textContent = roomDirectoryState.showAll ? 'Show fewer' : `Show all ${filtered.length}`; toggle.setAttribute('aria-expanded', String(roomDirectoryState.showAll)); }
+  const summary = $('#room-directory-summary');
+  if (summary) { const connected = filtered.filter((connector) => connector.connected).length; summary.textContent = connected ? `${connected} connector${connected === 1 ? '' : 's'} already connected in this workspace. Reuse it or connect another tool.` : 'Browse verified apps and connect them to the workforce from this room.'; }
+}
+
+function closeRoomDirectory() {
+  const modal = $('#room-connector-directory');
+  if (!modal) return;
+  modal.hidden = true;
+  roomDirectoryState.open = false;
+  roomDirectoryState.setupConnector = null;
+  document.body.classList.remove('room-directory-open');
+  $('#connector-plus')?.setAttribute('aria-expanded', 'false');
+}
+
+function showRoomDirectoryCatalog() {
+  $('#room-directory-catalog')?.removeAttribute('hidden');
+  $('#room-directory-setup')?.setAttribute('hidden', '');
+  roomDirectoryState.setupConnector = null;
+  roomDirectoryState.setupServer = null;
+}
+
+function showRoomDirectorySetup(connector, server = null, reason = '') {
+  const catalog = $('#room-directory-catalog');
+  const setup = $('#room-directory-setup');
+  const title = $('#room-directory-setup-title');
+  const copy = $('#room-directory-setup-copy');
+  const fields = $('#room-directory-setup-fields');
+  if (!catalog || !setup || !title || !copy || !fields) return;
+  roomDirectoryState.setupConnector = connector;
+  roomDirectoryState.setupServer = server;
+  catalog.setAttribute('hidden', '');
+  setup.removeAttribute('hidden');
+  title.textContent = `Connect ${connector.name}`;
+  copy.textContent = reason || connector.setup_copy || 'Caveworkers will keep this connection tenant-scoped and approval-aware.';
+  if (connector.connection_mode === 'mcp_registry') {
+    const remotes = (server?.remotes || []).filter((remote) => remote.type === 'streamable-http');
+    fields.innerHTML = `<div class="room-directory-setup-grid"><label>Advertised remote<select id="room-directory-remote">${remotes.map((remote) => `<option value="${safe(remote.url)}">${safe(remote.url)}</option>`).join('')}</select></label><label>Authentication token<input id="room-directory-token" type="password" autocomplete="new-password" placeholder="Optional if the server is public"></label></div><div class="room-directory-setup-grid"><label>Header name<input id="room-directory-header" value="Authorization" maxlength="120"></label><label>Header prefix<input id="room-directory-prefix" value="Bearer" maxlength="24"></label></div>`;
+  } else {
+    fields.innerHTML = `<div class="room-directory-setup-grid"><label>Secure MCP endpoint<input id="room-directory-endpoint" type="url" placeholder="https://mcp.example.com"></label><label>Authentication token<input id="room-directory-token" type="password" autocomplete="new-password" placeholder="Stored encrypted"></label></div><p class="room-directory-setup-note">Custom connectors need the endpoint and credential supplied by your company. Standard connectors can be connected directly from the directory.</p>`;
+  }
+}
+
+async function refreshRoomDirectoryCatalog() {
+  const data = await responseJson('/api/mcp/directory');
+  roomDirectoryState.catalog = data.catalog || [];
+  roomDirectoryState.categories = data.categories || [];
+  renderRoomDirectory();
+}
+
+async function openRoomDirectory() {
+  const modal = $('#room-connector-directory');
+  const button = $('#connector-plus');
+  if (!modal) return;
+  roomDirectoryState = { catalog: [], categories: [], query: '', category: '', showAll: false, open: true, setupConnector: null, setupServer: null };
+  modal.hidden = false;
+  document.body.classList.add('room-directory-open');
+  button?.setAttribute('aria-expanded', 'true');
+  renderRoomDirectory();
+  try { await refreshRoomDirectoryCatalog(); $('#room-directory-search')?.focus(); } catch (error) { setRoomNotice(error.message || 'The connector directory is temporarily unavailable.', 'error'); const grid = $('#room-directory-featured-grid'); if (grid) grid.innerHTML = '<p class="room-directory-empty">The directory is temporarily unavailable. Existing connections remain safe.</p>'; }
+}
+
+async function connectRegistryFromRoom(connector, server, formData = {}) {
+  const remotes = (server?.remotes || []).filter((remote) => remote.type === 'streamable-http');
+  const serverUrl = formData.server_url || remotes[0]?.url;
+  if (!serverUrl) throw new Error('This connector has no advertised secure remote yet.');
+  return responseJson('/api/mcp/registry/connect', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ registry_name: connector.registry_name, server_url: serverUrl, auth_token: formData.auth_token || '', auth_header_name: formData.auth_header_name || 'Authorization', auth_header_prefix: formData.auth_header_prefix ?? 'Bearer', all_employees: true, access_level: connector.default_access_level || 'requires_approval' }) });
+}
+
+async function connectFromRoomDirectory(connectorId) {
+  const connector = roomDirectoryState.catalog.find((entry) => entry.id === connectorId);
+  if (!connector) return;
+  if (connector.connected) { setRoomNotice(`${connector.name} is already connected for ${connector.connection_count || connector.connected_employee_ids?.length || 1} employee${(connector.connection_count || connector.connected_employee_ids?.length || 1) === 1 ? '' : 's'}. The workforce can reuse it.`, 'success'); closeRoomDirectory(); return; }
+  setRoomNotice(`Preparing ${connector.name} for the workforce…`, '');
+  try {
+    if (connector.connection_mode === 'google_oauth') {
+      const employeeId = connector.recommended_employee_ids?.find((id) => employeeById(id)) || 'sarah';
+      const saved = await responseJson(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: connector.name, connection_type: connector.connection_type, access_level: connector.default_access_level || 'requires_approval', config: { gmail_send_enabled: false, notes: 'Connected from the Company Room connector directory.' } }) });
+      if (!saved.connection?.id) throw new Error('The connector was saved but Google authorization could not start.');
+      window.location.assign(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections/${encodeURIComponent(saved.connection.id)}/google/start?service=${connector.connection_type === 'google_gmail' ? 'gmail' : 'sheets'}`);
+      return;
+    }
+    if (connector.connection_mode === 'mcp_registry') {
+      const detail = await responseJson(`/api/mcp/directory/${encodeURIComponent(connector.id)}`);
+      try {
+        await connectRegistryFromRoom(connector, detail.server || {});
+        setRoomNotice(`${connector.name} is connected for the active workforce. Read tools are available and write actions remain policy-gated.`, 'success');
+        await refreshRoomDirectoryCatalog();
+        closeRoomDirectory();
+      } catch (error) {
+        showRoomDirectorySetup(connector, detail.server || {}, error.message || connector.setup_copy);
+      }
+      return;
+    }
+    showRoomDirectorySetup(connector, null);
+  } catch (error) { setRoomNotice(error.message || `Caveworkers could not connect ${connector.name}.`, 'error'); }
+}
+
+async function submitRoomDirectorySetup(event) {
+  event.preventDefault();
+  const connector = roomDirectoryState.setupConnector;
+  if (!connector) return;
+  const submit = event.currentTarget.querySelector('button[type="submit"]');
+  if (submit) { submit.disabled = true; submit.textContent = 'Connecting…'; }
+  try {
+    let result;
+    if (connector.connection_mode === 'mcp_registry') {
+      result = await connectRegistryFromRoom(connector, roomDirectoryState.setupServer || {}, { server_url: $('#room-directory-remote')?.value, auth_token: $('#room-directory-token')?.value, auth_header_name: $('#room-directory-header')?.value, auth_header_prefix: $('#room-directory-prefix')?.value });
+    } else {
+      const employeeId = connector.recommended_employee_ids?.find((id) => employeeById(id)) || 'sarah';
+      result = await responseJson(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: connector.name, connection_type: 'streamable_http', server_url: $('#room-directory-endpoint')?.value, auth_token: $('#room-directory-token')?.value, access_level: connector.default_access_level || 'requires_approval', config: { notes: 'Connected from the Company Room connector directory.' } }) });
+    }
+    setRoomNotice(result.notice || `${connector.name} is connected.`, 'success');
+    await refreshRoomDirectoryCatalog();
+    showRoomDirectoryCatalog();
+    closeRoomDirectory();
+  } catch (error) { setRoomNotice(error.message || `Caveworkers could not connect ${connector.name}.`, 'error'); } finally { if (submit) { submit.disabled = false; submit.innerHTML = 'Connect for the workforce <span>↗</span>'; } }
+}
+
+function bindRoomDirectoryInteractions() {
+  const button = $('#connector-plus');
+  const modal = $('#room-connector-directory');
+  button?.addEventListener('click', (event) => { event.stopPropagation(); if (modal?.hidden) void openRoomDirectory(); else closeRoomDirectory(); playCue('tick'); });
+  $('#room-directory-close')?.addEventListener('click', closeRoomDirectory);
+  $('#room-directory-back')?.addEventListener('click', showRoomDirectoryCatalog);
+  modal?.addEventListener('click', (event) => {
+    if (event.target.closest('[data-room-directory-close]')) { closeRoomDirectory(); return; }
+    const connector = event.target.closest('[data-room-directory-id]');
+    if (connector) { void connectFromRoomDirectory(connector.dataset.roomDirectoryId); return; }
+    const category = event.target.closest('[data-room-directory-category]');
+    if (category) { roomDirectoryState.category = category.dataset.roomDirectoryCategory || ''; roomDirectoryState.showAll = false; renderRoomDirectory(); }
+  });
+  let searchTimer;
+  $('#room-directory-search')?.addEventListener('input', (event) => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { roomDirectoryState.query = event.target.value || ''; roomDirectoryState.showAll = false; renderRoomDirectory(); }, 100); });
+  $('#room-directory-toggle-all')?.addEventListener('click', () => { roomDirectoryState.showAll = !roomDirectoryState.showAll; renderRoomDirectory(); });
+  $('#room-directory-setup-form')?.addEventListener('submit', submitRoomDirectorySetup);
+  document.addEventListener('keydown', (event) => { if (event.key === 'Escape' && roomDirectoryState.open) closeRoomDirectory(); if (event.key === '/' && !roomDirectoryState.open && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement?.tagName)) { event.preventDefault(); void openRoomDirectory(); } });
+}
+
 function bindRoomInteractions() {
   $('#room-composer')?.addEventListener('submit', submitTask);
   $('#request')?.addEventListener('keydown', (event) => {
@@ -543,13 +729,7 @@ function bindRoomInteractions() {
   $('#refresh-tasks')?.addEventListener('click', () => Promise.all([loadTaskSummaries(), loadApprovals(), loadWorkroomSnapshot()]));
   $('#menuButton')?.addEventListener('click', () => document.querySelector('.side-rail')?.classList.toggle('is-open'));
   $('#sound-toggle')?.addEventListener('click', () => { soundEnabled = !soundEnabled; window.localStorage.setItem('caveworkers-sound', soundEnabled ? 'on' : 'off'); setSoundToggle(); if (soundEnabled) playCue('complete'); });
-  const connectorButton = $('#connector-plus');
-  const connectorPopover = $('#connector-popover');
-  const closeConnectorPopover = () => { if (!connectorPopover || !connectorButton) return; connectorPopover.hidden = true; connectorButton.setAttribute('aria-expanded', 'false'); };
-  connectorButton?.addEventListener('click', (event) => { event.stopPropagation(); if (!connectorPopover) return; connectorPopover.hidden = !connectorPopover.hidden; connectorButton.setAttribute('aria-expanded', String(!connectorPopover.hidden)); if (!connectorPopover.hidden) playCue('tick'); });
-  $('#connector-popover-close')?.addEventListener('click', closeConnectorPopover);
-  document.addEventListener('click', (event) => { if (connectorPopover && !connectorPopover.hidden && !event.target.closest('#connector-popover, #connector-plus')) closeConnectorPopover(); });
-  document.addEventListener('keydown', (event) => { if (event.key === 'Escape') closeConnectorPopover(); });
+  bindRoomDirectoryInteractions();
   document.addEventListener('click', (event) => {
     const approval = event.target.closest('[data-approval-id]');
     if (approval) resolveApproval(approval.dataset.approvalId, approval.dataset.approvalStatus);
