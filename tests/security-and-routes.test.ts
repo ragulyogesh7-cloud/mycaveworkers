@@ -789,12 +789,27 @@ describe('Caveworkers security invariants', () => {
     expect(response.body.error).toBe('CSRF validation failed.');
   });
 
+  it('starts Google OAuth with a signed state cookie and Company Room return path', async () => {
+    const created = await csrfRequest('user-a', 'post', '/api/employees/sarah/mcp-connections')
+      .send({ name: 'Pilot Gmail', connection_type: 'google_gmail', access_level: 'requires_approval' })
+      .expect(201);
+    const response = await request(app)
+      .get(`/api/employees/sarah/mcp-connections/${created.body.connection.id}/google/start?service=gmail&return_to=%2Fcommand`)
+      .set('x-caveworkers-test-user', 'user-a')
+      .expect(302);
+    expect(response.headers.location).toContain('accounts.google.com');
+    expect(response.headers.location).toContain('state=');
+    expect(response.headers['set-cookie']?.join(';')).toContain('cw_google_oauth_state=');
+  });
+
   it('reports health component readiness and returns a request correlation ID', async () => {
     const response = await request(app).get('/api/health').expect(200);
     expect(response.body.status).toBe('healthy');
     expect(response.body.components).toHaveProperty('database');
     expect(response.body.components).toHaveProperty('payments');
     expect(response.body.components).toHaveProperty('observability');
+    expect(response.body.components).toHaveProperty('google_oauth');
+    expect(['configured', 'unconfigured']).toContain(response.body.components.google_oauth.status);
     expect(response.headers['x-request-id']).toMatch(/^[A-Za-z0-9_-]{8,128}$/);
   });
 });

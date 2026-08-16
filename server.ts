@@ -63,12 +63,13 @@ const OPENROUTER_BASE_URL = (process.env.OPENROUTER_BASE_URL || 'https://openrou
 const ANALYST_MODEL = process.env.ANALYST_MODEL || 'qwen/qwen3-30b-a3b';
 const OPENROUTER_TIMEOUT_MS = Math.min(Math.max(Number(process.env.OPENROUTER_TIMEOUT_MS || '30000') || 30000, 5000), 60000);
 const ANALYST_MAX_TOKENS = Math.min(Math.max(Number(process.env.ANALYST_MAX_TOKENS || '900') || 900, 128), 2000);
-const PUBLIC_APP_URL = (process.env.PUBLIC_APP_URL || 'https://caveworkers.app').replace(/\/$/, '');
+const PUBLIC_APP_URL = (process.env.PUBLIC_APP_URL || 'https://caveworkers.ai.studio').replace(/\/$/, '');
 const GOOGLE_OAUTH_CLIENT_ID = (process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim();
 const GOOGLE_OAUTH_CLIENT_SECRET = (process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
 const GOOGLE_OAUTH_REDIRECT_URI = (process.env.GOOGLE_OAUTH_REDIRECT_URI || `${PUBLIC_APP_URL}/api/google/oauth/callback`).replace(/\/$/, '');
 const MCP_TOKEN_ENCRYPTION_KEY = (process.env.MCP_TOKEN_ENCRYPTION_KEY || '').trim();
-const OAUTH_STATE_SECRET = (process.env.FLASK_SECRET || '').trim();
+const OAUTH_STATE_SECRET = (process.env.FLASK_SECRET || process.env.OAUTH_STATE_SECRET || '').trim();
+const GOOGLE_OAUTH_CONFIGURED = Boolean(GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET && GOOGLE_OAUTH_REDIRECT_URI && (!IS_PRODUCTION || OAUTH_STATE_SECRET));
 const ALWAYS_ON_WORKER_ENABLED = process.env.ALWAYS_ON_WORKER_ENABLED !== 'false';
 const WORKER_POLL_MS = Math.min(Math.max(Number(process.env.WORKER_POLL_MS || '1500') || 1500, 500), 10000);
 const WORKER_INSTANCE_ID = process.env.WORKER_INSTANCE_ID || `worker-${crypto.randomBytes(6).toString('hex')}`;
@@ -2132,6 +2133,7 @@ app.get('/api/health', (_req, res) => {
       payments: { status: RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET && RAZORPAY_WEBHOOK_SECRET ? 'configured' : 'unconfigured' },
       firebase: { status: firebaseAuth && firestoreDb ? 'active' : 'unconfigured' },
       analyst: { status: OPENROUTER_KEY_READY ? 'openrouter_configured' : genAIClient ? 'gemini_fallback' : 'preview_only', model: OPENROUTER_KEY_READY ? ANALYST_MODEL : undefined },
+      google_oauth: { status: GOOGLE_OAUTH_CONFIGURED ? 'configured' : 'unconfigured' },
       mcp_bus: { status: 'active' },
       observability: { sentry: sentryEnabled ? 'configured' : 'unconfigured' }
     }
@@ -3531,16 +3533,19 @@ app.get('/api/employees/:id/mcp-connections/:connectionId/google/start', async (
   if (await enforceWorkspaceAccess(req, res)) return;
   const companyId = user?.company_id || DEFAULT_COMPANY_ID;
   const connectionId = Number(req.params.connectionId);
-  const requestedType = String(req.query.service || '') as 'google_gmail' | 'google_sheets';
+  const requestedService = String(req.query.service || '').trim().toLowerCase();
+  const requestedType = (requestedService === 'gmail' ? 'google_gmail' : requestedService === 'sheets' ? 'google_sheets' : requestedService) as 'google_gmail' | 'google_sheets' | '';
   const connections = await loadMcpConnections(companyId, req.params.id);
   const connection = connections.find((entry) => entry.id === connectionId && (entry.connection_type === requestedType || (!requestedType && ['google_gmail', 'google_sheets'].includes(entry.connection_type))));
   const type = connection?.connection_type as 'google_gmail' | 'google_sheets';
   if (!connection || !['google_gmail', 'google_sheets'].includes(type)) return res.status(400).json({ error: 'Choose Gmail or Google Sheets.' });
   if (!connection) return res.status(404).json({ error: 'Google connector not found.' });
   try {
-    const state = oauthStateSign({ uid: user?.uid, company_id: companyId, employee_id: req.params.id, connection_id: connectionId, connection_type: type, iat: Date.now() });
-    res.cookie('cw_google_oauth_state', state, { httpOnly: true, sameSite: 'lax', secure: IS_PRODUCTION, maxAge: 10 * 60 * 1000 });
     const oauth2 = googleOAuthClient();
+    const requestedReturnTo = String(req.query.return_to || '/settings');
+    const returnTo = requestedReturnTo === '/command' ? '/command' : '/settings';
+    const state = oauthStateSign({ uid: user?.uid, company_id: companyId, employee_id: req.params.id, connection_id: connectionId, connection_type: type, return_to: returnTo, iat: Date.now() });
+    res.cookie('cw_google_oauth_state', state, { httpOnly: true, sameSite: 'lax', secure: IS_PRODUCTION, path: '/', maxAge: 10 * 60 * 1000 });
     return res.redirect(oauth2.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: googleScopesFor(connection), state }));
   } catch (error: any) {
     return res.status(503).json({ error: error.message || 'Google OAuth is not configured.' });
@@ -3553,7 +3558,11 @@ app.get('/api/google/oauth/callback', async (req, res) => {
   const state = String(req.query.state || '');
   const payload = oauthStateVerify(state);
   if (!payload || payload.uid !== user.uid || payload.company_id !== (user.company_id || DEFAULT_COMPANY_ID) || req.cookies?.cw_google_oauth_state !== state) return res.status(400).send('Google OAuth state validation failed. Please restart the connection from Caveworkers.');
-  if (req.query.error) return res.redirect(`/settings?connector_error=${encodeURIComponent(String(req.query.error))}`);
+  if (req.query.error) {
+    res.clearCookie('cw_google_oauth_state', { path: '/' });
+    const returnTo = payload.return_to === '/command' ? '/command' : '/settings';
+    return res.redirect(`${returnTo}?connector_error=${encodeURIComponent(String(req.query.error))}`);
+  }
   const code = String(req.query.code || '');
   if (!code) return res.status(400).send('Google did not return an authorization code.');
   try {
@@ -3579,8 +3588,9 @@ app.get('/api/google/oauth/callback', async (req, res) => {
       connection.oauth_email = identity.data.email || undefined;
     } catch (_identityError) { /* identity is optional; the token remains valid for the requested API */ }
     await persistMcpConnection(connection);
-    res.clearCookie('cw_google_oauth_state');
-    return res.redirect(`/settings?connector=connected&service=${payload.connection_type === 'google_gmail' ? 'gmail' : 'sheets'}`);
+    res.clearCookie('cw_google_oauth_state', { path: '/' });
+    const returnTo = payload.return_to === '/command' ? '/command' : '/settings';
+    return res.redirect(`${returnTo}?connector=connected&service=${payload.connection_type === 'google_gmail' ? 'gmail' : 'sheets'}`);
   } catch (error: any) {
     console.warn('Google OAuth callback failed:', error?.message || error);
     return res.status(502).send('Google connection could not be completed. Check the OAuth client, redirect URI, and requested API scopes.');

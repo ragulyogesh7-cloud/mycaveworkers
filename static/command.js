@@ -678,7 +678,7 @@ async function connectFromRoomDirectory(connectorId) {
       const employeeId = connector.recommended_employee_ids?.find((id) => employeeById(id)) || 'sarah';
       const saved = await responseJson(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: connector.name, connection_type: connector.connection_type, access_level: connector.default_access_level || 'requires_approval', config: { gmail_send_enabled: false, notes: 'Connected from the Company Room connector directory.' } }) });
       if (!saved.connection?.id) throw new Error('The connector was saved but Google authorization could not start.');
-      window.location.assign(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections/${encodeURIComponent(saved.connection.id)}/google/start?service=${connector.connection_type === 'google_gmail' ? 'gmail' : 'sheets'}`);
+      window.location.assign(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections/${encodeURIComponent(saved.connection.id)}/google/start?service=${connector.connection_type === 'google_gmail' ? 'gmail' : 'sheets'}&return_to=%2Fcommand`);
       return;
     }
     if (connector.connection_mode === 'mcp_registry') {
@@ -766,7 +766,16 @@ function bindRoomInteractions() {
   });
 }
 
+function consumeConnectorCallbackNotice() {
+  const params = new URLSearchParams(window.location.search);
+  const error = params.get('connector_error');
+  const connected = params.get('connector') === 'connected';
+  if (error) setRoomNotice(`Google connection was not completed: ${error.replace(/[<>]/g, '').slice(0, 180)}`, 'error');
+  else if (connected) setRoomNotice('Google connector connected. The workforce can now use its approved tools.', 'success');
+  if (error || connected) window.history.replaceState({}, document.title, `${window.location.pathname}${window.location.hash}`);
+}
 async function initializeRoom() {
+  consumeConnectorCallbackNotice();
   soundEnabled = false;
   setSoundToggle();
   setExecutionLive();
