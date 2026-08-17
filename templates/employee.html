@@ -9,6 +9,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/command.css">
+  <link rel="stylesheet" href="/static/motion.css">
   <link rel="stylesheet" href="/static/employee.css">
 </head>
 <body class="command-body employee-body" data-employee-id="<%= employee.id %>">
@@ -78,6 +79,7 @@
   </div>
   <script src="/static/csrf.js"></script>
   <script src="/static/employee.js"></script>
+  <script src="/static/motion.js"></script>
   <script>document.getElementById('logout-btn')?.addEventListener('click', async (event) => { event.preventDefault(); await fetch('/api/session-logout', { method: 'POST' }); window.location.href = '/login'; });</script>
 </body>
 </html>
