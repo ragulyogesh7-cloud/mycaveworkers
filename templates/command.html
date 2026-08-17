@@ -11,6 +11,7 @@
   <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="/static/command.css">
   <link rel="stylesheet" href="/static/motion.css">
+  <link rel="stylesheet" href="/static/ui-reimplementation.css">
 </head>
 <body class="command-body room-body clean-room-body">
   <div class="app-shell room-app-shell clean-room-shell">
@@ -106,7 +107,7 @@
   <script src="/static/csrf.js"></script>
   <script src="/static/command.js"></script>
   <script src="/static/motion.js"></script>
-</body>  <script>
+  <script>
     document.getElementById('logout-btn')?.addEventListener('click', async (event) => {
       event.preventDefault();
       try { if (window.firebaseAuth?.signOut) await window.firebaseAuth.signOut(); } catch (_) {}

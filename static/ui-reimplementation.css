@@ -1,0 +1,183 @@
+:root {
+  --ui-bg: #060a18;
+  --ui-bg-raised: #0b1228;
+  --ui-panel: rgba(18, 29, 63, .70);
+  --ui-panel-strong: rgba(19, 33, 72, .86);
+  --ui-panel-soft: rgba(255, 255, 255, .045);
+  --ui-line: rgba(206, 226, 255, .15);
+  --ui-line-strong: rgba(206, 226, 255, .28);
+  --ui-text: #f7f9ff;
+  --ui-muted: #a8b5d3;
+  --ui-faint: #7180a5;
+  --ui-cyan: #7ee8ff;
+  --ui-violet: #aeb6ff;
+  --ui-lime: #b9ffb0;
+  --ui-gold: #ffd591;
+  --ui-radius-xl: 28px;
+  --ui-radius-lg: 20px;
+  --ui-radius-md: 14px;
+  --ui-shadow: 0 30px 90px rgba(0, 0, 0, .30), inset 0 1px 0 rgba(255, 255, 255, .10);
+  --ui-ease: cubic-bezier(.22, 1, .36, 1);
+}
+
+html { background: var(--ui-bg); }
+body {
+  color: var(--ui-text);
+  background:
+    radial-gradient(ellipse 48rem 32rem at 8% -10%, rgba(126, 232, 255, .14), transparent 72%),
+    radial-gradient(ellipse 46rem 34rem at 96% 9%, rgba(174, 182, 255, .13), transparent 70%),
+    radial-gradient(ellipse 38rem 30rem at 60% 112%, rgba(185, 255, 176, .08), transparent 72%),
+    var(--ui-bg);
+}
+
+body::selection { color: #04101b; background: var(--ui-cyan); }
+
+/* Shared brand and navigation */
+.brand, .brand-logo, .brand-mark { transition: transform 220ms var(--ui-ease), filter 220ms var(--ui-ease), border-color 220ms var(--ui-ease); }
+.brand:hover { transform: translateY(-1px); }
+.brand:hover .brand-logo, .brand:hover .brand-mark { filter: saturate(1.2) brightness(1.08); border-color: rgba(126, 232, 255, .72); }
+.brand span:last-child { letter-spacing: -.055em; }
+.nav, .nav-row { border-bottom-color: rgba(206, 226, 255, .16); }
+.nav-links a, .nav-links .nav-status, .top-actions a { position: relative; }
+.nav-links a::after, .top-actions .settings-link::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: -8px;
+  left: 0;
+  height: 1px;
+  transform: scaleX(0);
+  transform-origin: right;
+  background: linear-gradient(90deg, transparent, var(--ui-cyan));
+  transition: transform 240ms var(--ui-ease);
+}
+.nav-links a:hover::after, .top-actions .settings-link:hover::after { transform: scaleX(1); transform-origin: left; }
+
+/* Reusable liquid-glass surfaces */
+.glass, .route-card, .control-panel, .composer, .panel-block, .results-block,
+.room-panel, .context-card, .settings-card, .settings-panel, .analyst-panel,
+.employee-panel, .login-card, .wizard-card, .legal-card, .approval-card,
+.connection-card, .catalog-card, .task-card, .tool-card, .chart-card {
+  border-color: var(--ui-line);
+  background: linear-gradient(145deg, rgba(31, 50, 104, .65), rgba(9, 16, 39, .74));
+  box-shadow: var(--ui-shadow);
+  backdrop-filter: blur(24px) saturate(1.18);
+  -webkit-backdrop-filter: blur(24px) saturate(1.18);
+}
+.glass::before, .route-card::before, .control-panel::before, .composer::before,
+.panel-block::before, .results-block::before, .room-panel::before, .context-card::before,
+.settings-card::before, .settings-panel::before, .analyst-panel::before, .employee-panel::before,
+.login-card::before, .wizard-card::before, .legal-card::before {
+  background: linear-gradient(118deg, rgba(255, 255, 255, .12), transparent 32%), radial-gradient(24rem circle at var(--pointer-x, 10%) var(--pointer-y, -20%), rgba(126, 232, 255, .10), transparent 55%);
+}
+
+/* Public landing reimplementation */
+.top { min-height: 100svh; }
+.top .wrap { width: min(1240px, calc(100% - 56px)); }
+.top .nav { min-height: 86px; }
+.hero { gap: clamp(40px, 7vw, 96px); padding-top: clamp(76px, 11vw, 138px); padding-bottom: clamp(116px, 15vw, 180px); }
+.hero h1 { max-width: 720px; font-size: clamp(52px, 7vw, 94px); }
+.hero-copy { max-width: 610px; color: #b4c0db; }
+.hero-actions .button { min-height: 46px; padding-inline: 20px; }
+.hero-stage { min-height: 520px; }
+.route-card { border-radius: var(--ui-radius-xl); }
+.metric-bar { border-top-color: var(--ui-line); background: rgba(5, 9, 24, .58); }
+.metric { padding: 22px 14px; }
+.section { padding: clamp(94px, 12vw, 150px) 0; }
+.section-intro { gap: clamp(40px, 9vw, 120px); }
+.section-intro h2, .connector-copy h2 { max-width: 680px; }
+.how-grid { gap: 18px; }
+.how-card { min-height: 320px; border-radius: var(--ui-radius-lg); }
+.how-card:hover { transform: translateY(-8px) rotateX(1deg); }
+.control-surface { border-radius: var(--ui-radius-xl); }
+.connector { border-radius: var(--ui-radius-lg); }
+.control-panel { border-radius: var(--ui-radius-xl); }
+
+/* Auth and onboarding: focused single-purpose surfaces */
+.login-page, .onboarding-page { min-height: 100svh; }
+.login-card, .wizard-card { position: relative; border-radius: var(--ui-radius-xl); }
+.login-card { width: min(100% - 40px, 520px); padding: clamp(28px, 5vw, 54px); }
+.login-card h1 { font-size: clamp(36px, 5vw, 58px); letter-spacing: -.075em; }
+.login-card #google-login-btn, .login-card .google-button { min-height: 52px; border-radius: 15px; box-shadow: 0 16px 36px rgba(126, 232, 255, .12), inset 0 1px 0 rgba(255, 255, 255, .20); }
+.login-card #google-login-btn:hover, .login-card .google-button:hover { transform: translateY(-3px); box-shadow: 0 20px 44px rgba(126, 232, 255, .22), inset 0 1px 0 rgba(255, 255, 255, .26); }
+.wizard-card { border-radius: var(--ui-radius-xl); }
+
+/* Authenticated application shell */
+.app-shell { grid-template-columns: 238px minmax(0, 1fr); }
+.side-rail { padding: 24px 14px; background: linear-gradient(165deg, rgba(11, 20, 47, .92), rgba(8, 13, 31, .78)); border-right-color: var(--ui-line); }
+.side-rail .brand { padding-inline: 11px; }
+.rail-link { min-height: 44px; border-radius: 13px; }
+.rail-link.active { background: linear-gradient(105deg, rgba(126, 232, 255, .17), rgba(174, 182, 255, .075)); border-color: rgba(126, 232, 255, .24); box-shadow: 0 10px 24px rgba(0, 0, 0, .14), inset 0 1px 0 rgba(255, 255, 255, .10); }
+.app-topbar { height: 76px; padding-inline: clamp(22px, 4vw, 64px); background: rgba(7, 12, 28, .66); border-bottom-color: var(--ui-line); }
+.command-wrap, .room-wrap { width: min(100% - 76px, 1320px); padding-top: clamp(48px, 6vw, 78px); }
+.command-intro, .room-intro { margin-bottom: 28px; }
+.command-intro h1, .room-intro h1 { font-size: clamp(42px, 5.8vw, 78px); letter-spacing: -.085em; }
+.composer, .room-panel { border-radius: var(--ui-radius-xl); }
+.composer { padding: clamp(22px, 3vw, 34px); }
+.room-layout { gap: 20px; }
+.room-context { gap: 16px; }
+.context-card { border-radius: var(--ui-radius-lg); }
+.room-header, .context-heading, .settings-panel-header, .analyst-panel-head { border-bottom-color: var(--ui-line); }
+.room-feed { background: linear-gradient(180deg, rgba(5, 10, 26, .18), rgba(5, 10, 26, .42)); }
+.room-message, .workroom-message { transition: transform 180ms var(--ui-ease), background 180ms var(--ui-ease), border-color 180ms var(--ui-ease); }
+.room-message:hover, .workroom-message:hover { transform: translateX(3px); background: rgba(126, 232, 255, .045); border-color: rgba(126, 232, 255, .18); }
+.room-composer, .clean-room-composer { border-color: rgba(126, 232, 255, .22); background: linear-gradient(145deg, rgba(28, 52, 102, .78), rgba(10, 18, 42, .88)); }
+.run-button, .conversation-form button { min-height: 46px; border-radius: 14px; }
+
+/* Settings, analyst, and employee workspaces */
+.settings-app-shell, .analyst-shell { grid-template-columns: 238px minmax(0, 1fr); }
+.settings-wrap, .analyst-wrap, .employee-wrap { width: min(100% - 76px, 1320px); }
+.settings-topbar, .analyst-topbar { min-height: 76px; border-bottom-color: var(--ui-line); background: rgba(7, 12, 28, .66); }
+.settings-panels, .analyst-panel, .employee-panel { gap: 18px; }
+.settings-card, .settings-panel, .analyst-panel, .employee-panel { border-radius: var(--ui-radius-lg); }
+.plan-card, .connection-card, .agent-card, .employee-card, .tool-card, .chart-card { border-radius: 17px; transition: transform 220ms var(--ui-ease), border-color 220ms var(--ui-ease), box-shadow 220ms var(--ui-ease); }
+.plan-card:hover, .connection-card:hover, .agent-card:hover, .employee-card:hover, .tool-card:hover, .chart-card:hover { transform: translateY(-4px); border-color: rgba(126, 232, 255, .28); box-shadow: 0 24px 58px rgba(0, 0, 0, .22), inset 0 1px 0 rgba(255, 255, 255, .12); }
+
+/* Form controls and status chips */
+input, select, textarea { color-scheme: dark; }
+input, select, textarea, .input-shell textarea, .conversation-form textarea { border-radius: 14px; }
+input:hover, select:hover, textarea:hover { border-color: rgba(206, 226, 255, .28); }
+.badge, .status-chip, .live-pill, .secure-tag, .pending-label, .task-status-pill { border-radius: 999px; }
+
+/* Responsive reimplementation */
+@media (max-width: 980px) {
+  .hero { grid-template-columns: 1fr; padding-top: 72px; }
+  .hero-stage { min-height: 450px; }
+  .section-intro, .connectors-wrap { grid-template-columns: 1fr; gap: 34px; }
+  .app-shell, .settings-app-shell, .analyst-shell { grid-template-columns: 1fr; }
+  .side-rail { position: fixed; inset: 0 auto 0 0; width: min(300px, 86vw); transform: translateX(-104%); transition: transform 280ms var(--ui-ease); box-shadow: 24px 0 70px rgba(0, 0, 0, .35); }
+  .side-rail.is-open { transform: translateX(0); }
+  .menu-button { display: inline-grid; place-items: center; }
+  .command-wrap, .room-wrap, .settings-wrap, .analyst-wrap, .employee-wrap { width: min(100% - 40px, 860px); }
+}
+@media (max-width: 720px) {
+  .top .wrap, .wrap { width: min(100% - 32px, 680px); }
+  .top .nav, .nav-row { min-height: 68px; }
+  .nav-links { gap: 13px; font-size: 11px; }
+  .nav-links .nav-status { display: none; }
+  .hero { padding-top: 58px; padding-bottom: 102px; }
+  .hero h1 { font-size: clamp(46px, 14vw, 68px); }
+  .hero-copy { font-size: 15px; }
+  .hero-stage { min-height: 370px; }
+  .route-card { width: min(100%, 400px); }
+  .command-preview { right: -14px; bottom: 0; width: 205px; }
+  .metric-row { grid-template-columns: repeat(2, 1fr); }
+  .metric:nth-child(2) { border-right: 0; }
+  .how-grid, .connector-grid, .surface-grid { grid-template-columns: 1fr; }
+  .surface-body { grid-template-columns: 1fr; }
+  .surface-nav { display: none; }
+  .surface-content { padding: 20px; }
+  .command-wrap, .room-wrap, .settings-wrap, .analyst-wrap, .employee-wrap { width: min(100% - 28px, 680px); padding-top: 32px; }
+  .app-topbar { height: 64px; padding-inline: 14px; }
+  .workspace-name small, .top-actions .settings-link { display: none; }
+  .top-actions { gap: 8px; }
+  .room-layout { grid-template-columns: 1fr; }
+  .room-context { order: 2; }
+  .input-shell { grid-template-columns: 1fr; }
+  .run-button { width: 100%; }
+  .composer-foot, .composer-hint { flex-wrap: wrap; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .how-card:hover, .room-message:hover, .workroom-message:hover, .plan-card:hover, .connection-card:hover, .agent-card:hover, .employee-card:hover, .tool-card:hover, .chart-card:hover { transform: none; }
+}
