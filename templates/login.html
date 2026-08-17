@@ -111,19 +111,33 @@
       showError(error?.message || "Google sign-in could not be completed.");
     }
 
+    function authErrorMessage(error) {
+      const code = error?.code || "";
+      if (code === "auth/unauthorized-domain") {
+        return "This domain is not authorized for Google sign-in. Add mycaveworkers.ai.studio in Firebase Authentication settings.";
+      }
+      if (code === "auth/popup-blocked" || code === "auth/popup-closed-by-user") {
+        return "The Google sign-in window was blocked or closed. Please allow pop-ups for this site and try again.";
+      }
+      if (code === "auth/operation-not-supported-in-this-environment") {
+        return "Google sign-in is not supported in this browser context. Open CaveWorkers in a normal browser tab and try again.";
+      }
+      if (code === "auth/operation-not-allowed") {
+        return "Google sign-in is not enabled in the CaveWorkers Firebase project.";
+      }
+      return error?.message || "Google sign-in could not be completed. Please try again.";
+    }
+
     loginBtn.addEventListener("click", async () => {
       errorDiv.style.display = "none";
       loginBtn.disabled = true;
-      loginBtn.innerHTML = '<span>Signing in securely...</span>';
+      loginBtn.innerHTML = '<span>Opening Google sign-in...</span>';
       try {
-        const result = await signInWithPopup(auth, provider);
-        await handleGoogleResult(result);
+        // Redirect avoids popup blockers and returns through getRedirectResult()
+        // after Google account selection.
+        await signInWithRedirect(auth, provider);
       } catch (error) {
-        if (error?.code === "auth/popup-blocked") {
-          await signInWithRedirect(auth, provider);
-          return;
-        }
-        showError(error?.message || "Google sign-in could not be completed.");
+        showError(authErrorMessage(error));
       }
     });
   </script>
