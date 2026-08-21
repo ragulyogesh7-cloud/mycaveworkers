@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trust Center · Caveworkers</title>
+  <link rel="stylesheet" href="/static/motion.css">
+  <link rel="stylesheet" href="/static/ui-reimplementation.css">
+  <style>
+    .trust-shell { max-width: 1160px; margin: 0 auto; padding: 34px 22px 80px; }
+    .trust-nav { display:flex; align-items:center; justify-content:space-between; gap:24px; margin-bottom:56px; }
+    .trust-brand { color:inherit; text-decoration:none; font-weight:800; letter-spacing:.04em; }
+    .trust-brand span { color:#77d4ff; }
+    .trust-nav-links { display:flex; gap:18px; flex-wrap:wrap; }
+    .trust-nav-links a { color:rgba(235,244,255,.78); text-decoration:none; }
+    .trust-hero { max-width:850px; margin-bottom:36px; }
+    .trust-hero h1 { font-size:clamp(2.4rem, 7vw, 5.5rem); line-height:.98; margin:12px 0 20px; }
+    .trust-hero p { color:rgba(226,239,255,.72); font-size:1.15rem; line-height:1.7; }
+    .trust-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:18px; }
+    .trust-card { padding:26px; }
+    .trust-card h2 { margin:0 0 12px; font-size:1.15rem; }
+    .trust-card p, .trust-card li { color:rgba(226,239,255,.72); line-height:1.7; }
+    .trust-card ul { padding-left:20px; margin:10px 0 0; }
+    .trust-wide { grid-column:1/-1; }
+    .trust-meta { color:rgba(226,239,255,.5); font-size:.88rem; }
+    .trust-cta { display:flex; gap:12px; flex-wrap:wrap; margin-top:22px; }
+    .trust-cta a { display:inline-flex; padding:12px 16px; border-radius:14px; background:rgba(119,212,255,.15); border:1px solid rgba(119,212,255,.35); color:#eaf7ff; text-decoration:none; }
+    @media (max-width:760px) { .trust-grid { grid-template-columns:1fr; } .trust-wide { grid-column:auto; } .trust-nav { align-items:flex-start; flex-direction:column; } }
+  </style>
+</head>
+<body class="app-body">
+  <div class="ambient-stage" aria-hidden="true"></div>
+  <main class="trust-shell">
+    <nav class="trust-nav" aria-label="Trust center navigation">
+      <a class="trust-brand" href="/">CAVE<span>WORKERS</span></a>
+      <div class="trust-nav-links"><a href="/trust#security">Security</a><a href="/trust#compliance">Compliance</a><a href="/trust#subprocessors">Subprocessors</a><a href="/login">Sign in</a></div>
+    </nav>
+    <section class="trust-hero">
+      <p class="panel-kicker">TRUST CENTER · LAST UPDATED AUGUST 2026</p>
+      <h1>Built to make AI work accountable.</h1>
+      <p>Caveworkers is a supervised AI workforce platform. Tenant boundaries, role-based access, connector grants, approval gates, audit events, usage controls, and prompt-safety checks are part of the product’s execution path—not promises added after the fact.</p>
+      <div class="trust-cta"><a href="mailto:security@caveworkers.com">Contact security</a><a href="/privacy">Read privacy policy</a></div>
+    </section>
+    <section class="trust-grid">
+      <article class="trust-card glass" id="security"><h2>Security overview</h2><p>Workspace records are scoped by tenant identifier throughout the application. Administrative actions use owner/admin/member RBAC. Connector credentials are encrypted before persistence, OAuth expiry and revocation are tracked, and write-capable actions can require explicit approval.</p><ul><li>Firebase Authentication and Firestore-backed persistence</li><li>HTTPS transport through the deployment platform</li><li>Tenant-scoped audit events and idempotent queue jobs</li><li>Prompt-injection classifier before connector or web actions</li><li>CSRF protection, request correlation, and operational redaction</li></ul></article>
+      <article class="trust-card glass" id="compliance"><h2>Compliance posture</h2><p>Caveworkers provides account export and scheduled workspace erasure controls. Customers remain responsible for configuring their connectors, selecting lawful processing purposes, and managing their own end-user notices and retention requirements.</p><p><strong>SOC 2:</strong> not currently certified. A formal audit is a future workstream. Caveworkers does not represent the current alpha infrastructure as SOC 2 compliant.</p><p><strong>GDPR:</strong> export and deletion workflows are implemented in the product; legal basis, DPA execution, regional residency, and subprocessors must be reviewed for each customer deployment.</p></article>
+      <article class="trust-card glass" id="subprocessors"><h2>Subprocessors and connected services</h2><p>The service may use the following categories depending on the tenant’s configuration:</p><ul><li>Google Cloud / Firebase for hosting, identity, and Firestore</li><li>Configured language-model providers for AI responses</li><li>Google Gmail, Drive, and Sheets when a tenant grants OAuth access</li><li>Tenant-selected MCP servers and connector providers</li><li>Cloud Run or the configured deployment platform for application execution</li></ul><p class="trust-meta">The active subprocessor list and regional processing details should be confirmed against the deployment’s environment configuration before enterprise contracting.</p></article>
+      <article class="trust-card glass" id="privacy"><h2>Customer data controls</h2><p>Workspace administrators can request a tenant-scoped JSON export. A deletion request immediately blocks operational actions, revokes locally stored connector credentials, and schedules a hard-delete cascade after the configured grace period. Audit records are anonymized during erasure where retention is required for security evidence.</p><p>Exports expire automatically. Contact support if a customer needs a formal DPA, retention schedule, or data-residency review.</p></article>
+      <article class="trust-card glass trust-wide" id="contact"><h2>Security contact</h2><p>Report suspected vulnerabilities, privacy incidents, access-control issues, or provider misconfiguration to <a href="mailto:security@caveworkers.com">security@caveworkers.com</a>. Do not include credentials, OAuth tokens, private keys, or confidential customer data in an initial report.</p><p class="trust-meta">This page is an operational overview, not legal advice or a certification statement. Privacy policy: <a href="/privacy">/privacy</a>. Terms: <a href="/terms">/terms</a>.</p></article>
+    </section>
+  </main>
+  <script src="/static/motion.js"></script>
+</body>
+</html>
+

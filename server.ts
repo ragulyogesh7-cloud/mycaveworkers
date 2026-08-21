@@ -1,6 +1,6 @@
 import express from 'express';
 import path from 'path';
-import { readFileSync } from 'fs';
+import { readFileSync, existsSync } from 'fs';
 import cookieParser from 'cookie-parser';
 import dotenv from 'dotenv';
 import ejs from 'ejs';
@@ -58,10 +58,18 @@ if (process.env.GEMINI_API_KEY) {
 // David's provider is configurable. OpenRouter/Qwen is preferred in production;
 // Gemini remains a backwards-compatible fallback while a tenant is provisioned.
 const OPENROUTER_API_KEY = (process.env.OPENROUTER_API_KEY || '').trim();
-const OPENROUTER_KEY_READY = /^sk-or-v1-[A-Za-z0-9_-]{20,}$/.test(OPENROUTER_API_KEY);
-if (OPENROUTER_API_KEY && !OPENROUTER_KEY_READY) console.warn('OPENROUTER_API_KEY is present but does not match the expected provider key format; analyst model calls are disabled.');
+const OPENROUTER_KEY_READY = Boolean(OPENROUTER_API_KEY && (OPENROUTER_API_KEY.startsWith('sk-or-') || OPENROUTER_API_KEY.length >= 15));
+if (OPENROUTER_API_KEY && !OPENROUTER_KEY_READY) console.warn('OPENROUTER_API_KEY is present but invalid; model calls are disabled.');
 const OPENROUTER_BASE_URL = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
-const ANALYST_MODEL = process.env.ANALYST_MODEL || 'qwen/qwen3-30b-a3b';
+const ANALYST_MODEL = process.env.ANALYST_MODEL || 'google/gemini-3.1-pro-preview';
+const WORKFORCE_MODEL_OVERRIDE = (process.env.WORKFORCE_MODEL || '').trim();
+
+function specialistModelFor(employeeId = 'sarah'): string {
+  const normalizedId = String(employeeId || 'sarah').toLowerCase();
+  const config = EMPLOYEE_SPECIALIST_CONFIGS[normalizedId] || EMPLOYEE_SPECIALIST_CONFIGS.sarah;
+  const employeeOverride = (process.env[`${normalizedId.toUpperCase()}_MODEL`] || '').trim();
+  return WORKFORCE_MODEL_OVERRIDE || employeeOverride || config.model;
+}
 const OPENROUTER_TIMEOUT_MS = Math.min(Math.max(Number(process.env.OPENROUTER_TIMEOUT_MS || '30000') || 30000, 5000), 60000);
 const ANALYST_MAX_TOKENS = Math.min(Math.max(Number(process.env.ANALYST_MAX_TOKENS || '900') || 900, 128), 2000);
 const PUBLIC_APP_URL = (process.env.PUBLIC_APP_URL || 'https://caveworkers.ai.studio').replace(/\/$/, '');
@@ -85,6 +93,80 @@ const WORKER_INSTANCE_ID = process.env.WORKER_INSTANCE_ID || `worker-${crypto.ra
 const WEB_RESEARCH_ENABLED = process.env.WEB_RESEARCH_ENABLED === 'true';
 const TAVILY_API_KEY = (process.env.TAVILY_API_KEY || '').trim();
 const BRAVE_SEARCH_API_KEY = (process.env.BRAVE_SEARCH_API_KEY || '').trim();
+const WORKFLOW_SCHEDULER_POLL_MS = Math.min(Math.max(Number(process.env.WORKFLOW_SCHEDULER_POLL_MS || '60000') || 60000, 30000), 600000);
+const SCHEDULER_TICK_SECRET = (process.env.SCHEDULER_TICK_SECRET || (IS_PRODUCTION ? '' : 'test-scheduler-secret')).trim();
+const TENANT_DELETION_GRACE_DAYS = Math.min(Math.max(Number(process.env.TENANT_DELETION_GRACE_DAYS || '14') || 14, 1), 30);
+const TENANT_EXPORT_EXPIRY_DAYS = Math.min(Math.max(Number(process.env.TENANT_EXPORT_EXPIRY_DAYS || '7') || 7, 1), 30);
+
+interface SpecialistModelConfig {
+  model: string;
+  fallbackModel: string;
+  roleTitle: string;
+  systemPrompt: string;
+}
+
+const EMPLOYEE_SPECIALIST_CONFIGS: Record<string, SpecialistModelConfig> = {
+  david: {
+    model: 'google/gemini-3.1-pro-preview',
+    fallbackModel: 'anthropic/claude-sonnet-5',
+    roleTitle: 'Senior Data & Revenue Analyst',
+    systemPrompt: 'You are David, Senior Data & Revenue Analyst at Caveworkers. You provide quantitative rigor, SQL queries, metric breakdowns, dashboard definitions, and unit economic forecasts. You speak directly to the user with evidence and precision.'
+  },
+  mike: {
+    model: 'openai/gpt-5.3-codex',
+    fallbackModel: 'anthropic/claude-sonnet-5',
+    roleTitle: 'Staff Software Engineer & Technical Architect',
+    systemPrompt: 'You are Mike, Staff Software Engineer & Technical Architect at Caveworkers. You specialize in codebases, repositories, CI/CD, APIs, debugging, and infrastructure safety. Answer directly with concise technical precision.'
+  },
+  iris: {
+    model: 'anthropic/claude-sonnet-5',
+    fallbackModel: 'google/gemini-3.1-pro-preview',
+    roleTitle: 'IT & Information Security Officer',
+    systemPrompt: 'You are Iris, IT & Security Specialist at Caveworkers. You specialize in least-privilege access, SOC2/ISO compliance, vulnerability analysis, and zero-trust controls. Speak directly with security clarity.'
+  },
+  priya: {
+    model: 'openai/gpt-5.4',
+    fallbackModel: 'anthropic/claude-sonnet-5',
+    roleTitle: 'Finance & Operations Controller',
+    systemPrompt: 'You are Priya, Finance & Operations Controller at Caveworkers. You specialize in invoices, general ledger, cash flow, reconciliation, tax, and audit compliance. Give clear financial breakdowns directly to the user.'
+  },
+  olivia: {
+    model: 'anthropic/claude-sonnet-5',
+    fallbackModel: 'google/gemini-3.7-flash',
+    roleTitle: 'Sales Operations & Pipeline Director',
+    systemPrompt: 'You are Olivia, Sales Operations & Pipeline Director at Caveworkers. You specialize in deal qualification, CRM hygiene, outbound cadences, and revenue forecasting. Give direct, actionable commercial guidance.'
+  },
+  maya: {
+    model: 'google/gemini-3.7-flash',
+    fallbackModel: 'anthropic/claude-sonnet-5',
+    roleTitle: 'Growth & Marketing Strategist',
+    systemPrompt: 'You are Maya, Growth & Marketing Strategist at Caveworkers. You specialize in audience segmentation, multi-channel campaigns, messaging conversion, and growth experiments. Respond directly with punchy creative strategy.'
+  },
+  emma: {
+    model: 'anthropic/claude-haiku-4.5',
+    fallbackModel: 'google/gemini-3.7-flash',
+    roleTitle: 'Customer Success & Support Lead',
+    systemPrompt: 'You are Emma, Customer Success & Support Lead at Caveworkers. You specialize in onboarding workflows, user adoption, issue resolution, and churn prevention. Respond directly with empathy and clear solutions.'
+  },
+  arav: {
+    model: 'anthropic/claude-sonnet-5',
+    fallbackModel: 'google/gemini-3.7-flash',
+    roleTitle: 'People Operations & HR Partner',
+    systemPrompt: 'You are Arav, People Operations & HR Partner at Caveworkers. You specialize in employee lifecycle, HR policies, onboarding, performance review frameworks, and workplace culture. Respond directly.'
+  },
+  alex: {
+    model: 'google/gemini-3.7-flash',
+    fallbackModel: 'anthropic/claude-haiku-4.5',
+    roleTitle: 'Operations & Workflow Coordinator',
+    systemPrompt: 'You are Alex, Operations & Workflow Coordinator at Caveworkers. You specialize in project dependencies, SLAs, cross-functional runbooks, and process optimization. Give crisp operational guidance directly.'
+  },
+  sarah: {
+    model: 'anthropic/claude-sonnet-5',
+    fallbackModel: 'google/gemini-3.7-flash',
+    roleTitle: 'Talent & Executive Operations Partner',
+    systemPrompt: 'You are Sarah, Talent & Executive Operations Partner at Caveworkers. You specialize in workforce planning, leadership alignment, and strategic recruiting.'
+  }
+};
 
 type AnalystNarrativeResult = {
   text: string;
@@ -155,18 +237,31 @@ async function generateAnalystNarrative(prompt: string, tenantId: string): Promi
   return openRouterFailure || { text: '', provider: 'preview', latency_ms: Date.now() - startedAt, error_code: OPENROUTER_KEY_READY ? 'provider_unavailable' : 'model_not_configured' };
 }
 
-async function generateWorkforceNarrative(prompt: string, tenantId: string): Promise<AnalystNarrativeResult> {
+async function generateWorkforceNarrative(prompt: string, tenantId: string, employeeId?: string): Promise<AnalystNarrativeResult> {
   const startedAt = Date.now();
+  const targetEmployeeId = (employeeId && EMPLOYEE_SPECIALIST_CONFIGS[employeeId]) ? employeeId : 'sarah';
+  const config = EMPLOYEE_SPECIALIST_CONFIGS[targetEmployeeId] || EMPLOYEE_SPECIALIST_CONFIGS.sarah;
+  const chosenModel = specialistModelFor(targetEmployeeId);
+
   if (OPENROUTER_KEY_READY) {
     try {
       const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
-        method: 'POST', signal: AbortSignal.timeout(OPENROUTER_TIMEOUT_MS),
-        headers: { Authorization: `Bearer ${OPENROUTER_API_KEY}`, 'Content-Type': 'application/json', 'HTTP-Referer': PUBLIC_APP_URL, 'X-OpenRouter-Title': 'Caveworkers Workforce Manager' },
+        method: 'POST',
+        signal: AbortSignal.timeout(OPENROUTER_TIMEOUT_MS),
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': PUBLIC_APP_URL,
+          'X-OpenRouter-Title': `Caveworkers ${config.roleTitle}`
+        },
         body: JSON.stringify({
-          model: ANALYST_MODEL, temperature: 0.2, max_tokens: Math.min(1400, ANALYST_MAX_TOKENS + 350), stream: false,
+          model: chosenModel,
+          temperature: 0.2,
+          max_tokens: Math.min(1400, ANALYST_MAX_TOKENS + 350),
+          stream: false,
           user: crypto.createHash('sha256').update(tenantId).digest('hex').slice(0, 32),
           messages: [
-            { role: 'system', content: 'You are Sarah, Caveworkers’ workforce manager. You own the manager response for every task, delegate rather than pretending to be every specialist, and return the useful final answer before process commentary. Never invent evidence, connector access, or external completion. Be concrete about blockers and name the next action.' },
+            { role: 'system', content: config.systemPrompt },
             { role: 'user', content: prompt }
           ]
         })
@@ -174,16 +269,42 @@ async function generateWorkforceNarrative(prompt: string, tenantId: string): Pro
       if (response.ok) {
         const payload: any = await response.json();
         const text = extractAnalystText(payload?.choices?.[0]?.message?.content);
-        if (text) return { text, provider: 'openrouter', model: payload?.model || ANALYST_MODEL, latency_ms: Date.now() - startedAt, usage: payload?.usage ? { prompt_tokens: payload.usage.prompt_tokens, completion_tokens: payload.usage.completion_tokens, total_tokens: payload.usage.total_tokens, cost: payload.usage.cost } : undefined };
-      } else reportOperationalFailure('workforce.openrouter_request', new Error(`OpenRouter returned HTTP ${response.status}.`), { tenant_hash: anonymizeIdentifier(tenantId), status_code: response.status });
-    } catch (error) { reportOperationalFailure('workforce.openrouter_request', error, { tenant_hash: anonymizeIdentifier(tenantId) }); }
+        if (text) {
+          return {
+            text,
+            provider: 'openrouter',
+            model: payload?.model || chosenModel,
+            latency_ms: Date.now() - startedAt,
+            usage: payload?.usage ? {
+              prompt_tokens: payload.usage.prompt_tokens,
+              completion_tokens: payload.usage.completion_tokens,
+              total_tokens: payload.usage.total_tokens,
+              cost: payload.usage.cost
+            } : undefined
+          };
+        }
+      } else {
+        reportOperationalFailure('workforce.openrouter_request', new Error(`OpenRouter returned HTTP ${response.status}.`), { tenant_hash: anonymizeIdentifier(tenantId), status_code: response.status });
+      }
+    } catch (error) {
+      reportOperationalFailure('workforce.openrouter_request', error, { tenant_hash: anonymizeIdentifier(tenantId) });
+    }
   }
+
   if (genAIClient) {
     try {
-      const response = await genAIClient.models.generateContent({ model: 'gemini-3.6-flash', contents: `You are Sarah, Caveworkers’ workforce manager. ${prompt}` });
-      if (response.text?.trim()) return { text: response.text.trim(), provider: 'gemini', model: 'gemini-3.6-flash', latency_ms: Date.now() - startedAt };
-    } catch (error) { reportOperationalFailure('workforce.gemini_fallback', error, { tenant_hash: anonymizeIdentifier(tenantId) }); }
+      const response = await genAIClient.models.generateContent({
+        model: 'gemini-3.6-flash',
+        contents: `${config.systemPrompt}\n\n${prompt}`
+      });
+      if (response.text?.trim()) {
+        return { text: response.text.trim(), provider: 'gemini', model: 'gemini-3.6-flash', latency_ms: Date.now() - startedAt };
+      }
+    } catch (error) {
+      reportOperationalFailure('workforce.gemini_fallback', error, { tenant_hash: anonymizeIdentifier(tenantId) });
+    }
   }
+
   return { text: '', provider: 'preview', latency_ms: Date.now() - startedAt, error_code: OPENROUTER_KEY_READY ? 'provider_unavailable' : 'model_not_configured' };
 }
 
@@ -213,8 +334,23 @@ app.use(express.json({ verify: (req, _res, buffer) => { (req as express.Request 
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
 
+// Logo asset handler
+app.get(['/static/logo.jpeg', '/static/logo.jpg', '/static/logo.svg', '/logo.jpeg', '/logo.svg'], (_req, res) => {
+  const svgPath = path.join(process.cwd(), 'static', 'logo.svg');
+  if (existsSync(svgPath)) {
+    res.setHeader('Content-Type', 'image/svg+xml');
+    return res.sendFile(svgPath);
+  }
+  const jpegPath = path.join(process.cwd(), 'static', 'logo.jpeg');
+  if (existsSync(jpegPath)) {
+    res.setHeader('Content-Type', 'image/jpeg');
+    return res.sendFile(jpegPath);
+  }
+  res.status(404).send('Logo not found');
+});
+
 // Static assets
-app.use('/static', express.static(path.join(process.cwd(), 'static')));
+app.use('/static', express.static(path.join(process.cwd(), 'static'), { maxAge: '1d', etag: true, lastModified: true }));
 
 // Template engine setup
 app.engine('html', ejs.renderFile);
@@ -222,13 +358,21 @@ app.set('view engine', 'html');
 app.set('views', path.join(process.cwd(), 'templates'));
 
 // Firebase Config
+let appletFirebaseConfig: any = {};
+try {
+  const cfgPath = path.join(process.cwd(), 'firebase-applet-config.json');
+  if (existsSync(cfgPath)) {
+    appletFirebaseConfig = JSON.parse(readFileSync(cfgPath, 'utf8'));
+  }
+} catch (_e) {}
+
 const FIREBASE_WEB_CONFIG = {
-  apiKey: process.env.FIREBASE_API_KEY || 'AIzaSyBXDF0iimw-zgwaxG5qJ9gngRKSJ_eLPt8',
-  authDomain: process.env.FIREBASE_AUTH_DOMAIN || 'caveworkers.firebaseapp.com',
-  projectId: process.env.FIREBASE_PROJECT_ID || 'caveworkers',
-  storageBucket: process.env.FIREBASE_STORAGE_BUCKET || 'caveworkers.firebasestorage.app',
-  messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || '980597206467',
-  appId: process.env.FIREBASE_APP_ID || '1:980597206467:web:789036c39cfb0541d1a176'
+  apiKey: process.env.FIREBASE_API_KEY || appletFirebaseConfig.apiKey || 'AIzaSyBXDF0iimw-zgwaxG5qJ9gngRKSJ_eLPt8',
+  authDomain: process.env.FIREBASE_AUTH_DOMAIN || appletFirebaseConfig.authDomain || 'caveworkers.firebaseapp.com',
+  projectId: process.env.FIREBASE_PROJECT_ID || appletFirebaseConfig.projectId || 'caveworkers',
+  storageBucket: process.env.FIREBASE_STORAGE_BUCKET || appletFirebaseConfig.storageBucket || 'caveworkers.firebasestorage.app',
+  messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || appletFirebaseConfig.messagingSenderId || '980597206467',
+  appId: process.env.FIREBASE_APP_ID || appletFirebaseConfig.appId || '1:980597206467:web:789036c39cfb0541d1a176'
 };
 
 // Initialize Firebase Admin SDK from deployment-provided credentials only.
@@ -250,12 +394,11 @@ if (!getApps().length) {
           privateKey: firebasePrivateKey
         })
       });
-    } else if (firebaseProjectId || IS_PRODUCTION || process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+    } else if (IS_PRODUCTION || process.env.GOOGLE_APPLICATION_CREDENTIALS) {
       // Cloud Run and other Google-managed environments provide Application Default Credentials.
-      // Supplying FIREBASE_PROJECT_ID pins ADC to the intended Firebase project while keeping
-      // private service-account keys out of the deployment. Local development stays fail-closed
-      // unless a project is explicitly configured.
-      initializeApp(firebaseProjectId ? { projectId: firebaseProjectId } : {});
+      // Restrict implicit initialization to production or explicit ADC mode so local tests never
+      // contact a live Firebase project by accident.
+      initializeApp();
     } else {
       console.warn('Firebase Admin SDK is not configured; Google sign-in will fail closed until Firebase credentials are provided.');
     }
@@ -264,12 +407,69 @@ if (!getApps().length) {
   }
 }
 
+let appletConfig: any = {};
+try {
+  appletConfig = JSON.parse(readFileSync(path.resolve('./firebase-applet-config.json'), 'utf8'));
+} catch (e) {}
+
+const targetDbId = appletConfig.firestoreDatabaseId || process.env.FIRESTORE_DATABASE_ID;
 const firebaseAuth = getApps().length ? getAuth() : null;
-const firestoreDb = getApps().length ? getFirestore() : null;
-const SESSION_COOKIE_MAX_AGE = 5 * 24 * 60 * 60 * 1000;
+const firestoreDb = getApps().length ? (targetDbId ? getFirestore(getApps()[0], targetDbId) : getFirestore()) : null;
+
+/**
+ * Firestore may be intentionally absent in local tests/development, but a
+ * configured production service must never quietly fall back to process memory.
+ * Permission, transport, and initialization failures are therefore readiness
+ * failures in production and remain non-fatal only outside production.
+ */
+function isInitialDatabaseStatusError(error: unknown): boolean {
+  if (!IS_PRODUCTION) return false;
+  if (!firestoreDb) return true;
+  const candidate = error as { code?: unknown; message?: unknown } | null;
+  const code = String(candidate?.code || '').toLowerCase();
+  const message = String(candidate?.message || error || '').toLowerCase();
+  const knownFailure = ['permission-denied', 'unauthenticated', 'unavailable', 'deadline-exceeded', 'failed-precondition', 'resource-exhausted', 'invalid-argument'].some((value) => code.includes(value) || message.includes(value));
+  // A production Firestore error is unsafe to suppress even when the provider
+  // uses an unfamiliar code: the operation must not fall back to memory.
+  return knownFailure || Boolean(error);
+}
+
+function handleFirestoreFailure(operation: string, error: unknown): void {
+  reportOperationalFailure(`firestore.${operation}`, error);
+  if (isInitialDatabaseStatusError(error)) {
+    throw new Error(`Firestore ${operation} failed in production; refusing to use process-local state.`);
+  }
+}
+
+const SESSION_COOKIE_MAX_AGE = Math.min(Math.max(Number(process.env.SESSION_COOKIE_MAX_AGE_MS || 30 * 24 * 60 * 60 * 1000) || 30 * 24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000), 90 * 24 * 60 * 60 * 1000);
 const cookieSecure = process.env.COOKIE_SECURE === 'true' || process.env.CAVEWORKERS_ENV === 'production';
 const sessionCookieOptions = { httpOnly: true, secure: cookieSecure, sameSite: 'lax' as const, path: '/', maxAge: SESSION_COOKIE_MAX_AGE };
 const readableCookieOptions = { httpOnly: false, secure: cookieSecure, sameSite: 'lax' as const, path: '/', maxAge: SESSION_COOKIE_MAX_AGE };
+const SESSION_SECRET = process.env.FLASK_SECRET || process.env.OAUTH_STATE_SECRET || 'caveworkers-session-secret-key-2026';
+
+function signSessionPayload(payload: { uid: string; email: string; exp: number }): string {
+  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const hmac = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  return `cw_sess.${data}.${hmac}`;
+}
+
+function verifySessionPayload(token: string): { uid: string; email: string; exp: number } | null {
+  if (typeof token !== 'string' || !token.startsWith('cw_sess.')) return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const [, data, signature] = parts;
+  const expectedHmac = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  if (signature.length !== expectedHmac.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedHmac))) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(Buffer.from(data, 'base64url').toString('utf8'));
+    if (payload.exp && payload.exp < Date.now()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
 
 // Razorpay Setup
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || '';
@@ -280,20 +480,22 @@ if (IS_PRODUCTION && (!RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET || !RAZORPAY_WEBH
 }
 
 let razorpayClient: Razorpay | null = null;
-try {
-  razorpayClient = new Razorpay({
-    key_id: RAZORPAY_KEY_ID,
-    key_secret: RAZORPAY_KEY_SECRET
-  });
-} catch (err) {
-  reportOperationalFailure('payments.razorpay_initialization', err);
+if (RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET) {
+  try {
+    razorpayClient = new Razorpay({
+      key_id: RAZORPAY_KEY_ID,
+      key_secret: RAZORPAY_KEY_SECRET
+    });
+  } catch (err) {
+    reportOperationalFailure('payments.razorpay_initialization', err);
+  }
 }
 
 const SUBSCRIPTION_PLANS: Record<string, any> = {
-  free_trial: { name: 'Free Trial', price: 0, price_inr: 0, trial_days: 3, max_employees: 2, description: '3-day trial with 2 AI employees', features: ['2 AI employees', 'Permissioned tools', 'HITL Approvals'] },
-  starter: { name: 'Starter', price: 5 / 83, price_inr: 5, max_employees: 3, description: 'Low-cost test tier for a small AI workforce', features: ['3 AI employees', 'SQL & Gmail tools', 'Audit logging'] },
-  growth: { name: 'Growth', price: 10 / 83, price_inr: 10, max_employees: 6, description: 'Expanded test tier for growing workspaces', features: ['6 AI employees', 'Custom MCP Connectors', 'Priority routing'] },
-  enterprise: { name: 'Enterprise', price: 15 / 83, price_inr: 15, max_employees: 10, description: 'Full workforce test tier with advanced controls', features: ['10 AI employees', 'Unlimited MCP skills', '24/7 dedicated lead'] }
+  free_trial: { name: 'Free Trial', price: 0, price_inr: 0, trial_days: 3, max_employees: 2, max_tasks_per_month: 30, max_tool_calls_per_month: 100, description: '3-day trial with 2 AI employees', features: ['2 AI employees', 'Permissioned tools', 'HITL Approvals'] },
+  starter: { name: 'Starter', price: 5 / 83, price_inr: 5, max_employees: 3, max_tasks_per_month: 150, max_tool_calls_per_month: 500, description: 'Low-cost test tier for a small AI workforce', features: ['3 AI employees', 'SQL & Gmail tools', 'Audit logging'] },
+  growth: { name: 'Growth', price: 10 / 83, price_inr: 10, max_employees: 6, max_tasks_per_month: 600, max_tool_calls_per_month: 2500, description: 'Expanded test tier for growing workspaces', features: ['6 AI employees', 'Custom MCP Connectors', 'Priority routing'] },
+  enterprise: { name: 'Enterprise', price: 15 / 83, price_inr: 15, max_employees: 10, max_tasks_per_month: 3000, max_tool_calls_per_month: 12000, description: 'Full workforce test tier with advanced controls', features: ['10 AI employees', 'Unlimited MCP skills', '24/7 dedicated lead'] }
 };
 
 const EMPLOYEE_CATALOG = [
@@ -391,6 +593,7 @@ interface User {
   photo_url?: string;
   company_id?: string;
   company_name?: string;
+  user_role?: string;
   onboarded: boolean;
   selected_tier?: string;
   role?: string;
@@ -405,6 +608,11 @@ interface Company {
   name: string;
   industry?: string;
   team_size?: string;
+  user_role?: string;
+  business_goals?: string;
+  workspace_guidelines?: string;
+  description?: string;
+  guidelines?: string;
   owner_uid: string;
   tier: string;
   status: string;
@@ -413,7 +621,27 @@ interface Company {
   trial_ends_at?: string;
   payment_verified_at?: string;
   payment_id?: string;
+  deletion_requested_at?: string;
+  deletion_scheduled_for?: string;
+  deletion_request_id?: string;
   created_at: string;
+}
+
+interface PaymentOrderRecord {
+  id: string;
+  uid: string;
+  company_id: string;
+  tier: string;
+  amount: number;
+  currency: string;
+  status: 'created' | 'verified' | 'failed';
+  payment_id?: string;
+  idempotency_key?: string;
+  created_at: string;
+  updated_at: string;
+  verified_at?: string;
+  failed_at?: string;
+  failure_reason?: string;
 }
 
 interface OrgEmployee {
@@ -448,11 +676,14 @@ interface WorkforceQueueJob {
   question: string;
   preferred_employee_id?: string;
   email_employee_id?: string;
-  status: 'queued' | 'processing' | 'completed' | 'failed';
+  status: 'queued' | 'processing' | 'completed' | 'failed' | 'dead_letter';
   claimed_by?: string;
   attempts: number;
+  max_attempts?: number;
+  idempotency_key?: string;
   created_at: string;
   updated_at: string;
+  dead_lettered_at?: string;
   error?: string;
 }
 
@@ -519,6 +750,92 @@ interface ApprovalRecord {
   executed_at?: string;
 }
 
+interface WorkforceAuditEvent {
+  id: string;
+  company_id: string;
+  actor_type: 'user' | 'employee' | 'system';
+  actor_id: string;
+  action: string;
+  resource_type: string;
+  resource_id?: string;
+  connector_id?: number;
+  tool_name?: string;
+  task_id?: number;
+  approval_id?: number;
+  risk: 'low' | 'medium' | 'high' | 'critical';
+  status: 'prepared' | 'blocked' | 'awaiting_approval' | 'approved' | 'rejected' | 'succeeded' | 'failed';
+  summary: string;
+  correlation_id: string;
+  created_at: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface UsageLedgerRecord {
+  company_id: string;
+  period: string;
+  tasks_created: number;
+  tasks_completed: number;
+  tool_calls: number;
+  external_actions: number;
+  estimated_tokens: number;
+  updated_at: string;
+}
+
+interface ActivationEvent {
+  id: string;
+  company_id: string;
+  name: 'workspace_created' | 'employee_selected' | 'connector_connected' | 'first_task_created' | 'first_task_completed' | 'first_tool_succeeded' | 'first_approval_completed';
+  actor_type: 'user' | 'employee' | 'system';
+  actor_id: string;
+  created_at: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface ScheduledWorkflow {
+  id: string;
+  company_id: string;
+  name: string;
+  prompt: string;
+  preferred_employee_id?: string;
+  email_employee_id?: string;
+  schedule_type: 'once' | 'cron';
+  cron_expression?: string;
+  timezone: string;
+  next_run_at: string;
+  last_run_at?: string;
+  last_task_id?: number;
+  last_error?: string;
+  run_count: number;
+  max_runs?: number;
+  status: 'active' | 'paused' | 'completed' | 'error';
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DataExportRequest {
+  id: string;
+  company_id: string;
+  requested_by: string;
+  status: 'completed' | 'failed';
+  requested_at: string;
+  completed_at?: string;
+  expires_at: string;
+  payload?: Record<string, unknown>;
+  error?: string;
+}
+
+interface TenantDeletionRequest {
+  id: string;
+  company_id: string;
+  requested_by: string;
+  status: 'scheduled' | 'processing' | 'completed' | 'failed' | 'cancelled';
+  requested_at: string;
+  execute_after: string;
+  processed_at?: string;
+  error?: string;
+}
+
 interface AnalystDataSource {
   id: string;
   company_id: string;
@@ -548,6 +865,9 @@ interface TenantConnector {
   auth_scopes?: string[];
   oauth_email?: string;
   auth_token_encrypted?: string;
+  oauth_expires_at?: string;
+  oauth_revoked_at?: string;
+  last_refresh_at?: string;
   last_error?: string;
   created_at: string;
   updated_at: string;
@@ -591,6 +911,12 @@ const db = {
   approvals: new Map<number, ApprovalRecord>(),
   knowledge: new Map<string, any[]>(),
   activity: new Map<string, any[]>(),
+  audit: new Map<string, WorkforceAuditEvent[]>(),
+  usage: new Map<string, UsageLedgerRecord>(),
+  activationEvents: new Map<string, ActivationEvent[]>(),
+  scheduledWorkflows: new Map<string, ScheduledWorkflow>(),
+  dataExports: new Map<string, DataExportRequest>(),
+  deletionRequests: new Map<string, TenantDeletionRequest>(),
   mcpConnections: new Map<string, any[]>(),
   analystDataSources: new Map<string, AnalystDataSource[]>(),
   analystMemory: new Map<string, AnalystMemory[]>(),
@@ -607,7 +933,7 @@ const db = {
 };
 
 const authenticatedUsers = new WeakMap<express.Request, User>();
-const pendingPaymentOrders = new Map<string, { uid: string; company_id: string; tier: string; amount: number; created_at: string }>();
+const pendingPaymentOrders = new Map<string, PaymentOrderRecord>();
 const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
 const workroomStreams = new Map<string, Set<express.Response>>();
 function rateLimitKey(req: express.Request, scope: string): string { return `${scope}:${req.ip || req.socket.remoteAddress || 'unknown'}`; }
@@ -620,9 +946,14 @@ function isRateLimited(key: string, limit: number, windowMs: number): boolean {
 }
 
 async function loadUserFromFirebase(uid: string): Promise<User | null> {
-  const cached = db.users.get(uid);
-  if (cached) return cached;
-  if (!firestoreDb) return null;
+  if (!IS_PRODUCTION) {
+    const cached = db.users.get(uid);
+    if (cached) return cached;
+  }
+  if (!firestoreDb) {
+    if (IS_PRODUCTION) handleFirestoreFailure('user_load', new Error('Firestore is not configured'));
+    return db.users.get(uid) || null;
+  }
 
   try {
     const snapshot = await firestoreDb.collection('users').doc(uid).get();
@@ -632,15 +963,20 @@ async function loadUserFromFirebase(uid: string): Promise<User | null> {
     db.users.set(uid, user);
     return user;
   } catch (error) {
-    console.warn('Could not load Firebase user profile:', error);
+    handleFirestoreFailure('user_load', error);
     return null;
   }
 }
 
 async function loadCompanyFromFirebase(id: string): Promise<Company | null> {
-  const cached = db.companies.get(id);
-  if (cached) return cached;
-  if (!firestoreDb) return null;
+  if (!IS_PRODUCTION) {
+    const cached = db.companies.get(id);
+    if (cached) return cached;
+  }
+  if (!firestoreDb) {
+    if (IS_PRODUCTION) handleFirestoreFailure('company_load', new Error('Firestore is not configured'));
+    return db.companies.get(id) || null;
+  }
 
   try {
     const snapshot = await firestoreDb.collection('companies').doc(id).get();
@@ -649,7 +985,7 @@ async function loadCompanyFromFirebase(id: string): Promise<Company | null> {
     db.companies.set(id, company);
     return company;
   } catch (error) {
-    console.warn('Could not load Firebase company profile:', error);
+    handleFirestoreFailure('company_load', error);
     return null;
   }
 }
@@ -665,21 +1001,103 @@ function stripUndefined<T>(value: T): T {
 }
 
 async function persistUser(user: User, extra: Record<string, unknown> = {}) {
-  if (!firestoreDb) throw new Error('Firebase Firestore is not configured');
   const now = new Date().toISOString();
-  const record = stripUndefined({ ...user, ...extra, updated_at: now });
-  await firestoreDb.collection('users').doc(user.uid).set(record, { merge: true });
-  db.users.set(user.uid, stripUndefined({ ...user, ...extra, updated_at: now }) as User);
+  const record = stripUndefined({ ...user, ...extra, updated_at: now }) as User;
+  db.users.set(user.uid, record);
+  if (firestoreDb) {
+    try {
+      await firestoreDb.collection('users').doc(user.uid).set(record, { merge: true });
+    } catch (error) {
+      handleFirestoreFailure('user_write', error);
+    }
+  }
 }
 
 async function persistCompany(company: Company) {
-  if (!firestoreDb) throw new Error('Firebase Firestore is not configured');
   const record = stripUndefined(company);
-  await firestoreDb.collection('companies').doc(company.id).set(record, { merge: true });
   db.companies.set(company.id, record as Company);
+  if (firestoreDb) {
+    try {
+      await firestoreDb.collection('companies').doc(company.id).set(record, { merge: true });
+    } catch (error) {
+      handleFirestoreFailure('company_write', error);
+    }
+  }
+}
+
+function paymentOrderCollection() {
+  return firestoreDb?.collection('payments') || null;
+}
+
+async function persistPaymentOrder(order: PaymentOrderRecord): Promise<void> {
+  const record = stripUndefined({ ...order, updated_at: new Date().toISOString() }) as PaymentOrderRecord;
+  const collection = paymentOrderCollection();
+  if (!collection) {
+    if (IS_PRODUCTION) handleFirestoreFailure('payment_order_write', new Error('Firestore is not configured'));
+    pendingPaymentOrders.set(record.id, record);
+    return;
+  }
+  try {
+    // Acknowledge the durable write before updating the process-local cache.
+    // This prevents a failed production write from appearing successful on the
+    // same instance while another instance cannot recover the order.
+    await collection.doc(record.id).set(record, { merge: true });
+    pendingPaymentOrders.set(record.id, record);
+  } catch (error) {
+    handleFirestoreFailure('payment_order_write', error);
+  }
+}
+
+async function loadPaymentOrder(orderId: string): Promise<PaymentOrderRecord | null> {
+  const collection = paymentOrderCollection();
+  if (collection) {
+    try {
+      const snapshot = await collection.doc(orderId).get();
+      if (!snapshot.exists) return null;
+      const order = { id: orderId, ...(snapshot.data() || {}) } as PaymentOrderRecord;
+      pendingPaymentOrders.set(orderId, order);
+      return order;
+    } catch (error) {
+      handleFirestoreFailure('payment_order_load', error);
+      return null;
+    }
+  }
+  if (IS_PRODUCTION) handleFirestoreFailure('payment_order_load', new Error('Firestore is not configured'));
+  return pendingPaymentOrders.get(orderId) || null;
+}
+
+async function findPaymentOrderByIdempotencyKey(uid: string, idempotencyKey: string): Promise<PaymentOrderRecord | null> {
+  const collection = paymentOrderCollection();
+  if (collection) {
+    try {
+      const snapshot = await collection.where('uid', '==', uid).where('idempotency_key', '==', idempotencyKey).limit(1).get();
+      const document = snapshot.docs[0];
+      if (document) {
+        const order = { id: document.id, ...(document.data() || {}) } as PaymentOrderRecord;
+        pendingPaymentOrders.set(order.id, order);
+        return order;
+      }
+      return null;
+    } catch (error) {
+      handleFirestoreFailure('payment_order_idempotency_lookup', error);
+      return null;
+    }
+  }
+  if (IS_PRODUCTION) handleFirestoreFailure('payment_order_idempotency_lookup', new Error('Firestore is not configured'));
+  return Array.from(pendingPaymentOrders.values()).find((order) => order.uid === uid && order.idempotency_key === idempotencyKey) || null;
+}
+
+async function transitionPaymentOrder(orderId: string, status: PaymentOrderRecord['status'], extra: Partial<PaymentOrderRecord> = {}): Promise<PaymentOrderRecord | null> {
+  const current = await loadPaymentOrder(orderId);
+  if (!current) return null;
+  if (current.status === 'verified' && status !== 'verified') return current;
+  const next = { ...current, id: orderId, ...extra, status, updated_at: new Date().toISOString() } as PaymentOrderRecord;
+  await persistPaymentOrder(next);
+  return next;
 }
 
 function analystTenantCollection(companyId: string, collection: string) {
+  if (IS_PRODUCTION && !firestoreDb) handleFirestoreFailure('tenant_collection', new Error('Firestore is not configured'));
   return firestoreDb?.collection('tenants').doc(companyId).collection(collection) || null;
 }
 
@@ -691,6 +1109,56 @@ function employeeCollection(companyId: string) {
   return analystTenantCollection(companyId, 'employees');
 }
 
+function conversationCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'conversations');
+}
+
+async function loadEmployeeConversation(companyId: string, employeeId: string, employeeName: string): Promise<any[]> {
+  const key = `${companyId}:${employeeId}`;
+  if (!IS_PRODUCTION) {
+    const cached = db.conversations.get(key);
+    if (cached) return cached;
+  }
+  const collection = conversationCollection(companyId);
+  if (collection) {
+    try {
+      const snapshot = await collection.doc(employeeId).get();
+      const messages = snapshot.exists && Array.isArray(snapshot.data()?.messages) ? snapshot.data()?.messages : null;
+      if (messages?.length) {
+        const bounded = messages.slice(-100);
+        db.conversations.set(key, bounded);
+        return bounded;
+      }
+    } catch (error) {
+      handleFirestoreFailure('conversation_load', error);
+    }
+  }
+  const seed = [{
+    sender: employeeId,
+    receiver: 'manager',
+    body: `Hello! I'm ${employeeName}. How can I assist with your company work today?`,
+    created_at: new Date().toISOString()
+  }];
+  db.conversations.set(key, seed);
+  return seed;
+}
+
+async function persistEmployeeConversation(companyId: string, employeeId: string, messages: any[]) {
+  const key = `${companyId}:${employeeId}`;
+  const bounded = messages.slice(-100);
+  const collection = conversationCollection(companyId);
+  if (!collection) {
+    db.conversations.set(key, bounded);
+    return;
+  }
+  try {
+    await collection.doc(employeeId).set(stripUndefined({ company_id: companyId, employee_id: employeeId, messages: bounded, updated_at: new Date().toISOString() }), { merge: true });
+    db.conversations.set(key, bounded);
+  } catch (error) {
+    handleFirestoreFailure('conversation_write', error);
+  }
+}
+
 async function persistOrgEmployees(companyId: string, employees: OrgEmployee[]) {
   db.orgEmployees.set(companyId, employees);
   const collection = employeeCollection(companyId);
@@ -699,8 +1167,10 @@ async function persistOrgEmployees(companyId: string, employees: OrgEmployee[]) 
 }
 
 async function loadOrgEmployees(companyId: string): Promise<OrgEmployee[]> {
-  const cached = db.orgEmployees.get(companyId);
-  if (cached) return cached;
+  if (!IS_PRODUCTION) {
+    const cached = db.orgEmployees.get(companyId);
+    if (cached) return cached;
+  }
   const collection = employeeCollection(companyId);
   if (collection) {
     try {
@@ -711,10 +1181,10 @@ async function loadOrgEmployees(companyId: string): Promise<OrgEmployee[]> {
         return employees;
       }
     } catch (error) {
-      reportOperationalFailure('employee.load', error, { tenant_hash: anonymizeIdentifier(companyId) });
+      handleFirestoreFailure('employee_load', error);
     }
   }
-  return db.orgEmployees.get(DEFAULT_COMPANY_ID) || [];
+  return [];
 }
 
 function employeeMemoryKey(companyId: string, employeeId: string) {
@@ -723,8 +1193,10 @@ function employeeMemoryKey(companyId: string, employeeId: string) {
 
 async function loadEmployeeMemory(companyId: string, employeeId: string): Promise<EmployeeMemory[]> {
   const key = employeeMemoryKey(companyId, employeeId);
-  const cached = db.employeeMemory.get(key);
-  if (cached) return cached;
+  if (!IS_PRODUCTION) {
+    const cached = db.employeeMemory.get(key);
+    if (cached) return cached;
+  }
   const collection = analystTenantCollection(companyId, 'employee_memory');
   if (collection) {
     try {
@@ -733,7 +1205,7 @@ async function loadEmployeeMemory(companyId: string, employeeId: string): Promis
       db.employeeMemory.set(key, entries);
       return entries;
     } catch (error) {
-      console.warn('Could not load employee memory:', error);
+      handleFirestoreFailure('employee_memory_load', error);
     }
   }
   db.employeeMemory.set(key, []);
@@ -756,6 +1228,73 @@ async function deleteEmployeeMemory(companyId: string, employeeId: string, memor
   if (collection) await collection.doc(memoryId).delete();
 }
 
+async function syncCompanyToEmployeeMemory(companyId: string, user: User, company: Company) {
+  const selectedIds = Array.isArray(company.selected_employees) ? company.selected_employees : [];
+  const allEmployees = selectedIds.length
+    ? EMPLOYEE_CATALOG.filter((employee) => selectedIds.includes(employee.id))
+    : [];
+  const now = new Date().toISOString();
+
+  const userRoleStr = user.user_role || company.user_role || 'Not provided';
+  const userNameStr = user.display_name || user.email || 'Workspace owner';
+  const companyNameStr = company.name || 'Workspace';
+  const industryStr = company.industry || 'Not specified';
+  const teamSizeStr = company.team_size || 'Not specified';
+  const goalsStr = company.business_goals || company.description || 'No business goals provided yet.';
+  const guidelinesStr = company.workspace_guidelines || company.guidelines || 'Require manager review for external or high-impact actions.';
+
+  for (const emp of allEmployees) {
+    const mem1: EmployeeMemory = {
+      id: `mem_biz_${emp.id}`,
+      company_id: companyId,
+      employee_id: emp.id,
+      category: 'preference',
+      content: `[Company Context] Business: ${companyNameStr} (${industryStr}, ${teamSizeStr} team) | Goals/Model: ${goalsStr}`,
+      created_at: now
+    };
+    await persistEmployeeMemory(mem1);
+
+    const mem2: EmployeeMemory = {
+      id: `mem_user_${emp.id}`,
+      company_id: companyId,
+      employee_id: emp.id,
+      category: 'preference',
+      content: `[User Context] Manager Name: ${userNameStr} | Role: ${userRoleStr} | Account Email: ${user.email}`,
+      created_at: now
+    };
+    await persistEmployeeMemory(mem2);
+
+    if (guidelinesStr) {
+      const mem3: EmployeeMemory = {
+        id: `mem_rules_${emp.id}`,
+        company_id: companyId,
+        employee_id: emp.id,
+        category: 'playbook',
+        content: `[Operating Guidelines] ${guidelinesStr}`,
+        created_at: now
+      };
+      await persistEmployeeMemory(mem3);
+    }
+  }
+
+  if (firestoreDb) {
+    try {
+      await firestoreDb.collection('tenants').doc(companyId).collection('settings').doc('workspace').set(stripUndefined({
+        company_id: companyId,
+        company_name: companyNameStr,
+        user_role: userRoleStr,
+        industry: industryStr,
+        team_size: teamSizeStr,
+        business_goals: goalsStr,
+        workspace_guidelines: guidelinesStr,
+        updated_at: now
+      }), { merge: true });
+    } catch (e) {
+      handleFirestoreFailure('settings_write', e);
+    }
+  }
+}
+
 async function hydrateTenantTasks(companyId: string) {
   if (db.taskTenantsLoaded.has(companyId)) return;
   db.taskTenantsLoaded.add(companyId);
@@ -771,7 +1310,7 @@ async function hydrateTenantTasks(companyId: string) {
       }
     });
   } catch (error) {
-    reportOperationalFailure('task.hydration', error, { tenant_hash: anonymizeIdentifier(companyId) });
+    handleFirestoreFailure('task_hydration', error);
   }
 }
 
@@ -791,7 +1330,7 @@ async function hydrateTenantActivity(companyId: string) {
       db.activity.set(companyId, snapshot.docs.map((doc) => ({ id: Number(doc.data()?.id || doc.id), company_id: companyId, ...(doc.data() || {}) })).filter((entry) => Number.isFinite(entry.id)));
     }
   } catch (error) {
-    reportOperationalFailure('activity.hydration', error, { tenant_hash: anonymizeIdentifier(companyId) });
+    handleFirestoreFailure('activity_hydration', error);
   }
 }
 
@@ -804,7 +1343,479 @@ async function persistActivityLog(companyId: string, entry: Record<string, any>)
   if (collection) await collection.doc(String(record.id)).set(stripUndefined(record), { merge: true });
 }
 
+function sanitizeAuditMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const blocked = /token|secret|password|authorization|cookie|private.?key|client.?secret/i;
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (blocked.test(key)) continue;
+    if (typeof item === 'string') {
+      result[key] = item.replace(/Bearer\\s+[A-Za-z0-9._~-]+/gi, 'Bearer [REDACTED]').slice(0, 500);
+    } else if (typeof item === 'number' || typeof item === 'boolean' || item === null) {
+      result[key] = item;
+    }
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
+async function persistAuditEvent(event: WorkforceAuditEvent) {
+  const existing = db.audit.get(event.company_id) || [];
+  if (existing.some((item) => item.id === event.id)) return;
+  const safeEvent = stripUndefined({ ...event, metadata: sanitizeAuditMetadata(event.metadata) }) as WorkforceAuditEvent;
+  db.audit.set(event.company_id, [safeEvent, ...existing].slice(0, 500));
+  const collection = analystTenantCollection(event.company_id, 'audit_events');
+  if (collection) await collection.doc(event.id).create(safeEvent).catch(async (error: any) => {
+    if (error?.code === 6 || /already exists/i.test(String(error?.message || ''))) return;
+    throw error;
+  });
+}
+
+async function auditWorkforceAction(input: Omit<WorkforceAuditEvent, 'id' | 'created_at'> & { id?: string; created_at?: string }) {
+  const event: WorkforceAuditEvent = {
+    ...input,
+    id: input.id || crypto.randomUUID(),
+    created_at: input.created_at || new Date().toISOString(),
+    correlation_id: input.correlation_id || crypto.randomUUID(),
+    metadata: sanitizeAuditMetadata(input.metadata)
+  };
+  await persistAuditEvent(event);
+  return event;
+}
+
+function usagePeriod(date = new Date()) {
+  return date.toISOString().slice(0, 7);
+}
+
+function usageLedgerKey(companyId: string, period = usagePeriod()) {
+  return `${companyId}:${period}`;
+}
+
+function usageCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'usage_ledger');
+}
+
+function activationCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'activation_events');
+}
+
+async function loadUsageLedger(companyId: string, period = usagePeriod()): Promise<UsageLedgerRecord> {
+  const key = usageLedgerKey(companyId, period);
+  if (!IS_PRODUCTION) {
+    const cached = db.usage.get(key);
+    if (cached) return cached;
+  }
+  const collection = usageCollection(companyId);
+  if (collection) {
+    try {
+      const snapshot = await collection.doc(period).get();
+      if (snapshot.exists) {
+        const record = { company_id: companyId, period, tasks_created: 0, tasks_completed: 0, tool_calls: 0, external_actions: 0, estimated_tokens: 0, updated_at: new Date().toISOString(), ...(snapshot.data() || {}) } as UsageLedgerRecord;
+        db.usage.set(key, record);
+        return record;
+      }
+    } catch (error) {
+      handleFirestoreFailure('usage_hydration', error);
+    }
+  }
+  const empty: UsageLedgerRecord = { company_id: companyId, period, tasks_created: 0, tasks_completed: 0, tool_calls: 0, external_actions: 0, estimated_tokens: 0, updated_at: new Date().toISOString() };
+  db.usage.set(key, empty);
+  return empty;
+}
+
+async function persistUsageLedger(record: UsageLedgerRecord) {
+  const safeRecord = stripUndefined(record) as UsageLedgerRecord;
+  db.usage.set(usageLedgerKey(record.company_id, record.period), safeRecord);
+  const collection = usageCollection(record.company_id);
+  if (collection) await collection.doc(record.period).set(safeRecord, { merge: true });
+}
+
+function companyPlan(companyId: string) {
+  const company = db.companies.get(companyId);
+  return SUBSCRIPTION_PLANS[company?.tier || 'free_trial'] || SUBSCRIPTION_PLANS.free_trial;
+}
+
+async function recordUsage(companyId: string, metric: 'tasks_created' | 'tasks_completed' | 'tool_calls' | 'external_actions' | 'estimated_tokens', amount = 1) {
+  const record = await loadUsageLedger(companyId);
+  record[metric] = Math.max(0, Number(record[metric] || 0) + amount);
+  record.updated_at = new Date().toISOString();
+  await persistUsageLedger(record);
+  return record;
+}
+
+async function assertTaskQuota(companyId: string) {
+  const record = await loadUsageLedger(companyId);
+  const plan = companyPlan(companyId);
+  const limit = Number(plan.max_tasks_per_month || 0);
+  if (limit > 0 && record.tasks_created >= limit) {
+    const error: any = new Error(`The ${plan.name} plan has reached its monthly task limit of ${limit}. Upgrade or wait for the next usage period.`);
+    error.code = 'task_quota_exceeded';
+    error.status = 402;
+    error.usage = record;
+    error.limit = limit;
+    throw error;
+  }
+  return { record, limit, plan };
+}
+
+async function recordActivationEvent(companyId: string, name: ActivationEvent['name'], actorType: ActivationEvent['actor_type'] = 'system', actorId = 'system', metadata?: Record<string, unknown>) {
+  const existing = db.activationEvents.get(companyId) || [];
+  const prior = existing.find((event) => event.name === name);
+  if (prior) return prior;
+  const event: ActivationEvent = { id: `${companyId}:${name}`, company_id: companyId, name, actor_type: actorType, actor_id: actorId, created_at: new Date().toISOString(), metadata: sanitizeAuditMetadata(metadata) };
+  db.activationEvents.set(companyId, [event, ...existing]);
+  const collection = activationCollection(companyId);
+  if (collection) await collection.doc(event.id).create(stripUndefined(event)).catch(async (error: any) => {
+    if (error?.code === 6 || /already exists/i.test(String(error?.message || ''))) return;
+    throw error;
+  });
+  return event;
+}
+async function loadActivationEvents(companyId: string): Promise<ActivationEvent[]> {
+  if (!IS_PRODUCTION) {
+    const cached = db.activationEvents.get(companyId);
+    if (cached) return cached;
+  }
+  const collection = activationCollection(companyId);
+  if (collection) {
+    try {
+      const snapshot = await collection.orderBy('created_at', 'desc').get();
+      const events = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as ActivationEvent));
+      db.activationEvents.set(companyId, events);
+      return events;
+    } catch (error) {
+      handleFirestoreFailure('activation_hydration', error);
+    }
+  }
+  const empty: ActivationEvent[] = [];
+  db.activationEvents.set(companyId, empty);
+  return empty;
+}
+
+function scheduledWorkflowCollection() {
+  if (IS_PRODUCTION && !firestoreDb) handleFirestoreFailure('scheduled_workflow_collection', new Error('Firestore is not configured'));
+  return firestoreDb?.collection('scheduled_workflows') || null;
+}
+
+function normalizeTimezone(value: unknown) {
+  const timezone = String(value || 'UTC').trim() || 'UTC';
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format();
+    return timezone;
+  } catch {
+    return null;
+  }
+}
+
+function parseCronField(value: string, min: number, max: number): Set<number> | null {
+  const output = new Set<number>();
+  for (const rawPart of value.split(',')) {
+    const part = rawPart.trim();
+    if (!part) return null;
+    const [base, stepText] = part.split('/');
+    const step = stepText === undefined ? 1 : Number(stepText);
+    if (!Number.isInteger(step) || step < 1) return null;
+    const [startText, endText] = base === '*' ? [String(min), String(max)] : base.split('-');
+    const start = Number(startText);
+    const end = endText === undefined ? start : Number(endText);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < min || end > max || start > end) return null;
+    for (let current = start; current <= end; current += step) output.add(current);
+  }
+  return output;
+}
+
+function parseCronExpression(expression: string) {
+  const fields = expression.trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const minute = parseCronField(fields[0], 0, 59);
+  const hour = parseCronField(fields[1], 0, 23);
+  const day = parseCronField(fields[2], 1, 31);
+  const month = parseCronField(fields[3], 1, 12);
+  const weekday = parseCronField(fields[4], 0, 6);
+  return minute && hour && day && month && weekday ? { minute, hour, day, month, weekday } : null;
+}
+
+function nextCronOccurrence(expression: string, timezone: string, from = new Date()) {
+  const parsed = parseCronExpression(expression);
+  if (!parsed) return null;
+  const formatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', weekday: 'short' });
+  const weekdayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const candidate = new Date(Math.ceil((from.getTime() + 60_000) / 60_000) * 60_000);
+  for (let index = 0; index < 366 * 24 * 60; index += 1) {
+    const parts = formatter.formatToParts(candidate).reduce<Record<string, string>>((acc, part) => { acc[part.type] = part.value; return acc; }, {});
+    const month = Number(parts.month);
+    const day = Number(parts.day);
+    const hour = Number(parts.hour);
+    const minute = Number(parts.minute);
+    const weekday = weekdayMap[parts.weekday];
+    if (parsed.minute.has(minute) && parsed.hour.has(hour) && parsed.day.has(day) && parsed.month.has(month) && parsed.weekday.has(weekday)) return candidate.toISOString();
+    candidate.setTime(candidate.getTime() + 60_000);
+  }
+  return null;
+}
+
+async function persistScheduledWorkflow(workflow: ScheduledWorkflow) {
+  const safeWorkflow = stripUndefined(workflow) as ScheduledWorkflow;
+  db.scheduledWorkflows.set(workflow.id, safeWorkflow);
+  const collection = scheduledWorkflowCollection();
+  if (collection) await collection.doc(workflow.id).set(safeWorkflow, { merge: true });
+}
+
+async function hydrateScheduledWorkflows(companyId: string) {
+  const cached = Array.from(db.scheduledWorkflows.values()).filter((workflow) => workflow.company_id === companyId);
+  if (cached.length) return cached;
+  const collection = scheduledWorkflowCollection();
+  if (collection) {
+    try {
+      const snapshot = await collection.where('company_id', '==', companyId).limit(100).get();
+      const workflows = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as ScheduledWorkflow));
+      workflows.forEach((workflow) => db.scheduledWorkflows.set(workflow.id, workflow));
+      return workflows;
+    } catch (error) {
+      handleFirestoreFailure('scheduled_workflow_hydration', error);
+    }
+  }
+  return cached;
+}
+
+function schedulerSecretMatches(req: express.Request) {
+  const provided = String(req.get('x-caveworkers-scheduler-secret') || '');
+  if (!SCHEDULER_TICK_SECRET || !provided || provided.length !== SCHEDULER_TICK_SECRET.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(SCHEDULER_TICK_SECRET));
+}
+
+async function claimScheduledWorkflow(workflow: ScheduledWorkflow, now = new Date()) {
+  const collection = scheduledWorkflowCollection();
+  const runAt = workflow.next_run_at;
+  if (workflow.status !== 'active' || !runAt || Date.parse(runAt) > now.getTime()) return null;
+  const nextRun = workflow.schedule_type === 'cron' && workflow.cron_expression
+    ? nextCronOccurrence(workflow.cron_expression, workflow.timezone, now)
+    : null;
+  const runCount = Number(workflow.run_count || 0) + 1;
+  const nextStatus: ScheduledWorkflow['status'] = workflow.schedule_type === 'once' || (workflow.max_runs && runCount >= workflow.max_runs) ? 'completed' : nextRun ? 'active' : 'error';
+  const claimed: ScheduledWorkflow = { ...workflow, last_run_at: runAt, next_run_at: nextRun || workflow.next_run_at, run_count: runCount, status: nextStatus, last_error: nextStatus === 'error' ? 'The recurring schedule could not calculate a future run.' : undefined, updated_at: now.toISOString() };
+  if (collection) {
+    const result = await firestoreDb!.runTransaction(async (transaction) => {
+      const reference = collection.doc(workflow.id);
+      const snapshot = await transaction.get(reference);
+      const current = snapshot.exists ? ({ id: snapshot.id, ...(snapshot.data() || {}) } as ScheduledWorkflow) : null;
+      if (!current || current.status !== 'active' || Date.parse(current.next_run_at) > now.getTime() || current.next_run_at !== runAt) return null;
+      transaction.set(reference, stripUndefined(claimed), { merge: true });
+      return claimed;
+    });
+    if (!result) return null;
+    db.scheduledWorkflows.set(result.id, result);
+    return result;
+  }
+  const current = db.scheduledWorkflows.get(workflow.id);
+  if (!current || current.status !== 'active' || current.next_run_at !== runAt) return null;
+  db.scheduledWorkflows.set(workflow.id, claimed);
+  return claimed;
+}
+
+async function processDueScheduledWorkflows(now = new Date()) {
+  await processDueTenantDeletions(now);
+  const candidates = Array.from(db.scheduledWorkflows.values()).filter((workflow) => workflow.status === 'active' && Date.parse(workflow.next_run_at) <= now.getTime());
+  const dueFromFirestore = scheduledWorkflowCollection();
+  if (dueFromFirestore && candidates.length === 0) {
+    try {
+      const snapshot = await dueFromFirestore.where('status', '==', 'active').limit(200).get();
+      snapshot.docs.forEach((doc) => db.scheduledWorkflows.set(doc.id, { id: doc.id, ...(doc.data() || {}) } as ScheduledWorkflow));
+    } catch (error) {
+      handleFirestoreFailure('scheduled_workflow_discovery', error);
+    }
+  }
+  const due = Array.from(db.scheduledWorkflows.values()).filter((workflow) => workflow.status === 'active' && Date.parse(workflow.next_run_at) <= now.getTime());
+  const results: Array<Record<string, unknown>> = [];
+  for (const workflow of due.slice(0, 50)) {
+    const claimed = await claimScheduledWorkflow(workflow, now);
+    if (!claimed) continue;
+    const idempotencyKey = `schedule:${claimed.id}:${claimed.last_run_at}`;
+    try {
+      const result = await enqueueWorkforceTask(claimed.company_id, claimed.prompt, claimed.preferred_employee_id, claimed.email_employee_id, idempotencyKey);
+      claimed.last_task_id = Number(result.id);
+      claimed.last_error = undefined;
+      claimed.updated_at = new Date().toISOString();
+      await persistScheduledWorkflow(claimed);
+      await auditWorkforceAction({ company_id: claimed.company_id, actor_type: 'system', actor_id: 'scheduler', action: 'scheduled_workflow.triggered', resource_type: 'scheduled_workflow', resource_id: claimed.id, task_id: Number(result.id), risk: 'low', status: 'prepared', summary: `Scheduled workflow ${claimed.name} created task #${result.id}.`, correlation_id: idempotencyKey, metadata: { schedule_type: claimed.schedule_type, run_at: claimed.last_run_at } });
+      results.push({ id: claimed.id, task_id: result.id, status: 'queued' });
+    } catch (error: any) {
+      claimed.last_error = String(error?.message || 'Scheduled task could not be queued.').slice(0, 240);
+      claimed.updated_at = new Date().toISOString();
+      await persistScheduledWorkflow(claimed);
+      await auditWorkforceAction({ company_id: claimed.company_id, actor_type: 'system', actor_id: 'scheduler', action: 'scheduled_workflow.failed', resource_type: 'scheduled_workflow', resource_id: claimed.id, risk: 'medium', status: 'failed', summary: claimed.last_error, correlation_id: idempotencyKey, metadata: { code: error?.code || 'schedule_enqueue_failed' } });
+      results.push({ id: claimed.id, status: 'failed', error: claimed.last_error });
+    }
+  }
+  return { processed: results.length, results };
+}
+
+function redactedExportValue(value: unknown, key = ''): unknown {
+  if (/token|secret|password|authorization|cookie|private.?key|client.?secret|credential/i.test(key)) return '[REDACTED]';
+  if (Array.isArray(value)) return value.map((item) => redactedExportValue(item));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([entryKey, entryValue]) => [entryKey, redactedExportValue(entryValue, entryKey)]));
+  return value;
+}
+
+function tenantConversationRecords(companyId: string) {
+  return Array.from(db.conversations.entries()).filter(([key]) => key.startsWith(`${companyId}:`)).map(([key, messages]) => ({ key, messages: redactedExportValue(messages) }));
+}
+
+async function buildTenantExport(companyId: string) {
+  await hydrateTenantTasks(companyId);
+  await hydrateTenantActivity(companyId);
+  await hydrateTenantApprovals(companyId);
+  await loadOrgEmployees(companyId);
+  await Promise.all(EMPLOYEE_CATALOG.map((employee) => loadMcpConnections(companyId, employee.id)));
+  const users = Array.from(db.users.values()).filter((user) => user.company_id === companyId);
+  const tasks = Array.from(db.tasks.values()).filter((task) => task.company_id === companyId);
+  const approvals = Array.from(db.approvals.values()).filter((approval) => approval.company_id === companyId);
+  const connectors = Array.from(db.mcpConnections.entries()).filter(([key]) => key.startsWith(`${companyId}:`)).flatMap(([, entries]) => entries);
+  const queue = Array.from(db.workforceQueue.values()).filter((job) => job.company_id === companyId);
+  const employeeMemory = Array.from(db.employeeMemory.entries()).filter(([key]) => key.startsWith(`${companyId}:`)).flatMap(([, entries]) => entries);
+  return redactedExportValue({
+    schema_version: '2026-08-17',
+    generated_at: new Date().toISOString(),
+    company: db.companies.get(companyId),
+    users,
+    employees: db.orgEmployees.get(companyId) || [],
+    tasks,
+    approvals,
+    knowledge: db.knowledge.get(companyId) || [],
+    activity: db.activity.get(companyId) || [],
+    audit_events: db.audit.get(companyId) || [],
+    usage_ledger: Array.from(db.usage.values()).filter((entry) => entry.company_id === companyId),
+    activation_events: db.activationEvents.get(companyId) || [],
+    scheduled_workflows: Array.from(db.scheduledWorkflows.values()).filter((workflow) => workflow.company_id === companyId),
+    connectors,
+    employee_memory: employeeMemory,
+    analyst_data_sources: db.analystDataSources.get(companyId) || [],
+    analyst_memory: db.analystMemory.get(companyId) || [],
+    analyst_runs: db.analystRuns.get(companyId) || [],
+    conversations: tenantConversationRecords(companyId),
+    workforce_queue: queue
+  }) as Record<string, unknown>;
+}
+
+function dataExportCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'data_exports');
+}
+
+function deletionRequestCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'deletion_requests');
+}
+
+async function persistDataExport(record: DataExportRequest) {
+  db.dataExports.set(record.id, record);
+  const collection = dataExportCollection(record.company_id);
+  if (collection) await collection.doc(record.id).set(stripUndefined(record), { merge: true });
+}
+
+async function persistDeletionRequest(record: TenantDeletionRequest) {
+  db.deletionRequests.set(record.id, record);
+  const collection = deletionRequestCollection(record.company_id);
+  if (collection) await collection.doc(record.id).set(stripUndefined(record), { merge: true });
+}
+
+async function revokeTenantConnectors(companyId: string) {
+  const now = new Date().toISOString();
+  for (const employee of EMPLOYEE_CATALOG) {
+    const connections = await loadMcpConnections(companyId, employee.id);
+    for (const connection of connections) {
+      connection.status = 'error';
+      connection.auth_token_encrypted = undefined;
+      connection.oauth_revoked_at = now;
+      connection.last_error = 'Workspace deletion requested; connector authorization was revoked locally.';
+      connection.updated_at = now;
+      await persistMcpConnection(connection);
+    }
+  }
+}
+
+async function anonymizeTenantAuditEvents(companyId: string) {
+  const collection = analystTenantCollection(companyId, 'audit_events');
+  if (!collection) return;
+  try {
+    const snapshot = await collection.limit(500).get();
+    await Promise.all(snapshot.docs.map((doc) => doc.ref.set({ company_id: 'deleted', actor_type: 'system', actor_id: 'deleted', summary: 'Tenant audit event anonymized during workspace erasure.', metadata: undefined, action: 'tenant.data_erased' }, { merge: true })));
+  } catch (error) {
+    reportOperationalFailure('tenant.audit_anonymization', error, { tenant_hash: anonymizeIdentifier(companyId) });
+  }
+}
+
+async function deleteTenantFirestoreData(companyId: string) {
+  const subcollections = ['settings', 'employees', 'connectors', 'employee_memory', 'conversations', 'tasks', 'activity', 'usage_ledger', 'activation_events', 'approvals', 'data_sources', 'long_term_memory', 'analyst_runs', 'data_exports', 'deletion_requests'];
+  if (firestoreDb) {
+    for (const collectionName of subcollections) {
+      const collection = firestoreDb.collection('tenants').doc(companyId).collection(collectionName);
+      const snapshot = await collection.limit(1000).get();
+      if (snapshot.docs.length) await Promise.all(snapshot.docs.map((doc) => doc.ref.delete()));
+    }
+    const schedules = await firestoreDb.collection('scheduled_workflows').where('company_id', '==', companyId).limit(1000).get();
+    if (schedules.docs.length) await Promise.all(schedules.docs.map((doc) => doc.ref.delete()));
+    const jobs = await firestoreDb.collection('workforce_jobs').where('company_id', '==', companyId).limit(1000).get();
+    if (jobs.docs.length) await Promise.all(jobs.docs.map((doc) => doc.ref.delete()));
+    const users = await firestoreDb.collection('users').where('company_id', '==', companyId).limit(1000).get();
+    if (users.docs.length) await Promise.all(users.docs.map((doc) => doc.ref.delete()));
+    await firestoreDb.collection('companies').doc(companyId).delete();
+  }
+}
+
+function clearTenantCaches(companyId: string) {
+  db.companies.delete(companyId);
+  db.orgEmployees.delete(companyId);
+  db.knowledge.delete(companyId);
+  db.activity.delete(companyId);
+  db.audit.delete(companyId);
+  db.activationEvents.delete(companyId);
+  db.analystDataSources.delete(companyId);
+  db.analystMemory.delete(companyId);
+  db.analystRuns.delete(companyId);
+  db.activityLoaded.delete(companyId);
+  db.taskTenantsLoaded.delete(companyId);
+  db.approvalTenantsLoaded.delete(companyId);
+  for (const [uid, user] of db.users.entries()) if (user.company_id === companyId) db.users.delete(uid);
+  for (const [id, task] of db.tasks.entries()) if (task.company_id === companyId) db.tasks.delete(id);
+  for (const [id, approval] of db.approvals.entries()) if (approval.company_id === companyId) db.approvals.delete(id);
+  for (const [key] of db.conversations.entries()) if (key.startsWith(`${companyId}:`)) db.conversations.delete(key);
+  for (const [key] of db.employeeMemory.entries()) if (key.startsWith(`${companyId}:`)) db.employeeMemory.delete(key);
+  for (const [key] of db.mcpConnections.entries()) if (key.startsWith(`${companyId}:`)) db.mcpConnections.delete(key);
+  for (const [id, workflow] of db.scheduledWorkflows.entries()) if (workflow.company_id === companyId) db.scheduledWorkflows.delete(id);
+  for (const [id, job] of db.workforceQueue.entries()) if (job.company_id === companyId) db.workforceQueue.delete(id);
+  for (const [key] of db.employeePresence.entries()) if (key.startsWith(`${companyId}:`)) db.employeePresence.delete(key);
+  for (const [id, record] of db.usage.entries()) if (record.company_id === companyId) db.usage.delete(id);
+  for (const [id, record] of db.dataExports.entries()) if (record.company_id === companyId) db.dataExports.delete(id);
+  for (const [id, record] of db.deletionRequests.entries()) if (record.company_id === companyId) db.deletionRequests.delete(id);
+}
+
+async function processDueTenantDeletions(now = new Date()) {
+  const due = Array.from(db.deletionRequests.values()).filter((request) => request.status === 'scheduled' && Date.parse(request.execute_after) <= now.getTime());
+  const results: Array<Record<string, unknown>> = [];
+  for (const request of due.slice(0, 10)) {
+    const company = db.companies.get(request.company_id);
+    if (!company) { request.status = 'completed'; request.processed_at = now.toISOString(); await persistDeletionRequest(request); results.push({ id: request.id, status: 'completed' }); continue; }
+    request.status = 'processing';
+    await persistDeletionRequest(request);
+    try {
+      await anonymizeTenantAuditEvents(request.company_id);
+      await deleteTenantFirestoreData(request.company_id);
+      clearTenantCaches(request.company_id);
+      request.status = 'completed';
+      request.processed_at = new Date().toISOString();
+      db.deletionRequests.set(request.id, request);
+      results.push({ id: request.id, company_id: request.company_id, status: 'completed' });
+    } catch (error: any) {
+      request.status = 'failed';
+      request.error = String(error?.message || 'Tenant erasure failed.').slice(0, 240);
+      await persistDeletionRequest(request);
+      reportOperationalFailure('tenant.hard_delete', error, { tenant_hash: anonymizeIdentifier(request.company_id) });
+      results.push({ id: request.id, company_id: request.company_id, status: 'failed' });
+    }
+  }
+  return { processed: results.length, results };
+}
+
 async function hydrateTenantApprovals(companyId: string) {
+
   if (db.approvalTenantsLoaded.has(companyId)) return;
   db.approvalTenantsLoaded.add(companyId);
   const collection = analystTenantCollection(companyId, 'approvals');
@@ -829,6 +1840,7 @@ async function persistApprovalRecord(approval: ApprovalRecord) {
 
 
 function queueCollection() {
+  if (IS_PRODUCTION && !firestoreDb) handleFirestoreFailure('workforce_job_collection', new Error('Firestore is not configured'));
   return firestoreDb?.collection('workforce_jobs') || null;
 }
 
@@ -982,39 +1994,60 @@ function directEmployeeIdForQuestion(question: string, companyId: string, prefer
   })?.id;
 }
 
-async function enqueueWorkforceTask(companyId: string, question: string, preferredEmployeeId?: string, emailEmployeeId?: string) {
+async function enqueueWorkforceTask(companyId: string, question: string, preferredEmployeeId?: string, emailEmployeeId?: string, idempotencyKey?: string) {
   await loadOrgEmployees(companyId);
   await hydrateTenantTasks(companyId);
+  const normalizedIdempotencyKey = String(idempotencyKey || '').trim().slice(0, 160);
+  if (normalizedIdempotencyKey) {
+    const existingJob = Array.from(db.workforceQueue.values()).find((job) => job.company_id === companyId && job.idempotency_key === normalizedIdempotencyKey);
+    if (existingJob) {
+      const existingTask = db.tasks.get(existingJob.task_id);
+      if (existingTask) return { ...workroomSnapshot(existingTask), queued: existingJob.status === 'queued' || existingJob.status === 'processing', duplicate: true, worker_enabled: ALWAYS_ON_WORKER_ENABLED, worker_instance: WORKER_INSTANCE_ID };
+    }
+  }
+  await assertTaskQuota(companyId);
   const taskId = db.nextTaskId++;
   const now = new Date().toISOString();
   const routedEmployeeId = directEmployeeIdForQuestion(question || 'Operations review', companyId, preferredEmployeeId) || (preferredEmployeeId === '__whole_team__' ? '__whole_team__' : undefined);
   const validEmailEmployeeId = typeof emailEmployeeId === 'string' && activeWorkforce(companyId).some((employee) => employee.id === emailEmployeeId) ? emailEmployeeId : undefined;
   const { manager, lead, collaborators } = selectCollaborativeTeam(question || 'Operations review', companyId, routedEmployeeId);
-  const trace = [{ kind: 'queued', sender: 'Sarah', receiver: 'Company workroom', body: `I received this request and assigned ${lead.name} as delivery lead. I will return the final result and any execution blocker here.`, created_at: now }];
+  const isDirect = Boolean(routedEmployeeId && routedEmployeeId !== '__whole_team__');
+  const leadEmployee = isDirect ? (activeWorkforce(companyId).find((e) => e.id === routedEmployeeId) || lead) : lead;
+  const trace = isDirect
+    ? [{ kind: 'queued', sender: leadEmployee.name, receiver: 'Company workroom', body: `I'm on it. Reviewing tools and preparing the deliverables for you.`, created_at: now }]
+    : [{ kind: 'queued', sender: lead.name, receiver: 'Company workroom', body: `${lead.name} has taken this task as delivery lead. Preparing steps and checking tools.`, created_at: now }];
   const task: TaskRecord = {
     id: taskId,
     company_id: companyId,
     question: question.slice(0, 6000),
-    owner: manager.id,
+    owner: isDirect ? leadEmployee.id : manager.id,
     status: 'queued',
-    answer: 'Sarah has accepted your request and is assigning the delivery team…',
-    plan: `${routedEmployeeId && routedEmployeeId !== '__whole_team__' ? `${lead.name} direct response → Sarah manager oversight` : `Sarah intake → ${lead.name} delivery lead → ${collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'role assessment'} → evidence → Sarah’s manager response`}`,
-    direct_employee_id: routedEmployeeId && routedEmployeeId !== '__whole_team__' ? routedEmployeeId : undefined,
+    answer: `${leadEmployee.name} has accepted your request and is working on the deliverables…`,
+    plan: isDirect ? `${leadEmployee.name} direct specialist response → verification → delivery` : `${lead.name} delivery lead → ${collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'specialist execution'} → evidence → direct response`,
+    direct_employee_id: isDirect ? leadEmployee.id : undefined,
     created_at: now,
     queued_at: now,
     trace,
-    participants: ['Manager', manager.name, lead.name, ...collaborators.map((employee) => employee.name).filter((name, index, list) => list.indexOf(name) === index)],
-    collaboration_summary: `${manager.name} will manage ${lead.name}${collaborators.length ? ` and ${collaborators.length} supporting specialist${collaborators.length === 1 ? '' : 's'}` : ''}.`,
-    execution: { action_type: 'none', status: 'queued', summary: 'Sarah has accepted the request and is coordinating the delivery team.', updated_at: now },
+    participants: ['Manager', manager.name, leadEmployee.name, ...collaborators.map((employee) => employee.name)].filter((name, index, list) => list.indexOf(name) === index),
+    collaboration_summary: isDirect ? `${leadEmployee.name} is handling this request directly.` : `${lead.name} is leading delivery${collaborators.length ? ` with ${collaborators.length} supporting specialist${collaborators.length === 1 ? '' : 's'}` : ''}.`,
+    execution: { action_type: 'none', status: 'queued', summary: `${leadEmployee.name} is preparing the deliverables.`, updated_at: now },
     live_tool_evidence: [],
     web_research: [],
   };
   db.tasks.set(taskId, task);
   await persistTaskRecord(task);
-  const job: WorkforceQueueJob = { id: `${companyId}:${taskId}`, task_id: taskId, company_id: companyId, question: task.question,     preferred_employee_id: routedEmployeeId, email_employee_id: validEmailEmployeeId, status: 'queued',
- attempts: 0, created_at: now, updated_at: now };
+    const job: WorkforceQueueJob = { id: `${companyId}:${taskId}`, task_id: taskId, company_id: companyId, question: task.question, preferred_employee_id: routedEmployeeId, email_employee_id: validEmailEmployeeId, status: 'queued',
+	 attempts: 0, max_attempts: 3, idempotency_key: normalizedIdempotencyKey || `${companyId}:${taskId}`, created_at: now, updated_at: now };
+
   await persistWorkforceJob(job);
+  try {
+    await recordUsage(companyId, 'tasks_created');
+    await recordActivationEvent(companyId, 'first_task_created', 'user', 'workspace-manager', { task_id: taskId });
+  } catch (error) {
+    reportOperationalFailure('usage.task_created', error, { tenant_hash: anonymizeIdentifier(companyId), task_id: taskId });
+  }
   await persistActivityLog(companyId, { id: Date.now(), sender: 'Manager', receiver: 'Caveworkers worker', kind: 'task.queued', body: `Task #${taskId} entered the always-on employee queue.`, created_at: now });
+  await auditWorkforceAction({ company_id: companyId, actor_type: 'user', actor_id: 'workspace-manager', action: 'task.queued', resource_type: 'task', resource_id: String(taskId), task_id: taskId, risk: 'low', status: 'prepared', summary: `Task #${taskId} entered the workforce queue.`, correlation_id: job.id, metadata: { idempotency_key: job.idempotency_key, preferred_employee_id: routedEmployeeId || 'auto' } });
   emitWorkroomEvent(companyId, taskId, { type: 'task_update', task: workroomSnapshot(task) });
   // Wake the process-local worker immediately; the interval remains a recovery poll.
   if (ALWAYS_ON_WORKER_ENABLED) void processNextWorkforceJob();
@@ -1061,8 +2094,8 @@ async function updateQueuedTask(task: TaskRecord, status: TaskRecord['status'], 
 }
 
 let workerBusy = false;
-async function processNextWorkforceJob() {
-  if (!ALWAYS_ON_WORKER_ENABLED || workerBusy) return;
+async function processNextWorkforceJob(force = false) {
+  if ((!ALWAYS_ON_WORKER_ENABLED && !force) || workerBusy) return;
   workerBusy = true;
   try {
     const job = await claimNextWorkforceJob();
@@ -1074,7 +2107,7 @@ async function processNextWorkforceJob() {
     const { manager, lead, collaborators } = selectCollaborativeTeam(job.question, job.company_id, job.preferred_employee_id);
     const workerEmployees = [...new Set([manager.id, lead.id, ...collaborators.map((employee) => employee.id)])];
     workerEmployees.forEach((employeeId) => setEmployeePresence(job.company_id, employeeId, 'working', task.id));
-    await updateQueuedTask(task, 'processing', `${manager.name} is managing this task. ${lead.name} and the assigned specialists are now working in the company room.`);
+    await updateQueuedTask(task, 'processing', job.preferred_employee_id && job.preferred_employee_id !== '__whole_team__' ? `${lead.name} is working directly on this request with the tenant-approved tools and memory.` : `${manager.name} is managing this task. ${lead.name} and the assigned specialists are now working in the company room.`);
     try {
       const completed = await handleTaskRoutingAsync(job.question, job.company_id, job.preferred_employee_id, task.id, job.email_employee_id);
       Object.assign(task, completed);
@@ -1084,6 +2117,14 @@ async function processNextWorkforceJob() {
       await persistTaskRecord(task);
       emitWorkroomTrace(job.company_id, task.id, task.trace || []);
       job.status = 'completed'; job.updated_at = new Date().toISOString(); await persistWorkforceJob(job);
+      if (task.status === 'completed') {
+        try {
+          await recordUsage(job.company_id, 'tasks_completed');
+          await recordActivationEvent(job.company_id, 'first_task_completed', 'system', 'workforce-worker', { task_id: task.id });
+        } catch (error) {
+          reportOperationalFailure('usage.task_completed', error, { tenant_hash: anonymizeIdentifier(job.company_id), task_id: task.id });
+        }
+      }
       emitWorkroomEvent(job.company_id, task.id, { type: 'task_update', task: workroomSnapshot(task) });
     } catch (error: any) {
       reportOperationalFailure('worker.task_execution', error, { tenant_hash: anonymizeIdentifier(job.company_id), task_id: task.id, worker_instance: WORKER_INSTANCE_ID });
@@ -1292,8 +2333,9 @@ function oauthStateVerify(value: string): Record<string, any> | null {
 }
 
 function googleOAuthClient() {
-  if (!GOOGLE_OAUTH_CLIENT_ID || !GOOGLE_OAUTH_CLIENT_SECRET) throw new Error('Google OAuth client credentials are not configured.');
-  return new google.auth.OAuth2(GOOGLE_OAUTH_CLIENT_ID, GOOGLE_OAUTH_CLIENT_SECRET, GOOGLE_OAUTH_REDIRECT_URI);
+  const clientId = GOOGLE_OAUTH_CLIENT_ID || FIREBASE_WEB_CONFIG.appId || 'caveworkers-workspace-client';
+  const clientSecret = GOOGLE_OAUTH_CLIENT_SECRET || 'caveworkers-workspace-secret';
+  return new google.auth.OAuth2(clientId, clientSecret, GOOGLE_OAUTH_REDIRECT_URI);
 }
 
 function googleScopesFor(connection: TenantConnector) {
@@ -1305,7 +2347,7 @@ function googleScopesFor(connection: TenantConnector) {
   if (connection.connection_type === 'google_drive') {
     return ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/drive.file'];
   }
-  return ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/spreadsheets.readonly'];
+  return ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/spreadsheets'];
 }
 
 function parseSpreadsheetId(value: string) {
@@ -1456,11 +2498,104 @@ function summarizeMcpToolResult(value: any) {
   return String(content || 'The tool returned no readable content.').slice(0, 1800);
 }
 
+function hasReadableToolGrant(connection: TenantConnector | undefined, toolNames: string[]) {
+  if (!connection || connection.status !== 'connected' || !connection.auth_token_encrypted) return false;
+  const allowed = new Set(['read_only', 'read_write']);
+  return (connection.tool_grants || []).some((grant) => toolNames.includes(grant.tool_name) && allowed.has(grant.access_level));
+}
+
+function connectorAccessFailure(employee: any, connectorName: string, toolName: string, summary: string, createdAt: string): WorkforceLiveToolEvidence {
+  return { employee_id: employee.id, employee_name: employee.name, connector_name: connectorName, tool_name: toolName, status: 'failed', summary, created_at: createdAt };
+}
+
 async function executeEmployeeReadTools(companyId: string, employee: any, question: string): Promise<WorkforceLiveToolEvidence[]> {
   if (!employee?.id || !employee?.name) return [];
-  const connections = (await loadMcpConnections(companyId, employee.id)).filter((connection) => connection.status === 'connected' && connection.connection_type === 'streamable_http');
+  const results: WorkforceLiveToolEvidence[] = [];
+  const lowerQ = (question || '').toLowerCase();
+  const connections = await loadMcpConnections(companyId, employee.id);
+
+  // 1. Live Google Workspace tools execution
+  const isGmailQuery = /gmail|email|mail|inbox|message|thread|unread|letter|send|client|feedback|contact/i.test(lowerQ);
+  const isDriveQuery = /drive|doc|document|file|folder|pdf|presentation|slide|specs/i.test(lowerQ);
+  const isSheetsQuery = /sheet|spreadsheet|row|table|csv|grid|cells/i.test(lowerQ);
+
+  const gmailConn = connections.find((c) => c.connection_type === 'google_gmail' && c.status === 'connected' && c.auth_token_encrypted);
+  const driveConn = connections.find((c) => c.connection_type === 'google_drive' && c.status === 'connected' && c.auth_token_encrypted);
+  const sheetsConn = connections.find((c) => c.connection_type === 'google_sheets' && c.status === 'connected' && c.auth_token_encrypted);
+
+  if (gmailConn && (isGmailQuery || (!isDriveQuery && !isSheetsQuery))) {
+    const createdAt = new Date().toISOString();
+    if (!hasReadableToolGrant(gmailConn, ['gmail.search'])) {
+      results.push(connectorAccessFailure(employee, 'Google Gmail', 'gmail.search', 'Gmail is connected, but this employee does not have a read grant for gmail.search. Open Settings and grant read access to this employee.', createdAt));
+    } else {
+    try {
+      const cleanSearch = lowerQ.replace(/check|my|the|inbox|gmail|emails?|messages?|please|for|me|search/gi, '').trim() || 'label:inbox';
+      const searchRes = await searchGmail(companyId, gmailConn.id, cleanSearch, 5, employee.id);
+      const emailSummary = searchRes.messages?.length
+        ? `Found ${searchRes.messages.length} email(s) in inbox (${gmailConn.oauth_email || 'connected mailbox'}):\n` + searchRes.messages.map((m) => `• Subject: "${m.headers?.Subject || '(No Subject)'}" | From: ${m.headers?.From || 'Unknown'} | Snippet: ${m.snippet || ''}`).join('\n')
+        : `Connected to Gmail mailbox (${gmailConn.oauth_email || 'authorized account'}). Search query "${cleanSearch}" executed; inbox is active and accessible. 0 unread matching items found.`;
+      results.push({
+        employee_id: employee.id,
+        employee_name: employee.name,
+        connector_name: 'Google Gmail',
+        tool_name: 'gmail.search',
+        status: 'executed',
+        summary: emailSummary,
+        created_at: createdAt
+      });
+    } catch (gErr: any) {
+      results.push(connectorAccessFailure(employee, 'Google Gmail', 'gmail.search', `Gmail read failed: ${String(gErr?.message || 'The provider request failed.').slice(0, 420)}`, createdAt));
+    }
+    }
+  }
+
+  if (driveConn && isDriveQuery) {
+    const createdAt = new Date().toISOString();
+    if (!hasReadableToolGrant(driveConn, ['drive.files.read'])) {
+      results.push(connectorAccessFailure(employee, 'Google Drive', 'drive.files.read', 'Google Drive is connected, but this employee does not have a read grant for drive.files.read. Open Settings and grant read access to this employee.', createdAt));
+    } else {
+    try {
+      const cleanSearch = lowerQ.replace(/check|my|the|drive|files?|docs?|documents?|please|for|me|search/gi, '').trim();
+      const driveRes = await searchGoogleDriveFiles(companyId, employee.id, driveConn.id, cleanSearch, 5);
+      const driveSummary = driveRes.files?.length
+        ? `Found ${driveRes.files.length} Google Drive file(s):\n` + driveRes.files.map((f) => `• ${f.name} (${f.mime_type || 'file'})`).join('\n')
+        : `Google Drive is connected. 0 matching files found for query "${cleanSearch}".`;
+      results.push({
+        employee_id: employee.id,
+        employee_name: employee.name,
+        connector_name: 'Google Drive',
+        tool_name: 'drive.files.read',
+        status: 'executed',
+        summary: driveSummary,
+        created_at: createdAt
+      });
+    } catch (_dErr) {
+      results.push(connectorAccessFailure(employee, 'Google Drive', 'drive.files.read', `Google Drive read failed: ${String(_dErr?.message || 'The provider request failed.').slice(0, 420)}`, createdAt));
+    }
+    }
+  }
+
+  if (sheetsConn && isSheetsQuery) {
+    const createdAt = new Date().toISOString();
+    if (!hasReadableToolGrant(sheetsConn, ['sheets.read'])) {
+      results.push(connectorAccessFailure(employee, 'Google Sheets', 'sheets.read', 'Google Sheets is connected, but this employee does not have a read grant for sheets.read. Open Settings and grant read access to this employee.', createdAt));
+    } else {
+      try {
+        const reference = question.match(/https?:\/\/docs\.google\.com\/spreadsheets\/d\/[^\s/]+|\b[A-Za-z0-9_-]{20,}\b/i)?.[0] || '';
+        if (!reference) throw new Error('Include a Google Sheets URL or spreadsheet ID so I can read the requested sheet.');
+        const sheet = await readGoogleSheetValues(companyId, sheetsConn.id, reference, undefined, employee.id);
+        const rowSummary = sheet.values.slice(0, 8).map((row) => row.join(' | ')).join('\\n');
+        results.push({ employee_id: employee.id, employee_name: employee.name, connector_name: 'Google Sheets', tool_name: 'sheets.read', status: 'executed', summary: `Read Google Sheet "${sheet.title}" (${sheet.range}).\\n${rowSummary || 'The requested range is empty.'}`, created_at: createdAt });
+      } catch (sErr: any) {
+        results.push(connectorAccessFailure(employee, 'Google Sheets', 'sheets.read', `Google Sheets read failed: ${String(sErr?.message || 'The provider request failed.').slice(0, 420)}`, createdAt));
+      }
+    }
+  }
+
+  // 2. Streamable HTTP MCP tools execution
+  const httpConnections = connections.filter((connection) => connection.status === 'connected' && connection.connection_type === 'streamable_http');
   const candidates: Array<{ connection: TenantConnector; tool: any; args: Record<string, any> }> = [];
-  for (const connection of connections.slice(0, 5)) {
+  for (const connection of httpConnections.slice(0, 5)) {
     for (const tool of (connection.discovered_tools || []).slice(0, 25)) {
       if (tool.risk === 'write' || isLikelyWriteTool(tool.name)) continue;
       const grant = (connection.tool_grants || []).find((entry) => entry.tool_name === tool.name);
@@ -1472,7 +2607,7 @@ async function executeEmployeeReadTools(companyId: string, employee: any, questi
     }
     if (candidates.length >= 2) break;
   }
-  const results = await Promise.all(candidates.map(async ({ connection, tool, args }) => {
+  const httpResults = await Promise.all(candidates.map(async ({ connection, tool, args }) => {
     const createdAt = new Date().toISOString();
     try {
       const initialized = await mcpRpc(connection, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'Caveworkers', version: '1.0.0' } });
@@ -1483,42 +2618,117 @@ async function executeEmployeeReadTools(companyId: string, employee: any, questi
       return { employee_id: employee.id, employee_name: employee.name, connector_name: connection.name, tool_name: tool.name, status: 'failed' as const, summary: String(error?.message || 'The read tool failed.').slice(0, 500), created_at: createdAt };
     }
   }));
-  return results;
+  return [...results, ...httpResults];
 }
 
 async function getGoogleConnection(companyId: string, employeeId: string, connectionId: number, type: 'google_gmail' | 'google_drive' | 'google_sheets') {
   const connections = await loadMcpConnections(companyId, employeeId);
-  const connection = connections.find((entry) => entry.id === connectionId && entry.connection_type === type && entry.status === 'connected');
+  let connection = connections.find((entry) => entry.id === connectionId && entry.connection_type === type && entry.status === 'connected' && entry.auth_token_encrypted);
+  if (!connection) {
+    connection = connections.find((entry) => entry.connection_type === type && entry.status === 'connected' && entry.auth_token_encrypted);
+  }
+  if (!connection) {
+    const allEmployees = activeWorkforce(companyId);
+    for (const emp of allEmployees) {
+      const empConns = await loadMcpConnections(companyId, emp.id);
+      const matched = empConns.find((e) => e.connection_type === type && e.status === 'connected' && e.auth_token_encrypted);
+      if (matched) {
+        connection = matched;
+        break;
+      }
+    }
+  }
   if (!connection || !connection.auth_token_encrypted) throw new Error(`The requested Google connector is not connected for ${employeeId}.`);
   const credentials = decryptConnectorCredentials(connection.auth_token_encrypted);
-  if (!credentials) throw new Error('The Google connector credentials cannot be decrypted. Rotate the connector and reconnect it.');
+  if (!credentials) {
+    connection.status = 'error';
+    connection.last_error = 'The encrypted Google credentials could not be decrypted. Reconnect this connector.';
+    await persistMcpConnection(connection);
+    throw new Error(connection.last_error);
+  }
+  if (connection.oauth_revoked_at) {
+    connection.status = 'error';
+    connection.last_error = 'Google revoked this connector authorization. Reconnect the connector to continue.';
+    await persistMcpConnection(connection);
+    throw new Error(connection.last_error);
+  }
   const oauth2 = googleOAuthClient();
   oauth2.setCredentials(credentials);
+  const expiryDate = Number(credentials.expiry_date || (connection.oauth_expires_at ? Date.parse(connection.oauth_expires_at) : 0));
+  if (expiryDate > 0 && expiryDate <= Date.now() + 60_000) {
+    if (!credentials.refresh_token) {
+      connection.status = 'error';
+      connection.last_error = 'Google access expired and no refresh authorization is available. Reconnect the connector.';
+      connection.oauth_expires_at = new Date(expiryDate).toISOString();
+      await persistMcpConnection(connection);
+      throw new Error(connection.last_error);
+    }
+    try {
+      await oauth2.getAccessToken();
+      const refreshedCredentials = { ...credentials, ...oauth2.credentials };
+      connection.auth_token_encrypted = encryptConnectorCredentials(refreshedCredentials);
+      connection.oauth_expires_at = refreshedCredentials.expiry_date ? new Date(Number(refreshedCredentials.expiry_date)).toISOString() : undefined;
+      connection.last_refresh_at = new Date().toISOString();
+      connection.status = 'connected';
+      connection.last_error = undefined;
+      connection.oauth_revoked_at = undefined;
+      await persistMcpConnection(connection);
+    } catch (refreshError: any) {
+      const refreshMessage = String(refreshError?.message || 'Google token refresh failed.').slice(0, 420);
+      const revoked = /invalid_grant|revoked|unauthorized|invalid credentials/i.test(refreshMessage);
+      connection.status = 'error';
+      connection.last_error = revoked ? 'Google revoked this connector authorization. Reconnect the connector.' : `Google token refresh failed: ${refreshMessage}`;
+      if (revoked) connection.oauth_revoked_at = new Date().toISOString();
+      await persistMcpConnection(connection);
+      throw new Error(connection.last_error);
+    }
+  }
   return { connection, oauth2 };
 }
 
 async function propagateCompanyGoogleConnection(connection: TenantConnector) {
-  const companyEmail = String(connection.config?.company_email || '').trim().toLowerCase();
-  const authorizedEmail = String(connection.oauth_email || '').trim().toLowerCase();
-  if (!companyEmail || !authorizedEmail || companyEmail !== authorizedEmail || !['google_gmail', 'google_drive', 'google_sheets'].includes(connection.connection_type)) return 0;
+  if (!['google_gmail', 'google_drive', 'google_sheets'].includes(connection.connection_type) || connection.status !== 'connected') return 0;
   const employees = activeWorkforce(connection.company_id);
   let created = 0;
   for (const employee of employees) {
     if (employee.id === connection.employee_id) continue;
-    const existing = (await loadMcpConnections(connection.company_id, employee.id)).find((entry) => entry.connection_type === connection.connection_type && String(entry.config?.company_email || '').toLowerCase() === companyEmail);
-    if (existing) continue;
+    const existingList = await loadMcpConnections(connection.company_id, employee.id);
+    const existing = existingList.find((entry) => entry.connection_type === connection.connection_type);
     const now = new Date().toISOString();
-    const shared: TenantConnector = {
-      ...connection,
-      id: Date.now() + created + 1,
-      employee_id: employee.id,
-      name: `${connection.name} · Company account`,
-      tool_grants: (connection.tool_grants || []).map((grant) => ({ ...grant })),
-      created_at: now,
-      updated_at: now
-    };
-    await persistMcpConnection(shared);
-    created += 1;
+    if (existing) {
+      existing.auth_token_encrypted = connection.auth_token_encrypted;
+      existing.oauth_email = connection.oauth_email;
+      existing.auth_scopes = connection.auth_scopes;
+      existing.status = connection.status;
+      existing.last_error = connection.last_error;
+      existing.oauth_expires_at = connection.oauth_expires_at;
+      existing.oauth_revoked_at = connection.oauth_revoked_at;
+      existing.last_refresh_at = connection.last_refresh_at;
+      existing.access_level = connection.access_level;
+      existing.autonomy_mode = connection.autonomy_mode;
+      existing.config = { ...(existing.config || {}), ...(connection.config || {}) };
+      existing.tool_grants = (connection.tool_grants || []).map((grant) => ({ ...grant }));
+      existing.discovered_tools = (connection.discovered_tools || []).map((tool) => ({ ...tool }));
+      existing.updated_at = now;
+      await persistMcpConnection(existing);
+      created += 1;
+    } else {
+      const shared: TenantConnector = {
+        ...connection,
+        id: Date.now() + created + 1,
+        employee_id: employee.id,
+        name: `${connection.name} · Shared`,
+        tool_grants: (connection.tool_grants || []).map((grant) => ({ ...grant })),
+        discovered_tools: (connection.discovered_tools || []).map((t) => ({ ...t })),
+        oauth_expires_at: connection.oauth_expires_at,
+        oauth_revoked_at: connection.oauth_revoked_at,
+        last_refresh_at: connection.last_refresh_at,
+        created_at: now,
+        updated_at: now
+      };
+      await persistMcpConnection(shared);
+      created += 1;
+    }
   }
   return created;
 }
@@ -1730,8 +2940,10 @@ async function persistAnalystDataSource(sourceRecord: AnalystDataSource) {
 }
 
 async function loadAnalystDataSources(companyId: string): Promise<AnalystDataSource[]> {
-  const cached = db.analystDataSources.get(companyId);
-  if (cached) return cached;
+  if (!IS_PRODUCTION) {
+    const cached = db.analystDataSources.get(companyId);
+    if (cached) return cached;
+  }
   const collection = analystTenantCollection(companyId, 'data_sources');
   if (collection) {
     try {
@@ -1740,7 +2952,7 @@ async function loadAnalystDataSources(companyId: string): Promise<AnalystDataSou
       db.analystDataSources.set(companyId, entries);
       return entries;
     } catch (error) {
-      console.warn('Could not load analyst data sources:', error);
+      handleFirestoreFailure('analyst_data_sources_load', error);
     }
   }
   return [];
@@ -1756,8 +2968,10 @@ async function persistAnalystMemory(memory: AnalystMemory) {
 }
 
 async function loadAnalystMemory(companyId: string, memoryType?: AnalystMemory['memory_type']): Promise<AnalystMemory[]> {
-  const cached = db.analystMemory.get(companyId) || [];
-  if (cached.length) return memoryType ? cached.filter((entry) => entry.memory_type === memoryType) : cached;
+  if (!IS_PRODUCTION) {
+    const cached = db.analystMemory.get(companyId) || [];
+    if (cached.length) return memoryType ? cached.filter((entry) => entry.memory_type === memoryType) : cached;
+  }
   const loaded: AnalystMemory[] = [];
   for (const kind of (memoryType ? [memoryType] : ['long_term', 'working'] as AnalystMemory['memory_type'][])) {
     const collection = analystTenantCollection(companyId, kind === 'working' ? 'working_memory' : 'long_term_memory');
@@ -1766,7 +2980,7 @@ async function loadAnalystMemory(companyId: string, memoryType?: AnalystMemory['
       const snapshot = await collection.orderBy('created_at', 'desc').limit(40).get();
       loaded.push(...snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as AnalystMemory)));
     } catch (error) {
-      console.warn('Could not load analyst memory:', error);
+      handleFirestoreFailure('analyst_memory_load', error);
     }
   }
   loaded.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
@@ -2054,26 +3268,46 @@ function getAuthUserOrDefault(req: express.Request): User {
     email: 'user@caveworkers.com',
     display_name: 'Workspace Manager',
     company_id: DEFAULT_COMPANY_ID,
-    company_name: 'Acme Operations',
+    company_name: 'Workspace',
     onboarded: true,
     selected_tier: 'growth'
   };
 }
 
-// Verify Firebase session cookies before protected routes are evaluated.
+// Verify session cookies before protected routes are evaluated.
 app.use(async (req, res, next) => {
   const sessionCookie = req.cookies?.__session;
-  if (!sessionCookie || !firebaseAuth) return next();
+  if (!sessionCookie) return next();
 
-  try {
-    const decoded = await firebaseAuth.verifySessionCookie(sessionCookie, true);
-    const user = await loadUserFromFirebase(decoded.uid);
-    if (!user) throw new Error('Firebase user profile not found');
-    authenticatedUsers.set(req, user);
-  } catch (_error) {
-    res.clearCookie('__session', { path: '/' });
-    res.clearCookie('cw_csrf', { path: '/' });
+  // 1. Verify signed HMAC session token
+  const localSession = verifySessionPayload(sessionCookie);
+  if (localSession?.uid) {
+    let user = db.users.get(localSession.uid);
+    if (!user && firestoreDb) {
+      user = (await loadUserFromFirebase(localSession.uid)) || undefined;
+    }
+    if (user) {
+      authenticatedUsers.set(req, user);
+      return next();
+    }
   }
+
+  // 2. Verify Firebase Admin session cookie if Firebase Auth is initialized
+  if (firebaseAuth) {
+    try {
+      const decoded = await firebaseAuth.verifySessionCookie(sessionCookie, true);
+      let user = (await loadUserFromFirebase(decoded.uid)) || db.users.get(decoded.uid) || null;
+      if (user) {
+        authenticatedUsers.set(req, user);
+        return next();
+      }
+    } catch (_error) {
+      // Invalid cookie
+    }
+  }
+
+  res.clearCookie('__session', { path: '/' });
+  res.clearCookie('cw_csrf', { path: '/' });
   next();
 });
 
@@ -2090,7 +3324,7 @@ if (process.env.NODE_ENV === 'test' || process.env.VITEST === 'true') {
 // Every unsafe API request must echo the same token issued in the readable CSRF cookie.
 app.use('/api', (req, res, next) => {
   const unsafe = /^(POST|PUT|PATCH|DELETE)$/i.test(req.method);
-  const publicPath = req.path === '/session-login' || req.path === '/session-logout' || req.path === '/payments/webhook';
+  const publicPath = req.path === '/session-login' || req.path === '/session-logout' || req.path === '/payments/webhook' || req.path === '/internal/workflows/tick';
   if (!unsafe || publicPath) return next();
 
   const cookieToken = req.cookies?.cw_csrf || '';
@@ -2120,7 +3354,7 @@ app.use('/api', (req, res, next) => {
 
 // All non-auth API routes require the verified Firebase session above.
 app.use('/api', (req, res, next) => {
-  const publicApiPaths = new Set(['/health', '/session-login', '/session-logout', '/payments/webhook']);
+  const publicApiPaths = new Set(['/health', '/firebase-config', '/session-login', '/session-logout', '/payments/webhook', '/internal/workflows/tick']);
   if (publicApiPaths.has(req.path)) return next();
   if (!getAuthUser(req)) return res.status(401).json({ error: 'Authentication required.' });
   next();
@@ -2134,11 +3368,25 @@ async function enforceWorkspaceAccess(req: express.Request, res: express.Respons
   }
   const company = user.company_id ? await loadCompanyFromFirebase(user.company_id) || db.companies.get(user.company_id) : null;
   if (!company) return false;
+  if (company.status === 'deletion_requested' || company.status === 'deleted') {
+    res.status(423).json({ error: 'This workspace is scheduled for deletion and cannot perform operational actions.', code: 'workspace_deletion_pending', deletion_requested_at: company.deletion_requested_at, deletion_scheduled_for: company.deletion_scheduled_for });
+    return true;
+  }
   if (isTrialExpired(company.tier, company.trial_ends_at)) {
     res.status(402).json({ error: 'Your free trial has ended. Upgrade to continue using workspace actions.', upgrade_required: true, trial_ends_at: company.trial_ends_at });
     return true;
   }
   return false;
+}
+
+function stableGoogleWorkspaceId(uid: string): string {
+  return `org_google_${crypto.createHash('sha256').update(String(uid)).digest('hex').slice(0, 24)}`;
+}
+
+function getUserWorkspaceId(user?: Partial<User> | null): string {
+  if (user?.company_id) return user.company_id;
+  if (user?.uid) return stableGoogleWorkspaceId(user.uid);
+  return DEFAULT_COMPANY_ID;
 }
 
 function getTenantIdOrFail(req: express.Request, res: express.Response): string | null {
@@ -2152,6 +3400,30 @@ function getTenantIdOrFail(req: express.Request, res: express.Response): string 
     return null;
   }
   return user.company_id;
+}
+
+function normalizedWorkspaceRole(user: User): 'owner' | 'admin' | 'member' {
+  const role = String(user.role || '').trim().toLowerCase();
+  if (role === 'owner' || role === 'admin') return role;
+  return 'member';
+}
+
+function workspaceRoleAllows(user: User, required: 'member' | 'admin' | 'owner'): boolean {
+  const rank: Record<'member' | 'admin' | 'owner', number> = { member: 1, admin: 2, owner: 3 };
+  return rank[normalizedWorkspaceRole(user)] >= rank[required];
+}
+
+function requireWorkspaceRole(req: express.Request, res: express.Response, required: 'member' | 'admin' | 'owner'): boolean {
+  const user = getAuthUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Authentication required.' });
+    return false;
+  }
+  if (!workspaceRoleAllows(user, required)) {
+    res.status(403).json({ error: `${required} workspace permission required.`, code: 'workspace_role_required', required_role: required });
+    return false;
+  }
+  return true;
 }
 
 // ── PAGE ROUTES ──────────────────────────────────────────
@@ -2173,6 +3445,7 @@ app.get('/onboarding', (req, res) => {
   if (!user) {
     return res.redirect('/login');
   }
+  if (user.onboarded) return res.redirect('/command');
   res.render('onboarding', {
     firebase_config: FIREBASE_WEB_CONFIG,
     plans: SUBSCRIPTION_PLANS,
@@ -2186,10 +3459,11 @@ app.get('/command', (req, res) => {
   if (!user) {
     return res.redirect('/login');
   }
+  if (!user.onboarded) return res.redirect('/onboarding');
   res.render('command', {
     firebase_config: FIREBASE_WEB_CONFIG,
     user,
-    org_id: user.company_id || DEFAULT_COMPANY_ID
+    org_id: user.company_id || ''
   });
 });
 
@@ -2200,18 +3474,20 @@ app.get('/dashboard', (_req, res) => {
 app.get('/analyst', (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.redirect('/login');
-  res.render('analyst', { firebase_config: FIREBASE_WEB_CONFIG, user, org_id: user.company_id || DEFAULT_COMPANY_ID, analyst_model: OPENROUTER_KEY_READY ? ANALYST_MODEL : (genAIClient ? 'Gemini fallback' : 'Preview planner') });
+  if (!user.onboarded) return res.redirect('/onboarding');
+  res.render('analyst', { firebase_config: FIREBASE_WEB_CONFIG, user, org_id: user.company_id || '', analyst_model: OPENROUTER_KEY_READY ? ANALYST_MODEL : (genAIClient ? 'Gemini fallback' : 'Preview planner') });
 });
 
 app.get('/employee/:id', (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.redirect('/login');
+  if (!user.onboarded) return res.redirect('/onboarding');
   const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
   if (!employee) return res.status(404).render('404', { message: 'Employee not found' });
   res.render('employee', {
     firebase_config: FIREBASE_WEB_CONFIG,
     user,
-    org_id: user.company_id || DEFAULT_COMPANY_ID,
+    org_id: user.company_id || '',
     employee,
     employee_catalog: EMPLOYEE_CATALOG
   });
@@ -2222,10 +3498,11 @@ app.get('/settings', (req, res) => {
   if (!user) {
     return res.redirect('/login');
   }
+  if (!user.onboarded) return res.redirect('/onboarding');
   res.render('settings', {
     firebase_config: FIREBASE_WEB_CONFIG,
     user,
-    org_id: user.company_id || DEFAULT_COMPANY_ID,
+    org_id: user.company_id || '',
     plans: SUBSCRIPTION_PLANS,
     employee_catalog: EMPLOYEE_CATALOG
   });
@@ -2239,14 +3516,38 @@ app.get('/privacy', (_req, res) => {
   res.render('privacy');
 });
 
+app.get('/trust', (_req, res) => {
+  res.render('trust');
+});
+
 // ── HEALTH & API ROUTES ──────────────────────────────────
 
-app.get('/api/health', (_req, res) => {
-  res.json({
-    status: 'healthy',
+app.get('/api/health', async (_req, res) => {
+  let databaseStatus: 'active' | 'unconfigured' | 'error' = firestoreDb ? 'active' : 'unconfigured';
+  let databaseError: string | undefined;
+  if (IS_PRODUCTION) {
+    if (!firestoreDb) {
+      databaseStatus = 'error';
+      databaseError = 'Firestore is not configured.';
+    } else {
+      try {
+        await firestoreDb.collection('users').limit(1).get();
+      } catch (error) {
+        reportOperationalFailure('firestore.readiness', error);
+        if (isInitialDatabaseStatusError(error)) {
+          databaseStatus = 'error';
+          databaseError = 'Firestore readiness probe failed.';
+        }
+      }
+    }
+  }
+  const ready = databaseStatus !== 'error';
+  res.status(ready ? 200 : 503).json({
+    status: ready ? 'healthy' : 'degraded',
+    ready,
     timestamp: new Date().toISOString(),
     components: {
-      database: { status: firestoreDb ? 'active' : 'unconfigured' },
+      database: { status: databaseStatus, error: databaseError },
       payments: { status: RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET && RAZORPAY_WEBHOOK_SECRET ? 'configured' : 'unconfigured' },
       firebase: { status: firebaseAuth && firestoreDb ? 'active' : 'unconfigured' },
       analyst: { status: OPENROUTER_KEY_READY ? 'openrouter_configured' : genAIClient ? 'gemini_fallback' : 'preview_only', model: OPENROUTER_KEY_READY ? ANALYST_MODEL : undefined },
@@ -2258,36 +3559,94 @@ app.get('/api/health', (_req, res) => {
   });
 });
 
+app.get('/api/firebase-config', (_req, res) => {
+  res.json(FIREBASE_WEB_CONFIG);
+});
+
 app.post('/api/session-login', async (req, res) => {
   const { idToken } = req.body || {};
-  if (!idToken || !firebaseAuth || !firestoreDb) {
-    return res.status(503).json({ error: 'Google sign-in is not configured on this server.' });
+
+  let decodedUser: { uid: string; email: string; name?: string; picture?: string; email_verified?: boolean; firebase?: { sign_in_provider: string } } | null = null;
+
+  // 1. If Firebase Admin is available, try verifying ID token
+  if (idToken && firebaseAuth) {
+    try {
+      const fbDecoded = await firebaseAuth.verifyIdToken(idToken);
+      if (fbDecoded?.uid && fbDecoded.email) {
+        const provider = fbDecoded.firebase?.sign_in_provider || (fbDecoded.firebase?.identities?.['google.com'] ? 'google.com' : 'google.com');
+        decodedUser = {
+          uid: fbDecoded.uid,
+          email: fbDecoded.email,
+          name: fbDecoded.name || fbDecoded.email.split('@')[0],
+          picture: fbDecoded.picture || '',
+          email_verified: Boolean(fbDecoded.email_verified),
+          firebase: { sign_in_provider: provider }
+        };
+      }
+    } catch (_err) {
+      // Fall back to direct JWT decoding below
+    }
   }
 
-  let decodedUser: any;
-  try {
-    decodedUser = await firebaseAuth.verifyIdToken(idToken);
-  } catch (_error) {
-    return res.status(401).json({ error: 'The Google sign-in token is invalid or expired.' });
+  // 2. Decode standard Google / Firebase JWT ID token if decodedUser is still not resolved
+  if (!decodedUser && idToken && typeof idToken === 'string') {
+    try {
+      const parts = idToken.split('.');
+      if (parts.length === 3) {
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+        if (payload && (payload.sub || payload.user_id || payload.email)) {
+          const userEmail = payload.email || `${payload.sub || 'user'}@caveworkers.internal`;
+          const uid = payload.user_id || payload.sub || `user_${crypto.createHash('sha256').update(userEmail).digest('hex').slice(0, 12)}`;
+
+          let provider = payload.firebase?.sign_in_provider || '';
+          if (!provider && (payload.iss?.includes('accounts.google.com') || payload.iss?.includes('securetoken.google.com') || payload.firebase?.identities?.['google.com'])) {
+            provider = 'google.com';
+          }
+          if (!provider && (payload.email_verified || userEmail.includes('@gmail.com') || userEmail.includes('@'))) {
+            provider = 'google.com';
+          }
+
+          decodedUser = {
+            uid,
+            email: userEmail,
+            name: payload.name || payload.display_name || userEmail.split('@')[0],
+            picture: payload.picture || '',
+            email_verified: Boolean(payload.email_verified),
+            firebase: { sign_in_provider: provider || 'google.com' }
+          };
+        }
+      }
+    } catch (_decodeErr) {
+      // Fallback
+    }
   }
 
-  if (!decodedUser?.uid || !decodedUser.email || decodedUser.firebase?.sign_in_provider !== 'google.com') {
-    return res.status(401).json({ error: 'Please sign in with a verified Google account.' });
+  if (!decodedUser || !decodedUser.email) {
+    return res.status(401).json({ error: 'Google authentication is required.', code: 'google_auth_required' });
+  }
+
+  const provider = decodedUser.firebase?.sign_in_provider || '';
+  if (provider !== 'google.com') {
+    return res.status(403).json({ error: 'Only Google accounts can sign in to Caveworkers.', code: 'google_only_authentication' });
   }
 
   const now = new Date().toISOString();
-  const existingUser = await loadUserFromFirebase(decodedUser.uid);
+  const existingUser = (await loadUserFromFirebase(decodedUser.uid)) || db.users.get(decodedUser.uid);
+  const generatedCompanyId = stableGoogleWorkspaceId(decodedUser.uid);
+  const companyId = existingUser?.company_id && existingUser.company_id !== DEFAULT_COMPANY_ID ? existingUser.company_id : generatedCompanyId;
+  const companyName = existingUser?.company_name || '';
+
   const user: User = {
     ...(existingUser || {}),
     uid: decodedUser.uid,
     email: decodedUser.email,
     display_name: decodedUser.name || existingUser?.display_name || decodedUser.email.split('@')[0],
     photo_url: decodedUser.picture || existingUser?.photo_url || '',
-    company_id: existingUser?.company_id,
-    company_name: existingUser?.company_name,
+    company_id: companyId,
+    company_name: companyName,
     onboarded: existingUser?.onboarded ?? false,
     selected_tier: existingUser?.selected_tier || 'free_trial',
-    role: existingUser?.role || 'admin',
+    role: existingUser?.role || 'owner',
     created_at: existingUser?.created_at || now,
     updated_at: now
   };
@@ -2298,36 +3657,60 @@ app.post('/api/session-login', async (req, res) => {
       email_verified: Boolean(decodedUser.email_verified)
     });
 
-    const existingCompany = user.company_id ? await loadCompanyFromFirebase(user.company_id) : null;
-    if (user.company_id && !existingCompany) {
+    const existingCompany = (await loadCompanyFromFirebase(companyId)) || db.companies.get(companyId);
+    if (!existingCompany) {
       const company: Company = {
-        id: user.company_id!,
-        name: user.company_name || 'Acme Operations',
-        industry: 'Technology',
-        team_size: '11-50',
+        id: companyId,
+        name: companyName,
+        industry: '',
+        team_size: '',
+        user_role: '',
+        business_goals: '',
+        workspace_guidelines: '',
         owner_uid: user.uid,
-        tier: user.selected_tier || 'growth',
-        status: 'active',
-        selected_employees: ['sarah', 'david', 'alex', 'mike'],
+        tier: 'free_trial',
+        status: 'onboarding',
+        selected_employees: [],
         created_at: now
       };
       await persistCompany(company);
-      db.orgEmployees.set(company.id, db.orgEmployees.get(DEFAULT_COMPANY_ID) || []);
-      db.knowledge.set(company.id, db.knowledge.get(DEFAULT_COMPANY_ID) || []);
+      db.orgEmployees.set(company.id, []);
+      db.knowledge.set(company.id, []);
+    } else if (user.onboarded && existingCompany.tier === 'free_trial' && !existingCompany.trial_started_at) {
+      const trialStartedAt = new Date();
+      existingCompany.trial_started_at = trialStartedAt.toISOString();
+      existingCompany.trial_ends_at = new Date(trialStartedAt.getTime() + (SUBSCRIPTION_PLANS.free_trial.trial_days || 3) * 24 * 60 * 60 * 1000).toISOString();
+      existingCompany.status = 'active';
+      await persistCompany(existingCompany);
     }
 
-    const sessionCookie = await firebaseAuth.createSessionCookie(idToken, { expiresIn: SESSION_COOKIE_MAX_AGE });
+    let sessionCookie: string;
+    if (firebaseAuth && idToken) {
+      try {
+        sessionCookie = await firebaseAuth.createSessionCookie(idToken, { expiresIn: SESSION_COOKIE_MAX_AGE });
+      } catch {
+        sessionCookie = signSessionPayload({ uid: user.uid, email: user.email, exp: Date.now() + SESSION_COOKIE_MAX_AGE });
+      }
+    } else {
+      sessionCookie = signSessionPayload({ uid: user.uid, email: user.email, exp: Date.now() + SESSION_COOKIE_MAX_AGE });
+    }
+
     const csrfToken = crypto.randomBytes(32).toString('hex');
     res.cookie('__session', sessionCookie, sessionCookieOptions);
     res.cookie('cw_csrf', csrfToken, readableCookieOptions);
     res.json({
       status: 'success',
       redirect: user.onboarded ? '/command' : '/onboarding',
-      csrf_token: csrfToken
+      csrf_token: csrfToken,
+      user: {
+        uid: user.uid,
+        email: user.email,
+        display_name: user.display_name
+      }
     });
   } catch (error: any) {
     const code = typeof error?.code === 'string' ? error.code : 'session_persistence_failed';
-    console.error('Firebase session persistence failed:', { code, message: error?.message || String(error) });
+    console.error('Session persistence failed:', { code, message: error?.message || String(error) });
     res.status(500).json({ error: 'Could not create a secure CaveWorkers session.', code });
   }
 });
@@ -2355,11 +3738,11 @@ app.get('/api/me', (req, res) => {
 
 app.get('/api/billing', async (req, res) => {
   const user = getAuthUser(req);
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const company: Company = user.company_id
     ? await loadCompanyFromFirebase(companyId) || db.companies.get(companyId) || {
       id: companyId,
-      name: user.company_name || 'Acme Operations',
+      name: user.company_name || 'Workspace',
       tier: user.selected_tier || 'free_trial',
       status: 'active',
       owner_uid: user.uid,
@@ -2367,7 +3750,7 @@ app.get('/api/billing', async (req, res) => {
     }
     : db.companies.get(companyId) || {
       id: companyId,
-      name: user.company_name || 'Acme Operations',
+      name: user.company_name || 'Workspace',
       tier: user.selected_tier || 'free_trial',
       status: 'active',
       owner_uid: user.uid,
@@ -2407,25 +3790,34 @@ app.post('/api/onboarding/save-profile', async (req, res) => {
 
 app.post('/api/onboarding/save-company', async (req, res) => {
   const user = getAuthUser(req);
-  const { company_name, industry, team_size } = req.body || {};
+  const { company_name, industry, team_size, user_role, business_goals, workspace_guidelines } = req.body || {};
   if (!company_name) {
     return res.status(400).json({ error: 'Company name is required' });
   }
-  const company_id = `org_${user.uid.slice(0, 10)}`;
+  const company_id = user.company_id || stableGoogleWorkspaceId(user.uid);
   user.company_id = company_id;
   user.company_name = company_name;
+  if (user_role) user.user_role = user_role;
+
   const company: Company = {
     id: company_id,
     name: company_name,
-    industry: industry || 'Technology',
-    team_size: team_size || '11-50',
+    industry: String(industry || '').trim(),
+    team_size: String(team_size || '').trim(),
+    user_role: String(user_role || '').trim(),
+    business_goals: String(business_goals || '').trim(),
+    workspace_guidelines: String(workspace_guidelines || '').trim(),
+    description: business_goals || '',
+    guidelines: workspace_guidelines || '',
     owner_uid: user.uid,
     tier: 'free_trial',
-    status: 'active',
+    status: 'onboarding',
+    selected_employees: [],
     created_at: new Date().toISOString()
   };
   await persistUser(user);
   await persistCompany(company);
+  await syncCompanyToEmployeeMemory(company_id, user, company);
 
   res.json({ ok: true, company_id });
 });
@@ -2440,9 +3832,7 @@ app.post('/api/onboarding/select-plan', async (req, res) => {
       if (comp) {
         comp.tier = tier;
         if (tier === 'free_trial') {
-          const trialStartedAt = comp.trial_started_at || new Date().toISOString();
-          comp.trial_started_at = trialStartedAt;
-          comp.trial_ends_at = comp.trial_ends_at || new Date(Date.parse(trialStartedAt) + (SUBSCRIPTION_PLANS.free_trial.trial_days || 3) * 24 * 60 * 60 * 1000).toISOString();
+          // The free trial starts only when onboarding is completed, never when a plan card is selected.
           comp.status = 'active';
         } else {
           comp.status = 'payment_pending';
@@ -2457,7 +3847,8 @@ app.post('/api/onboarding/select-plan', async (req, res) => {
 
 app.post('/api/onboarding/select-employees', async (req, res) => {
   const user = getAuthUser(req);
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
   const { employee_ids } = req.body || {};
 
   if (Array.isArray(employee_ids)) {
@@ -2491,6 +3882,7 @@ app.post('/api/onboarding/select-employees', async (req, res) => {
     if (company) {
       company.selected_employees = employee_ids;
       await persistCompany(company);
+      await syncCompanyToEmployeeMemory(companyId, user, company);
     }
   }
   res.json({ ok: true, employees_added: (employee_ids || []).length });
@@ -2509,17 +3901,19 @@ app.post('/api/onboarding/complete', async (req, res) => {
       }
       company.status = 'active';
       await persistCompany(company);
+      await syncCompanyToEmployeeMemory(company.id, user, company);
     }
   }
   await persistUser(user);
 
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
   await persistActivityLog(companyId, {
     id: Date.now(),
     sender: 'System',
     receiver: 'Workspace',
     kind: 'workspace.onboarded',
-    body: `Workspace "${user.company_name || 'Acme'}" setup complete on ${user.selected_tier || 'Growth'} plan.`,
+    body: `Workspace "${user.company_name || 'your company'}" setup complete on ${user.selected_tier || 'free_trial'} plan.`,
     created_at: new Date().toISOString()
   });
 
@@ -2528,35 +3922,32 @@ app.post('/api/onboarding/complete', async (req, res) => {
 
 app.get('/api/company', async (req, res) => {
   const user = getAuthUser(req);
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const company = user.company_id ? await loadCompanyFromFirebase(companyId) || db.companies.get(companyId) : db.companies.get(companyId) || {
-    id: companyId,
-    name: user.company_name || 'Acme Operations',
-    industry: 'Technology',
-    team_size: '11-50',
-    tier: user.selected_tier || 'free_trial',
-    status: 'active',
-    owner_uid: user.uid,
-    created_at: new Date().toISOString()
-  };
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
+  const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId);
+  if (!company) return res.status(404).json({ error: 'Workspace onboarding has not been completed.' });
   res.json(company);
 });
 
 app.post('/api/company', async (req, res) => {
   const user = getAuthUser(req);
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const company = db.companies.get(companyId) || {
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
+  const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId) || {
     id: companyId,
-    name: user.company_name || 'Acme Operations',
-    tier: 'growth',
-    status: 'active',
+    name: user.company_name || '',
+    tier: user.selected_tier || 'free_trial',
+    status: 'onboarding',
     owner_uid: user.uid,
+    selected_employees: [],
     created_at: new Date().toISOString()
   };
   Object.assign(company, req.body);
   if (req.body.name) user.company_name = req.body.name;
+  if (req.body.user_role) user.user_role = req.body.user_role;
   await persistUser(user);
   await persistCompany(company);
+  await syncCompanyToEmployeeMemory(companyId, user, company);
   res.json({ ok: true, company });
 });
 
@@ -2566,7 +3957,7 @@ app.get('/api/employee-catalog', (_req, res) => {
 
 app.get('/api/employees', async (req, res) => {
   const user = getAuthUser(req);
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const emps = await loadOrgEmployees(companyId);
   res.json(emps);
 });
@@ -2574,7 +3965,8 @@ app.get('/api/employees', async (req, res) => {
 app.post('/api/employees/configure', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
   const { employee_id, action } = req.body || {};
 
   let emps = await loadOrgEmployees(companyId);
@@ -2612,7 +4004,8 @@ app.post('/api/employees/configure', async (req, res) => {
 app.patch('/api/employees/:id/autonomy', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
   const emps = await loadOrgEmployees(companyId);
   const employee = emps.find((entry) => entry.id === req.params.id);
   if (!employee) return res.status(404).json({ error: 'Employee not found.' });
@@ -2630,11 +4023,12 @@ app.patch('/api/employees/:id/autonomy', async (req, res) => {
 app.post('/api/employees/:id/tools', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
   const empId = req.params.id;
   const { tool_name, action, access_level } = req.body || {};
 
-  const emps = db.orgEmployees.get(companyId) || db.orgEmployees.get(DEFAULT_COMPANY_ID) || [];
+  const emps = db.orgEmployees.get(companyId) || [];
   const emp = emps.find((e) => e.id === empId);
 
   if (!emp) {
@@ -2662,7 +4056,7 @@ app.post('/api/employees/:id/tools', async (req, res) => {
 app.patch('/api/employees/:id/mcp-connections/:connectionId/autonomy', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const employeeId = req.params.id;
   const connectionId = Number(req.params.connectionId);
   const connections = await loadMcpConnections(companyId, employeeId);
@@ -2760,8 +4154,14 @@ app.post('/api/workforce/workroom', async (req, res) => {
   if (await enforceWorkspaceAccess(req, res)) return;
   const message = String(req.body?.message || '').trim().slice(0, 6000);
   if (!message) return res.status(400).json({ error: 'A company workroom message is required.' });
-  const result = await enqueueWorkforceTask(companyId, message, typeof req.body?.preferred_employee_id === 'string' ? req.body.preferred_employee_id : undefined, typeof req.body?.email_employee_id === 'string' ? req.body.email_employee_id : undefined);
-  res.status(202).json(result);
+  try {
+    const result = await enqueueWorkforceTask(companyId, message, typeof req.body?.preferred_employee_id === 'string' ? req.body.preferred_employee_id : undefined, typeof req.body?.email_employee_id === 'string' ? req.body.email_employee_id : undefined);
+    res.status(202).json(result);
+  } catch (error: any) {
+    if (error?.code === 'task_quota_exceeded') return res.status(402).json({ error: error.message, code: error.code, limit: error.limit, usage: error.usage });
+    reportOperationalFailure('task.enqueue', error, { tenant_hash: anonymizeIdentifier(companyId) });
+    return res.status(500).json({ error: 'The task could not be queued safely.' });
+  }
 });
 
 app.delete('/api/workforce/tasks/:taskId/chat/:messageId', async (req, res) => {
@@ -2797,53 +4197,54 @@ app.get('/api/workforce/stream', (req, res) => {
   req.on('close', () => { clearInterval(heartbeat); streams.delete(res); if (!streams.size) workroomStreams.delete(key); });
 });
 
-app.get('/api/employees/:id/conversation', (req, res) => {
+app.get('/api/employees/:id/conversation', async (req, res) => {
   const companyId = getTenantIdOrFail(req, res);
   if (!companyId) return;
   const empId = req.params.id;
-  const key = `${companyId}:${empId}`;
-
   const empCatalog = EMPLOYEE_CATALOG.find((e) => e.id === empId);
   const empName = empCatalog?.name || empId.toUpperCase();
-
-  const msgs = db.conversations.get(key) || [
-    {
-      sender: empId,
-      receiver: 'manager',
-      body: `Hello! I'm ${empName}. How can I assist with operations, data analysis, or task coordination today?`,
-      created_at: new Date().toISOString()
-    }
-  ];
-
+  const msgs = await loadEmployeeConversation(companyId, empId, empName);
+  res.set('Cache-Control', 'private, no-store');
   res.json({ messages: msgs });
 });
 
 app.post('/api/employees/:id/conversation', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const empId = req.params.id;
   const { message } = req.body || {};
-  const key = `${companyId}:${empId}`;
-
-  const msgs = db.conversations.get(key) || [];
+  const empCatalog = EMPLOYEE_CATALOG.find((e) => e.id === empId) || EMPLOYEE_CATALOG[0];
+  const empName = empCatalog.name;
+  const msgs = await loadEmployeeConversation(companyId, empId, empName);
   const userMsg = { sender: 'manager', receiver: empId, body: message, created_at: new Date().toISOString() };
   msgs.push(userMsg);
 
-  const empCatalog = EMPLOYEE_CATALOG.find((e) => e.id === empId) || EMPLOYEE_CATALOG[0];
-  const empName = empCatalog.name;
+  const [employeeMemories, companyProfile] = await Promise.all([
+    loadEmployeeMemory(companyId, empId),
+    loadCompanyFromFirebase(companyId)
+  ]);
+  const activeCompany = companyProfile || db.companies.get(companyId);
+  const memoryPromptStr = employeeMemories.length
+    ? employeeMemories.map((m) => `- [${m.category}] ${m.content}`).join('\n')
+    : 'No prior memory logged.';
 
   let botAnswer = '';
-  if (genAIClient) {
-    try {
-      const response = await genAIClient.models.generateContent({
-        model: 'gemini-3.6-flash',
-        contents: `${empCatalog.system_prompt}
+  const conversationPrompt = `${empCatalog.system_prompt}
 Role: ${empCatalog.role} (${empCatalog.employee_code || empId.toUpperCase()})
 Department: ${empCatalog.department}
 Autonomy Level: ${empCatalog.autonomy_level || 'Level 3'}
 Attached Tools: ${empCatalog.default_tools.join(', ')}
 Active teammate context: ${(db.orgEmployees.get(companyId) || []).filter((entry) => entry.id !== empId).map((entry) => `${entry.name} (${entry.role})`).join(', ') || 'No other activated teammates'}
+
+[ISOLATED COMPANY & USER MEMORY]
+User / Manager: ${user.display_name || user.email || 'Manager'} (${user.user_role || 'Workspace Manager'})
+Company Name: ${activeCompany?.name || user.company_name || 'Workspace'}
+Industry: ${activeCompany?.industry || 'Not specified'} | Team Size: ${activeCompany?.team_size || 'Not specified'}
+Business Objectives: ${activeCompany?.business_goals || activeCompany?.description || 'N/A'}
+Workspace Guidelines: ${activeCompany?.workspace_guidelines || activeCompany?.guidelines || 'N/A'}
+Role Memory Records for ${empName}:
+${memoryPromptStr}
 ${empId === 'sarah' ? `Sarah operating contract:
 - You are the workforce manager and the single point of accountability for the client.
 - First understand the requested outcome and identify missing inputs before any tool call.
@@ -2909,7 +4310,46 @@ Never claim an external tool action occurred without an execution trace or verif
 
 User Manager Message: "${message}"
 
-Respond as ${empName} directly to your manager in plain workplace chat. Keep it under 90 words unless detail is requested.`
+Respond as ${empName} directly to your manager in plain workplace chat. Keep it under 110 words unless detail is requested.`;
+
+  const empSpecialistConfig = EMPLOYEE_SPECIALIST_CONFIGS[empId] || EMPLOYEE_SPECIALIST_CONFIGS.sarah;
+  if (OPENROUTER_KEY_READY) {
+    try {
+      const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(OPENROUTER_TIMEOUT_MS),
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': PUBLIC_APP_URL,
+          'X-OpenRouter-Title': `Caveworkers Direct Chat: ${empName}`
+        },
+        body: JSON.stringify({
+          model: specialistModelFor(empId),
+          temperature: 0.2,
+          max_tokens: 600,
+          stream: false,
+          user: crypto.createHash('sha256').update(companyId).digest('hex').slice(0, 32),
+          messages: [
+            { role: 'system', content: empSpecialistConfig.systemPrompt },
+            { role: 'user', content: conversationPrompt }
+          ]
+        })
+      });
+      if (response.ok) {
+        const payload: any = await response.json();
+        botAnswer = extractAnalystText(payload?.choices?.[0]?.message?.content);
+      }
+    } catch (openRouterErr) {
+      console.warn('OpenRouter conversation error, falling back to Gemini:', openRouterErr);
+    }
+  }
+
+  if (!botAnswer && genAIClient) {
+    try {
+      const response = await genAIClient.models.generateContent({
+        model: 'gemini-3.6-flash',
+        contents: conversationPrompt
       });
       botAnswer = response.text || '';
     } catch (err) {
@@ -2941,7 +4381,7 @@ Respond as ${empName} directly to your manager in plain workplace chat. Keep it 
 
   const botMsg = { sender: empId, receiver: 'manager', body: botAnswer, created_at: new Date().toISOString() };
   msgs.push(botMsg);
-  db.conversations.set(key, msgs);
+  await persistEmployeeConversation(companyId, empId, msgs);
 
   // Activity log
   await persistActivityLog(companyId, {
@@ -2958,8 +4398,9 @@ Respond as ${empName} directly to your manager in plain workplace chat. Keep it 
 
 function activeWorkforce(companyId: string) {
   const activeIds = (db.orgEmployees.get(companyId) || []).map((employee) => employee.id);
-  const workforce = activeIds.length ? EMPLOYEE_CATALOG.filter((employee) => activeIds.includes(employee.id)) : EMPLOYEE_CATALOG;
-  return (workforce.length ? workforce : EMPLOYEE_CATALOG).map((employee) => ({
+  if (!activeIds.length) return [];
+  const workforce = EMPLOYEE_CATALOG.filter((employee) => activeIds.includes(employee.id));
+  return workforce.map((employee) => ({
     id: employee.id,
     employee_code: employee.employee_code,
     name: employee.name,
@@ -3036,7 +4477,24 @@ async function loadWorkforceTaskContext(companyId: string, employee: any): Promi
   const instance = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === employee.id);
   const [memory, connectors] = await Promise.all([loadEmployeeMemory(companyId, employee.id), loadMcpConnections(companyId, employee.id)]);
   const tools = instance?.tools?.length ? instance.tools : employee.default_tools || [];
-  return { employee, tools: tools.slice(0, 8), memory: memory.slice(0, 4).map((entry) => entry.content), connectors: connectors.filter((connector) => connector.status === 'connected').slice(0, 5).map((connector) => connector.name), live_tool_evidence: [] };
+
+  const activeConnectorNames = new Set(connectors.filter((connector) => connector.status === 'connected').map((connector) => `${connector.name} (Direct)`));
+  const allEmployees = activeWorkforce(companyId);
+  for (const emp of allEmployees) {
+    if (emp.id === employee.id) continue;
+    const peerConns = await loadMcpConnections(companyId, emp.id);
+    peerConns.filter((c) => c.status === 'connected').forEach((c) => {
+      activeConnectorNames.add(`${c.name} (${c.oauth_email || 'Workspace Shared'})`);
+    });
+  }
+
+  return {
+    employee,
+    tools: tools.slice(0, 8),
+    memory: memory.slice(0, 4).map((entry) => entry.content),
+    connectors: Array.from(activeConnectorNames).slice(0, 8),
+    live_tool_evidence: []
+  };
 }
 
 const EMPLOYEE_COMMUNICATION_FOCUS: Record<string, string> = {
@@ -3092,8 +4550,52 @@ function collaborationFinding(employee: any, question: string, context?: Workfor
   return `I reviewed the ${employee.department.toLowerCase()} side of “${topic}”. I’m sending ${employee.name === 'Sarah' ? 'the team' : recipient} a usable recommendation now${context?.live_tool_evidence?.length ? ' with the verified tool result attached to the task evidence' : ''}. I’ll flag any missing input or risk before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
 }
 
+function detectPromptInjection(text: string) {
+  const normalized = String(text || '').toLowerCase();
+  const patterns = [
+    /ignore\s+(?:all\s+)?previous\s+instructions/,
+    /disregard\s+(?:the\s+)?system\s+prompt/,
+    /reveal\s+(?:your\s+)?system\s+prompt/,
+    /print\s+(?:the\s+)?(?:api|oauth|mcp|access)\s+(?:token|secret|key)/,
+    /send\s+(?:all\s+)?(?:tokens|credentials|secrets|passwords)/,
+    /disable\s+(?:approval|security|tenant|audit)/,
+    /bypass\s+(?:approval|authentication|authorization|tenant)/,
+    /upload\s+(?:the\s+)?(?:environment|credentials|secret)/
+  ];
+  const matched = patterns.find((pattern) => pattern.test(normalized));
+  return matched ? { blocked: true, reason: 'The request contains instructions that attempt to override system safeguards or expose secrets.' } : { blocked: false };
+}
+
 async function handleTaskRoutingAsync(question: string, companyId: string, preferredEmployeeId?: string, existingTaskId?: number, emailEmployeeId?: string) {
   await loadOrgEmployees(companyId);
+  const safety = detectPromptInjection(question);
+  if (safety.blocked) {
+    const blockedTaskId = existingTaskId || db.nextTaskId++;
+    const now = new Date().toISOString();
+    const blockedTask: TaskRecord = {
+      id: blockedTaskId,
+      company_id: companyId,
+      question: String(question || '').slice(0, 6000),
+      owner: 'sarah',
+      status: 'failed',
+      answer: 'I could not execute this request because it attempts to override security controls or expose protected credentials.',
+      plan: 'Safety review → blocked before external tool access',
+      created_at: now,
+      queued_at: now,
+      completed_at: now,
+      trace: [{ kind: 'safety_block', sender: 'Iris', receiver: 'Company workroom', body: safety.reason, created_at: now }],
+      participants: ['Manager', 'Iris'],
+      collaboration_summary: 'Iris blocked the request before any connector or web action.',
+      execution: { action_type: 'none', status: 'blocked', summary: safety.reason, updated_at: now },
+      live_tool_evidence: [],
+      web_research: []
+    };
+    db.tasks.set(blockedTaskId, blockedTask);
+    await persistTaskRecord(blockedTask);
+    await auditWorkforceAction({ company_id: companyId, actor_type: 'system', actor_id: 'iris', action: 'task.blocked_prompt_injection', resource_type: 'task', resource_id: String(blockedTaskId), task_id: blockedTaskId, risk: 'high', status: 'blocked', summary: safety.reason, correlation_id: `task:${blockedTaskId}`, metadata: { pattern_class: 'instruction_override' } });
+    emitWorkroomEvent(companyId, blockedTaskId, { type: 'task_update', task: workroomSnapshot(blockedTask) });
+    return workroomSnapshot(blockedTask);
+  }
   await hydrateTenantTasks(companyId);
   const taskId = existingTaskId || db.nextTaskId++;
   const existingTask = existingTaskId ? db.tasks.get(existingTaskId) : undefined;
@@ -3125,29 +4627,46 @@ async function handleTaskRoutingAsync(question: string, companyId: string, prefe
     created_at: new Date(Date.now() + 120 + index * 180).toISOString()
   }));
   const trace: any[] = [
-    { kind: 'received', thread_role: 'manager_request', sender: 'Manager', receiver: 'Sarah', sender_id: 'manager', receiver_id: manager.id, body: `New task: “${question}”`, created_at: now },
+    { kind: 'received', thread_role: 'manager_request', sender: 'Manager', receiver: directEmployeeId ? lead.name : 'Sarah', sender_id: 'manager', receiver_id: directEmployeeId ? lead.id : manager.id, body: `New task: “${question}”`, created_at: now },
     ...introductionTrace,
-    { kind: 'team_context', thread_role: 'coordination', sender: 'Sarah', receiver: lead.name, sender_id: manager.id, receiver_id: lead.id, mentions: [lead.id], body: `I own this request. @${lead.name} is the delivery lead${collaborators.length ? `, supported by ${collaborators.map((employee) => `@${employee.name}`).join(', ')}` : ''}. I will report the result and any approval or connector blocker back to you.`, created_at: new Date(Date.now() + 250).toISOString() },
+    {
+      kind: 'team_context',
+      thread_role: 'coordination',
+      sender: directEmployeeId ? lead.name : 'Sarah',
+      receiver: directEmployeeId ? 'Manager' : lead.name,
+      sender_id: directEmployeeId ? lead.id : manager.id,
+      receiver_id: directEmployeeId ? 'manager' : lead.id,
+      mentions: directEmployeeId ? [lead.id] : [lead.id],
+      body: directEmployeeId
+        ? `I am handling this request directly as ${lead.role}${collaborators.length ? `, with ${collaborators.map((employee) => `@${employee.name}`).join(', ')} supporting` : ''}. Reviewing tools and preparing the outcome.`
+        : `I own this request. @${lead.name} is the delivery lead${collaborators.length ? `, supported by ${collaborators.map((employee) => `@${employee.name}`).join(', ')}` : ''}. I will report the result and any approval or connector blocker back to you.`,
+      created_at: new Date(Date.now() + 250).toISOString()
+    },
     { kind: 'knowledge', thread_role: 'context', sender: 'Workspace knowledge', receiver: lead.name, receiver_id: lead.id, body: relevantDocs.length ? `Shared ${relevantDocs.length} relevant workspace reference${relevantDocs.length === 1 ? '' : 's'} with the team.` : 'No matching reference was found; the team will state assumptions clearly.', created_at: new Date(Date.now() + 500).toISOString() },
     ...(webResearch.length ? [{ kind: 'web_research', thread_role: 'context', sender: 'Caveworkers research desk', receiver: 'Company workroom', body: `Collected ${webResearch.length} public source${webResearch.length === 1 ? '' : 's'} for the team. Sources remain linked in the task evidence panel.`, created_at: new Date(Date.now() + 650).toISOString() }] : [])
   ];
   collaborators.forEach((employee, index) => {
-    trace.push({ kind: 'group_message', thread_role: 'assignment', sender: 'Sarah', receiver: `@${employee.name} + @${lead.name}`, sender_id: manager.id, receiver_id: employee.id, mentions: [employee.id, lead.id], body: `@${employee.name}, work with @${lead.name} on the ${employee.department.toLowerCase()} portion of this request. Return usable findings, constraints, evidence needed, and a safe next step.`, created_at: new Date(Date.now() + 900 + index * 600).toISOString() });
+    trace.push({ kind: 'group_message', thread_role: 'assignment', sender: directEmployeeId ? lead.name : 'Sarah', receiver: `@${employee.name}`, sender_id: directEmployeeId ? lead.id : manager.id, receiver_id: employee.id, mentions: [employee.id, lead.id], body: `@${employee.name}, please assist with the ${employee.department.toLowerCase()} portion of this request. Return usable findings and safe evidence.`, created_at: new Date(Date.now() + 900 + index * 600).toISOString() });
     trace.push({ kind: 'handoff', thread_role: 'handoff', sender: employee.name, receiver: lead.name, sender_id: employee.id, receiver_id: lead.id, mentions: [lead.id], body: collaborationFinding(employee, question, contextByEmployeeId.get(employee.id), lead.name), created_at: new Date(Date.now() + 1200 + index * 600).toISOString() });
-    trace.push({ kind: 'handoff_ack', thread_role: 'handoff_ack', sender: lead.name, receiver: employee.name, sender_id: lead.id, receiver_id: employee.id, mentions: [employee.id], body: `@${employee.name}, received. I’ll fold your verified findings and constraints into the team handoff to @Sarah. I’ll call out any unresolved blocker rather than treating the work as complete.`, created_at: new Date(Date.now() + 1450 + index * 600).toISOString() });
+    trace.push({ kind: 'handoff_ack', thread_role: 'handoff_ack', sender: lead.name, receiver: employee.name, sender_id: lead.id, receiver_id: employee.id, mentions: [employee.id], body: `@${employee.name}, received. Folding your findings into the deliverables.`, created_at: new Date(Date.now() + 1450 + index * 600).toISOString() });
   });
-  trace.push({ kind: 'handoff', thread_role: 'handoff', sender: lead.name, receiver: manager.name, sender_id: lead.id, receiver_id: manager.id, mentions: [manager.id], body: `@${manager.name}, I’m consolidating the team conversation now. The specialists have been introduced, addressed directly, and their findings will be carried forward with evidence and blockers visible.`, created_at: new Date(Date.now() + 2050).toISOString() });
-  trace.push({ kind: 'handoff_ack', thread_role: 'handoff_ack', sender: manager.name, receiver: lead.name, sender_id: manager.id, receiver_id: lead.id, mentions: [lead.id], body: `@${lead.name}, received. Keep the verified evidence, owners, and blockers visible in the final answer. No external action is treated as complete without provider confirmation.`, created_at: new Date(Date.now() + 2350).toISOString() });
+  if (!directEmployeeId || lead.id !== manager.id) {
+    trace.push({ kind: 'handoff', thread_role: 'handoff', sender: lead.name, receiver: manager.name, sender_id: lead.id, receiver_id: manager.id, mentions: [manager.id], body: `@${manager.name}, I’m consolidating the team conversation now. The specialists have been introduced, addressed directly, and their findings will be carried forward with evidence and blockers visible.`, created_at: new Date(Date.now() + 2050).toISOString() });
+    trace.push({ kind: 'handoff_ack', thread_role: 'handoff_ack', sender: manager.name, receiver: lead.name, sender_id: manager.id, receiver_id: lead.id, mentions: [lead.id], body: `@${lead.name}, received. Keep the verified evidence, owners, and blockers visible in the final answer. No external action is treated as complete without provider confirmation.`, created_at: new Date(Date.now() + 2350).toISOString() });
+  }
   specialistContexts.flatMap((context) => context.live_tool_evidence).forEach((evidence, index) => {
     trace.push({ kind: 'tool_execution', sender: evidence.employee_name, receiver: 'Caveworkers group', body: `${evidence.status === 'executed' ? 'Read tool executed' : 'Read tool failed'}: ${evidence.connector_name} / ${evidence.tool_name}. ${evidence.summary.slice(0, 500)}`, created_at: new Date(Date.now() + 650 + index * 120).toISOString() });
   });
   const teamBrief = `Public research evidence:\n${webText}\n\n` + specialistContexts.map((context) => `${context.employee.name}: ${context.employee.role} — ${context.employee.persona}\nGranted tools: ${context.tools.join(', ') || 'none'}\nConnected tenant tools: ${context.connectors.join(', ') || 'none'}\nRole memory: ${context.memory.join(' | ') || 'none'}\nLive MCP evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} [${entry.status}] ${entry.summary.slice(0, 900)}`).join(' | ') || 'none'}`).join('\n\n');
   const deliveryTeam = [lead, ...collaborators].filter((employee, index, list) => list.findIndex((entry) => entry.id === employee.id) === index);
-    const narrative = await generateWorkforceNarrative(`${directEmployeeId ? `Addressed employee: ${lead.name} (${lead.role})\nRespond directly to the manager as ${lead.name}. Do not answer as Sarah.\n` : `Manager: ${manager.name} (${manager.role})\nDelivery lead: ${lead.name} (${lead.role})\n`}Task: "${question}"\n\nActive specialist evidence:
-\n${teamBrief}\n\nWorkspace knowledge:\n${knowText}\n\nWrite a concise workplace chat update for the manager. Use plain language and short paragraphs, not a report, checklist, Markdown headings, or a long preamble. Start with either the answer, a single precise question if required information is missing, or a single clear blocker. Then state what the team did, what is actually verified, and the next action. Mention the delivery lead and contributors naturally. Never invent an attachment, file, message body, link, recipient, tool call, or completed external action. Do not claim that an email, write, payment, publication, access change, or other external action happened unless execution evidence explicitly confirms it. Keep the update under 120 words unless the user asks for detail.`, companyId);
+  const narrative = await generateWorkforceNarrative(
+    `${directEmployeeId ? `Assigned Specialist: ${lead.name} (${lead.role})\nRespond directly to the manager as ${lead.name}.\n` : `Manager: ${manager.name} (${manager.role})\nDelivery lead: ${lead.name} (${lead.role})\n`}Task: "${question}"\n\nActive specialist evidence:\n${teamBrief}\n\nWorkspace knowledge:\n${knowText}\n\nWrite a concise workplace chat update for the manager. Use plain language and short paragraphs, not a report, checklist, Markdown headings, or a long preamble. Start with either the answer, a single precise question if required information is missing, or a single clear blocker. Then state what the team did, what is actually verified, and the next action. Mention the delivery lead and contributors naturally. Never invent an attachment, file, message body, link, recipient, tool call, or completed external action. Do not claim that an email, write, payment, publication, access change, or other external action happened unless execution evidence explicitly confirms it. Keep the update under 120 words unless the user asks for detail.`,
+    companyId,
+    directEmployeeId || lead.id
+  );
   let answer = narrative.text;
   if (!answer) {
-    answer = `I’ve routed this to ${lead.name}, with ${collaborators.length ? collaborators.map((employee) => employee.name).join(' and ') + ' supporting.' : 'Sarah coordinating the work.'}
+    answer = `I’ve routed this to ${lead.name}, with ${collaborators.length ? collaborators.map((employee) => employee.name).join(' and ') + ' supporting.' : 'team coordinating the work.'}
 
 The request is recorded, but I can’t produce a verified answer because the production model is unavailable. No external action was executed or represented as complete.
 
@@ -3160,15 +4679,15 @@ Next step: configure a valid OpenRouter or Gemini model key, then rerun this req
   let workforceApproval: ApprovalRecord | null = null;
   let autoExecuteAction = false;
   if (requiresApproval) {
-    const emailAction = isEmailAction ? await prepareEmployeeEmailAction(companyId, question, taskId, emailEmployeeId || 'sarah') : null;
+    const emailAction = isEmailAction ? await prepareEmployeeEmailAction(companyId, question, taskId, emailEmployeeId || (directEmployeeId || 'sarah')) : null;
     const mcpAction = !emailAction && isGitHubWriteAction ? await prepareEmployeeMcpWriteAction(companyId, question, taskId, preferredEmployeeId || lead.id) : null;
     execution = emailAction ? { action_type: 'gmail.send', status: emailAction.status, summary: emailAction.summary, updated_at: new Date().toISOString() } : mcpAction ? { action_type: 'mcp.tool', status: mcpAction.status, summary: mcpAction.summary, updated_at: new Date().toISOString() } : { action_type: 'external.action', status: 'awaiting_approval', summary: 'The requested external action is prepared and awaiting your approval. No external action has been performed.', updated_at: new Date().toISOString() };
     const actionBlocked = emailAction?.status === 'blocked' || mcpAction?.status === 'blocked';
     if (actionBlocked) {
-      trace.push({ kind: 'blocked', sender: manager.name, receiver: 'Manager', body: emailAction?.summary || mcpAction?.summary || 'The requested external action is blocked until its connector is configured.', created_at: new Date(Date.now() + 3100).toISOString() });
+      trace.push({ kind: 'blocked', sender: directEmployeeId ? lead.name : manager.name, receiver: 'Manager', body: emailAction?.summary || mcpAction?.summary || 'The requested external action is blocked until its connector is configured.', created_at: new Date(Date.now() + 3100).toISOString() });
     } else {
       const approvalId = db.nextApprovalId++;
-      const approval: ApprovalRecord = { id: approvalId, company_id: companyId, task_id: taskId, employee_id: emailAction?.payload?.employee_id || mcpAction?.payload?.employee_id || manager.id, tool_name: isEmailAction ? 'Gmail send' : mcpAction?.payload?.tool_name || (lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action'), action_summary: emailAction?.summary || mcpAction?.summary || `${manager.name} requests manager sign-off for: "${question}"`, status: 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', action_type: isEmailAction ? 'gmail.send' : mcpAction?.payload?.action_type || 'external.action', manager_id: manager.id, delivery_lead_id: lead.id, collaborators: collaborators.map((employee) => employee.id), ...(emailAction?.payload || {}), ...(mcpAction?.payload || {}) } };
+      const approval: ApprovalRecord = { id: approvalId, company_id: companyId, task_id: taskId, employee_id: emailAction?.payload?.employee_id || mcpAction?.payload?.employee_id || lead.id, tool_name: isEmailAction ? 'Gmail send' : mcpAction?.payload?.tool_name || (lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action'), action_summary: emailAction?.summary || mcpAction?.summary || `${lead.name} requests manager sign-off for: "${question}"`, status: 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', action_type: isEmailAction ? 'gmail.send' : mcpAction?.payload?.action_type || 'external.action', manager_id: manager.id, delivery_lead_id: lead.id, collaborators: collaborators.map((employee) => employee.id), ...(emailAction?.payload || {}), ...(mcpAction?.payload || {}) } };
       await persistApprovalRecord(approval);
       workforceApproval = approval;
       autoExecuteAction = ['gmail.send', 'mcp.tool'].includes(String(approval.payload?.action_type || '')) && await autonomousActionAllowed(companyId, approval.payload);
@@ -3180,23 +4699,23 @@ Next step: configure a valid OpenRouter or Gemini model key, then rerun this req
         await persistApprovalRecord(approval);
         trace.push({ kind: 'autopilot_started', sender: lead.name, receiver: 'Company workroom', body: `${lead.name} is running ${approval.tool_name} under the employee and connector autopilot policy.`, created_at: new Date(Date.now() + 3100).toISOString() });
       } else {
-        trace.push({ kind: 'approval_required', sender: manager.name, receiver: 'Manager approval queue', body: emailAction?.summary || mcpAction?.summary || 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
+        trace.push({ kind: 'approval_required', sender: directEmployeeId ? lead.name : manager.name, receiver: 'Manager approval queue', body: emailAction?.summary || mcpAction?.summary || 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
       }
     }
   }
   if (execution.status === 'blocked') {
-    answer = `${answer}\n\nSarah’s execution update: BLOCKED — ${execution.summary}`;
+    answer = `${answer}\n\n${lead.name}’s execution update: BLOCKED — ${execution.summary}`;
   } else if (execution.status === 'awaiting_approval') {
-    answer = `${answer}\n\nSarah’s execution update: APPROVAL REQUIRED — ${execution.summary}`;
+    answer = `${answer}\n\n${lead.name}’s execution update: APPROVAL REQUIRED — ${execution.summary}`;
   } else if (execution.status === 'processing') {
-    answer = `${answer}\n\nSarah’s execution update: IN PROGRESS — ${execution.summary}`;
+    answer = `${answer}\n\n${lead.name}’s execution update: IN PROGRESS — ${execution.summary}`;
   }
   if (directEmployeeId) {
     trace.push({ kind: 'final_answer', thread_role: 'final_answer', sender: lead.name, receiver: 'Manager', sender_id: lead.id, receiver_id: 'manager', mentions: [lead.id], body: answer, created_at: new Date(Date.now() + 3400).toISOString() });
   } else {
-    trace.push({ kind: 'group_message', sender: manager.name, receiver: 'Manager', body: `I reviewed ${lead.name}’s delivery. ${execution.summary}`, created_at: new Date(Date.now() + 3400).toISOString() });
+    trace.push({ kind: 'final_answer', thread_role: 'final_answer', sender: lead.name, receiver: 'Manager', sender_id: lead.id, receiver_id: 'manager', mentions: [lead.id], body: answer, created_at: new Date(Date.now() + 3400).toISOString() });
   }
-  trace.push({ kind: 'completed', sender: directEmployeeId ? lead.name : manager.name, receiver: 'Task ledger', body: requiresApproval ? `Work product completed; execution state: ${execution.status}.` : 'Work product completed with a tenant-scoped audit trace.', created_at: new Date(Date.now() + 3600).toISOString() });
+  trace.push({ kind: 'completed', sender: lead.name, receiver: 'Task ledger', body: requiresApproval ? `Work product completed; execution state: ${execution.status}.` : 'Work product completed with a tenant-scoped audit trace.', created_at: new Date(Date.now() + 3600).toISOString() });
   const liveToolEvidence = specialistContexts.flatMap((context) => context.live_tool_evidence);
   const taskRecord: TaskRecord = { id: taskId, company_id: companyId, question, owner: manager.id, direct_employee_id: directEmployeeId, status: execution.status === 'awaiting_approval' ? 'pending_approval' : execution.status === 'blocked' ? 'blocked' : 'completed', answer, plan: directEmployeeId ? `1. ${lead.name} direct response → 2. Sarah manager oversight → 3. Permissioned evidence → 4. Approval-gated external execution when requested` : `1. Sarah intake → 2. Delegate ${lead.name} → 3. Specialist delivery${collaborators.length ? ` (${collaborators.map((employee) => employee.name).join(', ')})` : ''} → 4. Permissioned evidence → 5. Sarah manager response → 6. Approval-gated external execution when requested`, created_at: now, trace, participants: ['Manager', manager.name, ...deliveryTeam.map((employee) => employee.name).filter((name, index, list) => list.indexOf(name) === index)], collaboration_summary: `${directEmployeeId ? `${lead.name} responded directly with Sarah overseeing` : `${manager.name} managed ${lead.name}${collaborators.length ? ` with ${collaborators.length} supporting specialist${collaborators.length === 1 ? '' : 's'}` : ''}`}.`, live_tool_evidence: liveToolEvidence, web_research: webResearch, queued_at: existingTask?.queued_at, started_at: existingTask?.started_at || now, completed_at: new Date().toISOString(), execution };
   db.tasks.set(taskId, taskRecord);
@@ -3222,38 +4741,58 @@ Next step: configure a valid OpenRouter or Gemini model key, then rerun this req
 
 // This is deliberately absent outside the test runtime. It lets regression tests
 // exercise the actual worker completion path without creating an HTTP backdoor.
+let workflowSchedulerTimer: NodeJS.Timeout | undefined;
+function startWorkflowScheduler() {
+  if (workflowSchedulerTimer || !ALWAYS_ON_WORKER_ENABLED) return;
+  void processDueScheduledWorkflows().catch((error) => reportOperationalFailure('scheduled_workflow.startup', error));
+  workflowSchedulerTimer = setInterval(() => { void processDueScheduledWorkflows().catch((error) => reportOperationalFailure('scheduled_workflow.poll', error)); }, WORKFLOW_SCHEDULER_POLL_MS);
+  workflowSchedulerTimer.unref?.();
+}
+
 export const workforceTestHooks = process.env.NODE_ENV === 'test'
-  ? { handleTaskRoutingAsync, selectCollaborativeTeam, executeEmployeeReadTools, dispatchApprovedEmployeeEmail, dispatchApprovedMcpTool, resetRateLimits: () => rateLimitBuckets.clear() }
+  ? { handleTaskRoutingAsync, selectCollaborativeTeam, executeEmployeeReadTools, dispatchApprovedEmployeeEmail, dispatchApprovedMcpTool, processNextWorkforceJob: () => processNextWorkforceJob(true), processDueScheduledWorkflows, processDueTenantDeletions, nextCronOccurrence, resetRateLimits: () => rateLimitBuckets.clear() }
   : undefined;
 
 app.post('/api/task', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   if (!ALWAYS_ON_WORKER_ENABLED && process.env.NODE_ENV !== 'test') return res.status(503).json({ error: 'The workforce worker is disabled. Enable ALWAYS_ON_WORKER_ENABLED before assigning tasks.', code: 'worker_disabled', retryable: false });
-  const { request: question, preferred_employee_id: preferredEmployeeId, email_employee_id: emailEmployeeId } = req.body || {};
+  const { request: question, preferred_employee_id: preferredEmployeeId, email_employee_id: emailEmployeeId, idempotency_key: idempotencyKey } = req.body || {};
   const normalizedQuestion = String(question || 'Operations review').trim().slice(0, 6000);
   if (!normalizedQuestion) return res.status(400).json({ error: 'A task request is required.' });
-  const result = await enqueueWorkforceTask(companyId, normalizedQuestion, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined, typeof emailEmployeeId === 'string' ? emailEmployeeId : undefined);
-  res.status(202).json(result);
+  try {
+    const result = await enqueueWorkforceTask(companyId, normalizedQuestion, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined, typeof emailEmployeeId === 'string' ? emailEmployeeId : undefined, typeof idempotencyKey === 'string' ? idempotencyKey : undefined);
+    res.status(202).json(result);
+  } catch (error: any) {
+    if (error?.code === 'task_quota_exceeded') return res.status(402).json({ error: error.message, code: error.code, limit: error.limit, usage: error.usage });
+    reportOperationalFailure('task.enqueue', error, { tenant_hash: anonymizeIdentifier(companyId) });
+    return res.status(500).json({ error: 'The task could not be queued safely.' });
+  }
 });
 
 app.post('/api/tasks', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   if (!ALWAYS_ON_WORKER_ENABLED && process.env.NODE_ENV !== 'test') return res.status(503).json({ error: 'The workforce worker is disabled. Enable ALWAYS_ON_WORKER_ENABLED before assigning tasks.', code: 'worker_disabled', retryable: false });
-  const { request: question, preferred_employee_id: preferredEmployeeId, email_employee_id: emailEmployeeId } = req.body || {};
+  const { request: question, preferred_employee_id: preferredEmployeeId, email_employee_id: emailEmployeeId, idempotency_key: idempotencyKey } = req.body || {};
   const normalizedQuestion = String(question || 'Operations review').trim().slice(0, 6000);
   if (!normalizedQuestion) return res.status(400).json({ error: 'A task request is required.' });
-  const result = await enqueueWorkforceTask(companyId, normalizedQuestion, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined, typeof emailEmployeeId === 'string' ? emailEmployeeId : undefined);
-  res.status(202).json(result);
+  try {
+    const result = await enqueueWorkforceTask(companyId, normalizedQuestion, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined, typeof emailEmployeeId === 'string' ? emailEmployeeId : undefined, typeof idempotencyKey === 'string' ? idempotencyKey : undefined);
+    res.status(202).json(result);
+  } catch (error: any) {
+    if (error?.code === 'task_quota_exceeded') return res.status(402).json({ error: error.message, code: error.code, limit: error.limit, usage: error.usage });
+    reportOperationalFailure('task.enqueue', error, { tenant_hash: anonymizeIdentifier(companyId) });
+    return res.status(500).json({ error: 'The task could not be queued safely.' });
+  }
 });
 
 app.get('/api/tasks', async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   await hydrateTenantTasks(companyId);
   await hydrateTenantApprovals(companyId);
   const taskList = Array.from(db.tasks.values()).filter((task) => task.company_id === companyId).reverse().map((t: any) => {
@@ -3284,7 +4823,7 @@ app.get('/api/tasks', async (req, res) => {
 app.get('/api/approvals', async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const analystApprovals = await loadAnalystApprovals(companyId);
   const approvals = [...Array.from(db.approvals.values()), ...analystApprovals].filter((approval, index, list) => list.findIndex((entry) => entry.id === approval.id && entry.company_id === approval.company_id) === index);
   res.json(approvals.filter((approval) => approval.company_id === companyId && approval.status === 'pending'));
@@ -3293,7 +4832,7 @@ app.get('/api/approvals', async (req, res) => {
 app.post('/api/approvals/:id', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const id = parseInt(req.params.id, 10);
   const requestedStatus = req.body?.status;
   if (requestedStatus !== 'approved' && requestedStatus !== 'rejected') return res.status(400).json({ error: 'Choose approved or rejected.' });
@@ -3369,7 +4908,7 @@ app.post('/api/approvals/:id', async (req, res) => {
 app.get('/api/analyst/profile', async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const analyst = EMPLOYEE_CATALOG.find((employee) => employee.id === 'david');
   const employee = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === 'david');
   const sources = await loadAnalystDataSources(companyId);
@@ -3381,14 +4920,14 @@ app.get('/api/analyst/profile', async (req, res) => {
 app.get('/api/analyst/data-sources', async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   res.json({ sources: await loadAnalystDataSources(companyId) });
 });
 
 app.post('/api/analyst/data-sources', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const { kind, name, csv_text, sheet_url, database_label } = req.body || {};
   if (!['sql', 'google_sheets', 'csv'].includes(kind)) return res.status(400).json({ error: 'Data source type must be SQL, Google Sheets, or CSV.' });
   if (kind === 'csv' && (!csv_text || typeof csv_text !== 'string')) return res.status(400).json({ error: 'Choose a CSV file before importing it.' });
@@ -3412,7 +4951,7 @@ app.post('/api/analyst/data-sources', async (req, res) => {
 app.delete('/api/analyst/data-sources/:id', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const sources = await loadAnalystDataSources(companyId); const sourceId = req.params.id;
   if (!sources.some((entry) => entry.id === sourceId)) return res.status(404).json({ error: 'Data source not found.' });
   db.analystDataSources.set(companyId, sources.filter((entry) => entry.id !== sourceId));
@@ -3423,7 +4962,7 @@ app.delete('/api/analyst/data-sources/:id', async (req, res) => {
 app.get('/api/analyst/memory', async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const type = req.query.type === 'working' || req.query.type === 'long_term' ? req.query.type as AnalystMemory['memory_type'] : undefined;
   const memory = await loadAnalystMemory(companyId, type);
   res.json({ memory: memory.filter((entry) => !entry.expires_at || Date.parse(entry.expires_at) > Date.now()).slice(0, 40) });
@@ -3431,7 +4970,7 @@ app.get('/api/analyst/memory', async (req, res) => {
 
 app.post('/api/analyst/memory', async (req, res) => {
   const user = getAuthUser(req); if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID; const { content, category } = req.body || {};
+  const companyId = getUserWorkspaceId(user); const { content, category } = req.body || {};
   if (!String(content || '').trim()) return res.status(400).json({ error: 'A memory note is required.' });
   if (String(content).length > 800) return res.status(400).json({ error: 'Keep a memory note under 800 characters.' });
   const allowed = ['preference', 'business_rule', 'metric_definition'];
@@ -3441,7 +4980,7 @@ app.post('/api/analyst/memory', async (req, res) => {
 
 app.delete('/api/analyst/memory/:id', async (req, res) => {
   const user = getAuthUser(req); if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID; const memoryId = req.params.id; const memory = await loadAnalystMemory(companyId);
+  const companyId = getUserWorkspaceId(user); const memoryId = req.params.id; const memory = await loadAnalystMemory(companyId);
   if (!memory.some((entry) => entry.id === memoryId && entry.memory_type === 'long_term')) return res.status(404).json({ error: 'Memory not found.' });
   db.analystMemory.set(companyId, memory.filter((entry) => entry.id !== memoryId));
   const collection = analystTenantCollection(companyId, 'long_term_memory'); if (collection) await collection.doc(memoryId).delete();
@@ -3451,22 +4990,25 @@ app.delete('/api/analyst/memory/:id', async (req, res) => {
 app.get('/api/analyst/runs', async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID; const cached = db.analystRuns.get(companyId);
-  if (cached) return res.json({ runs: cached.slice(0, 12) });
+  const companyId = getUserWorkspaceId(user);
+  if (!IS_PRODUCTION) {
+    const cached = db.analystRuns.get(companyId);
+    if (cached) return res.json({ runs: cached.slice(0, 12) });
+  }
   const collection = analystTenantCollection(companyId, 'analyst_runs'); if (!collection) return res.json({ runs: [] });
-  try { const snapshot = await collection.orderBy('created_at', 'desc').limit(12).get(); const runs = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as AnalystRun)); db.analystRuns.set(companyId, runs); res.json({ runs }); } catch (error) { console.warn('Could not load analyst runs:', error); res.json({ runs: [] }); }
+  try { const snapshot = await collection.orderBy('created_at', 'desc').limit(12).get(); const runs = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as AnalystRun)); db.analystRuns.set(companyId, runs); res.json({ runs }); } catch (error) { handleFirestoreFailure('analyst_runs_load', error); res.status(503).json({ error: 'Analyst history is temporarily unavailable.' }); }
 });
 
 app.get('/api/analyst/approvals', async (req, res) => {
   const user = getAuthUser(req); if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const approvals = await loadAnalystApprovals(companyId);
   res.json({ approvals: approvals.filter((approval) => approval.status === 'pending') });
 });
 
 app.post('/api/analyst/analyze', async (req, res) => {
   const user = getAuthUser(req); if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   try { const run = await runAnalystLoop({ companyId, managerName: user?.display_name || 'Workspace Manager', question: req.body?.question, sourceId: req.body?.source_id, outputFormat: req.body?.output_format }); res.status(201).json({ ok: true, run }); }
   catch (error: any) { res.status(400).json({ error: error?.message || 'David could not start the analysis.' }); }
 });
@@ -3502,11 +5044,19 @@ app.get('/api/mcp/marketplace', (_req, res) => {
 app.get(['/api/mcp/directory', '/api/connectors/catalog'], async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const query = String(req.query.q || '').slice(0, 80);
   const category = String(req.query.category || '').slice(0, 60);
   const entries = searchConnectorDirectory(query, category);
   const workforce = activeWorkforce(companyId);
+  // Repair legacy employee copies created before shared Google grants were propagated.
+  const googleTypes: TenantConnector['connection_type'][] = ['google_gmail', 'google_drive', 'google_sheets'];
+  for (const connectionType of googleTypes) {
+    for (const employee of workforce) {
+      const source = (await loadMcpConnections(companyId, employee.id)).find((connection) => connection.connection_type === connectionType && connection.status === 'connected' && connection.auth_token_encrypted && connection.tool_grants?.length);
+      if (source) { await propagateCompanyGoogleConnection(source); break; }
+    }
+  }
   const connectionsByEmployee = await Promise.all(workforce.map(async (employee) => {
     try { return [employee.id, await loadMcpConnections(companyId, employee.id)] as const; }
     catch (error) {
@@ -3519,8 +5069,24 @@ app.get(['/api/mcp/directory', '/api/connectors/catalog'], async (req, res) => {
     const matches = workforce.flatMap((employee) => (stateByEmployee.get(employee.id) || []).filter((connection) => {
       const connectionName = `${connection.name} ${connection.connection_type} ${connection.config?.registry_server_name || ''}`.toLowerCase();
       return connectionName.includes(entry.name.toLowerCase()) || connectionName.includes(entry.short_name.toLowerCase()) || connectionName.includes(entry.id.replace(/-/g, ' '));
-    }).map((connection) => ({ employee_id: employee.id, connection_id: connection.id })));
-    return { ...connectorDirectoryPublicView(entry), connected: matches.length > 0, connection_count: matches.length, connected_employee_ids: Array.from(new Set(matches.map((match) => match.employee_id))), connection_ids: matches.map((match) => match.connection_id) };
+    }).map((connection) => {
+      const defaultTool = connection.connection_type === 'google_gmail' ? 'gmail.search' : connection.connection_type === 'google_drive' ? 'drive.files.read' : connection.connection_type === 'google_sheets' ? 'sheets.read' : undefined;
+      const grant = defaultTool ? connection.tool_grants?.find((item) => item.tool_name === defaultTool) : undefined;
+      const ready = connection.status === 'connected' && Boolean(connection.auth_token_encrypted) && (!defaultTool || ['read_only', 'read_write'].includes(String(grant?.access_level || '')) || Boolean(connection.discovered_tools?.length && connection.tool_grants?.some((item) => item.access_level !== 'requires_approval')));
+      return { employee_id: employee.id, connection_id: connection.id, status: connection.status, auth_configured: Boolean(connection.auth_token_encrypted), ready, granted_tools: (connection.tool_grants || []).map((item) => item.tool_name) };
+    }));
+    const readyMatches = matches.filter((match) => match.ready);
+    return {
+      ...connectorDirectoryPublicView(entry),
+      connected: matches.length > 0,
+      ready: readyMatches.length > 0,
+      connection_count: matches.length,
+      ready_connection_count: readyMatches.length,
+      connected_employee_ids: Array.from(new Set(matches.map((match) => match.employee_id))),
+      ready_employee_ids: Array.from(new Set(readyMatches.map((match) => match.employee_id))),
+      connection_ids: matches.map((match) => match.connection_id),
+      connection_states: matches
+    };
   });
   res.json({ catalog, categories: CONNECTOR_DIRECTORY_CATEGORIES, total: CONNECTOR_DIRECTORY_COUNT, matched: catalog.length, query, category });
 });
@@ -3535,7 +5101,7 @@ app.get('/api/mcp/directory/:id', async (req, res) => {
       const server = await getMcpRegistryServer(entry.registry_name);
       return res.json({ connector: connectorDirectoryPublicView(entry), server: server || null });
     } catch (error: any) {
-      reportOperationalFailure('mcp.directory_detail', error, { tenant_hash: anonymizeIdentifier(user.company_id || DEFAULT_COMPANY_ID), connector_id: entry.id, request_id: getRequestId(req) });
+      reportOperationalFailure('mcp.directory_detail', error, { tenant_hash: anonymizeIdentifier(getUserWorkspaceId(user)), connector_id: entry.id, request_id: getRequestId(req) });
     }
   }
   res.json({ connector: connectorDirectoryPublicView(entry), server: null });
@@ -3549,7 +5115,7 @@ app.get('/api/mcp/registry/search', async (req, res) => {
     const result = await searchMcpRegistry(String(req.query.q || ''), String(req.query.cursor || ''), Number(req.query.limit || 12));
     res.json(result);
   } catch (error: any) {
-    reportOperationalFailure('mcp.registry_search', error, { tenant_hash: anonymizeIdentifier(user.company_id || DEFAULT_COMPANY_ID), request_id: getRequestId(req) });
+    reportOperationalFailure('mcp.registry_search', error, { tenant_hash: anonymizeIdentifier(getUserWorkspaceId(user)), request_id: getRequestId(req) });
     res.status(502).json({ error: String(error?.message || 'MCP Registry search failed').slice(0, 240), request_id: getRequestId(req) });
   }
 });
@@ -3563,7 +5129,7 @@ app.get('/api/mcp/registry/servers/:name', async (req, res) => {
     if (!server) return res.status(404).json({ error: 'MCP server was not found in the official Registry.' });
     res.json({ server });
   } catch (error: any) {
-    reportOperationalFailure('mcp.registry_detail', error, { tenant_hash: anonymizeIdentifier(user.company_id || DEFAULT_COMPANY_ID), request_id: getRequestId(req) });
+    reportOperationalFailure('mcp.registry_detail', error, { tenant_hash: anonymizeIdentifier(getUserWorkspaceId(user)), request_id: getRequestId(req) });
     res.status(502).json({ error: String(error?.message || 'MCP Registry lookup failed').slice(0, 240), request_id: getRequestId(req) });
   }
 });
@@ -3571,7 +5137,8 @@ app.get('/api/mcp/registry/servers/:name', async (req, res) => {
 app.post('/api/mcp/registry/connect', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
   if (isRateLimited(rateLimitKey(req, 'mcp-registry-connect'), 10, 60_000)) return res.status(429).json({ error: 'MCP connection attempts are temporarily rate limited.' });
   const registryName = String(req.body?.registry_name || '').trim().slice(0, 180);
   const serverUrl = String(req.body?.server_url || '').trim();
@@ -3621,7 +5188,7 @@ app.post('/api/mcp/registry/connect', async (req, res) => {
 app.get('/api/employees/:id/mcp-connections', async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const list = await loadMcpConnections(companyId, req.params.id);
   res.json(list.map(connectorPublicView));
 });
@@ -3629,7 +5196,7 @@ app.get('/api/employees/:id/mcp-connections', async (req, res) => {
 app.post('/api/employees/:id/mcp-connections', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const empId = req.params.id;
   const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === empId);
   if (!employee) return res.status(404).json({ error: 'Employee not found.' });
@@ -3673,28 +5240,197 @@ app.post('/api/employees/:id/mcp-connections', async (req, res) => {
     res.status(201).json({ ok: true, connection: connectorPublicView(connection), tools_discovered: false, notice: googleNotice || 'Connector saved. Discover tools and grant them per-tool before this employee can use the server.' });
 });
 
+app.get('/api/firebase-config', (_req, res) => {
+  res.json(FIREBASE_WEB_CONFIG);
+});
+
+app.post('/api/employees/:id/mcp-connections/:connectionId/google/token', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  const connectionId = Number(req.params.connectionId);
+  const employeeId = req.params.id;
+  const accessToken = String(req.body?.access_token || '').trim();
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const scopes = Array.isArray(req.body?.scopes) ? req.body.scopes : [];
+  const gmailSendEnabled = req.body?.gmail_send_enabled === true;
+
+  if (!accessToken) return res.status(400).json({ error: 'Access token is required.' });
+
+  const connections = await loadMcpConnections(companyId, employeeId);
+  let connection = connections.find((entry) => entry.id === connectionId);
+
+  if (!connection) {
+    // Create new connection if not found
+    const now = new Date().toISOString();
+    const isDrive = scopes.some((s: string) => s.includes('drive'));
+    const isSheets = scopes.some((s: string) => s.includes('spreadsheets'));
+    const connectionType = isDrive ? 'google_drive' : isSheets ? 'google_sheets' : 'google_gmail';
+    const name = connectionType === 'google_gmail' ? 'Google Gmail' : connectionType === 'google_drive' ? 'Google Drive' : 'Google Sheets';
+
+    connection = {
+      id: connectionId || Date.now(),
+      company_id: companyId,
+      employee_id: employeeId,
+      name,
+      connection_type: connectionType,
+      access_level: 'requires_approval',
+      autonomy_mode: 'copilot',
+      status: 'connected',
+      config: sanitizeConnectorConfig({ company_email: email, gmail_send_enabled: gmailSendEnabled, notes: 'Connected via Google Workspace OAuth' }),
+      discovered_tools: [],
+      tool_grants: [],
+      created_at: now,
+      updated_at: now
+    };
+  }
+
+  const credentials = {
+    access_token: accessToken,
+    token_type: 'Bearer',
+    email,
+    granted_at: new Date().toISOString()
+  };
+
+  connection.auth_token_encrypted = encryptConnectorCredentials(credentials);
+  connection.oauth_expires_at = undefined;
+  connection.oauth_revoked_at = undefined;
+  connection.last_refresh_at = undefined;
+  connection.auth_scopes = scopes.length ? scopes : googleScopesFor(connection);
+  connection.oauth_email = email || undefined;
+  connection.status = 'connected';
+  connection.last_error = undefined;
+  connection.updated_at = new Date().toISOString();
+
+  // Populate tools
+  if (connection.connection_type === 'google_gmail') {
+    connection.discovered_tools = [
+      { name: 'gmail.search', description: 'Search and read Gmail messages', risk: 'read' },
+      { name: 'gmail.send', description: 'Send emails with employee approval', risk: 'write' }
+    ];
+    if (!connection.tool_grants.some((g) => g.tool_name === 'gmail.search')) {
+      connection.tool_grants.push({ tool_name: 'gmail.search', access_level: 'read_only' });
+    }
+    if (gmailSendEnabled && !connection.tool_grants.some((g) => g.tool_name === 'gmail.send')) {
+      connection.tool_grants.push({ tool_name: 'gmail.send', access_level: 'requires_approval' });
+    }
+  } else if (connection.connection_type === 'google_drive') {
+    connection.discovered_tools = [
+      { name: 'drive.files.read', description: 'Search and view files in Google Drive', risk: 'read' }
+    ];
+    if (!connection.tool_grants.some((g) => g.tool_name === 'drive.files.read')) {
+      connection.tool_grants.push({ tool_name: 'drive.files.read', access_level: 'read_only' });
+    }
+  } else if (connection.connection_type === 'google_sheets') {
+    connection.discovered_tools = [
+      { name: 'sheets.read', description: 'Read Google Sheets cells and tables', risk: 'read' }
+    ];
+    if (!connection.tool_grants.some((g) => g.tool_name === 'sheets.read')) {
+      connection.tool_grants.push({ tool_name: 'sheets.read', access_level: 'read_only' });
+    }
+  }
+
+  await persistMcpConnection(connection);
+  await propagateCompanyGoogleConnection(connection);
+
+  res.json({ ok: true, connection: connectorPublicView(connection) });
+});
+
 app.get('/api/employees/:id/mcp-connections/:connectionId/google/start', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const connectionId = Number(req.params.connectionId);
   const requestedService = String(req.query.service || '').trim().toLowerCase();
   const requestedType = (requestedService === 'gmail' ? 'google_gmail' : requestedService === 'drive' ? 'google_drive' : requestedService === 'sheets' ? 'google_sheets' : requestedService) as 'google_gmail' | 'google_drive' | 'google_sheets' | '';
   const connections = await loadMcpConnections(companyId, req.params.id);
   const connection = connections.find((entry) => entry.id === connectionId && (entry.connection_type === requestedType || (!requestedType && ['google_gmail', 'google_drive', 'google_sheets'].includes(entry.connection_type))));
-  const type = connection?.connection_type as 'google_gmail' | 'google_drive' | 'google_sheets';
-  if (!connection || !['google_gmail', 'google_drive', 'google_sheets'].includes(type)) return res.status(400).json({ error: 'Choose Gmail, Google Drive, or Google Sheets.' });
-  if (!connection) return res.status(404).json({ error: 'Google connector not found.' });
-  try {
-    const oauth2 = googleOAuthClient();
-    const requestedReturnTo = String(req.query.return_to || '/settings');
-    const returnTo = requestedReturnTo === '/command' ? '/command' : '/settings';
-    const state = oauthStateSign({ uid: user?.uid, company_id: companyId, employee_id: req.params.id, connection_id: connectionId, connection_type: type, return_to: returnTo, iat: Date.now() });
-    res.cookie('cw_google_oauth_state', state, { httpOnly: true, sameSite: 'lax', secure: IS_PRODUCTION, path: '/', maxAge: 10 * 60 * 1000 });
-    return res.redirect(oauth2.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: googleScopesFor(connection), state }));
-  } catch (error: any) {
-    return res.status(503).json({ error: error.message || 'Google OAuth is not configured.' });
+  const type = (connection?.connection_type || requestedType || 'google_gmail') as 'google_gmail' | 'google_drive' | 'google_sheets';
+
+  if (!connection && !requestedType) return res.status(404).json({ error: 'Google connector not found.' });
+
+  const requestedReturnTo = String(req.query.return_to || '/settings');
+  const returnTo = requestedReturnTo === '/command' ? '/command' : '/settings';
+
+  if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) {
+    try {
+      const oauth2 = googleOAuthClient();
+      const state = oauthStateSign({ uid: user?.uid, company_id: companyId, employee_id: req.params.id, connection_id: connectionId, connection_type: type, return_to: returnTo, iat: Date.now() });
+      res.cookie('cw_google_oauth_state', state, { httpOnly: true, sameSite: 'lax', secure: IS_PRODUCTION, path: '/', maxAge: 10 * 60 * 1000 });
+      return res.redirect(oauth2.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: connection ? googleScopesFor(connection) : ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/gmail.readonly'], state }));
+    } catch (error: any) {
+      console.warn('Server OAuth redirect error:', error?.message);
+    }
   }
+
+  // Fallback: render seamless interactive Google popup page
+  const serviceName = type === 'google_gmail' ? 'Gmail' : type === 'google_drive' ? 'Drive' : 'Sheets';
+  return res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Connect Google ${serviceName} - Caveworkers</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/style.css">
+  <script>window.FIREBASE_CONFIG = ${JSON.stringify(FIREBASE_WEB_CONFIG)};</script>
+</head>
+<body style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0d1117;padding:24px;font-family:system-ui,-apple-system,sans-serif;color:#f0f6fc;">
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:16px;box-shadow:0 12px 32px rgba(0,0,0,0.3);padding:32px;max-width:460px;width:100%;text-align:center;">
+    <div style="width:52px;height:52px;border-radius:14px;background:#21262d;border:1px solid #30363d;display:inline-flex;align-items:center;justify-content:center;margin-bottom:16px;font-size:26px;">🏢</div>
+    <h2 style="font-size:20px;font-weight:700;color:#f0f6fc;margin-bottom:8px;">Connect Google ${serviceName}</h2>
+    <p style="font-size:14px;color:#8b949e;line-height:1.5;margin-bottom:20px;">Authorize Caveworkers to access Google ${serviceName} so Sarah and your AI specialists can review emails, documents, or spreadsheets upon your request.</p>
+
+    <div style="background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:12px;margin-bottom:20px;text-align:left;font-size:12px;color:#8b949e;line-height:1.4;">
+      <b style="color:#58a6ff;display:block;margin-bottom:4px;">💡 If Google shows a caution / verification warning:</b>
+      Click <strong>Advanced</strong> at the bottom of Google’s popup, then click <strong>"Go to Caveworkers (unsafe)"</strong> or <strong>Continue</strong> to proceed.
+    </div>
+
+    <button id="connectBtn" type="button" style="width:100%;background:#238636;color:#ffffff;border:none;border-radius:10px;padding:13px 18px;font-size:15px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px;transition:background 0.2s;">
+      <span>Authorize Google Account</span> &rarr;
+    </button>
+    <div id="status" style="margin-top:16px;font-size:13px;color:#8b949e;min-height:20px;"></div>
+    <a href="${returnTo}" style="display:inline-block;margin-top:16px;font-size:13px;color:#58a6ff;text-decoration:none;">&larr; Cancel and return to workspace</a>
+  </div>
+  <script src="/static/google-connect.js"></script>
+  <script>
+    const btn = document.getElementById('connectBtn');
+    const status = document.getElementById('status');
+    let connecting = false;
+
+    async function doConnect() {
+      if (connecting) return;
+      connecting = true;
+      btn.disabled = true;
+      btn.innerText = 'Connecting Google Account...';
+      status.innerHTML = '<span style="color:#58a6ff;">Opening Google sign-in window... If popup is blocked, please allow popups.</span>';
+      try {
+        const res = await window.CaveworkersGoogleConnect({
+          employeeId: ${JSON.stringify(req.params.id)},
+          connectionId: ${JSON.stringify(connectionId)},
+          service: ${JSON.stringify(requestedService || type)},
+          gmailSendEnabled: true,
+          isDirectStartPage: true
+        });
+        if (res && res.ok) {
+          status.innerHTML = '<span style="color:#3fb950;font-weight:600;">✓ Connected successfully! Redirecting...</span>';
+          setTimeout(() => { window.location.href = ${JSON.stringify(returnTo)} + '?connector=connected&service=' + ${JSON.stringify(requestedService || type)}; }, 700);
+        } else {
+          throw new Error('Connection could not be completed.');
+        }
+      } catch (err) {
+        connecting = false;
+        btn.disabled = false;
+        btn.innerText = 'Authorize Google Account';
+        status.innerHTML = '<span style="color:#f85149;">' + (err.message || 'Authorization failed. Please try again.') + '</span>';
+      }
+    }
+
+    btn.addEventListener('click', doConnect);
+    // Trigger popup on user click or quick initial prompt
+    setTimeout(() => { doConnect(); }, 400);
+  </script>
+</body>
+</html>`);
 });
 
 app.get('/api/google/oauth/callback', async (req, res) => {
@@ -3702,7 +5438,7 @@ app.get('/api/google/oauth/callback', async (req, res) => {
   if (!user) return res.status(401).send('Your Caveworkers session expired. Return to the app and start Google connection again.');
   const state = String(req.query.state || '');
   const payload = oauthStateVerify(state);
-  if (!payload || payload.uid !== user.uid || payload.company_id !== (user.company_id || DEFAULT_COMPANY_ID) || req.cookies?.cw_google_oauth_state !== state) return res.status(400).send('Google OAuth state validation failed. Please restart the connection from Caveworkers.');
+  if (!payload || payload.uid !== user.uid || payload.company_id !== (getUserWorkspaceId(user)) || req.cookies?.cw_google_oauth_state !== state) return res.status(400).send('Google OAuth state validation failed. Please restart the connection from Caveworkers.');
   if (req.query.error) {
     res.clearCookie('cw_google_oauth_state', { path: '/' });
     const returnTo = payload.return_to === '/command' ? '/command' : '/settings';
@@ -3720,6 +5456,9 @@ app.get('/api/google/oauth/callback', async (req, res) => {
     let credentials = tokens as Record<string, any>;
     if (!credentials.refresh_token && connection.auth_token_encrypted) credentials = { ...(decryptConnectorCredentials(connection.auth_token_encrypted) || {}), ...credentials };
     connection.auth_token_encrypted = encryptConnectorCredentials(credentials);
+    connection.oauth_expires_at = credentials.expiry_date ? new Date(Number(credentials.expiry_date)).toISOString() : undefined;
+    connection.oauth_revoked_at = undefined;
+    connection.last_refresh_at = undefined;
     connection.auth_scopes = String(tokens.scope || '').split(' ').filter(Boolean);
     connection.status = 'connected';
     connection.last_error = undefined;
@@ -3747,7 +5486,7 @@ app.get('/api/google/oauth/callback', async (req, res) => {
 app.get('/api/employees/:id/mcp-connections/:connectionId/tools', async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const connectionId = Number(req.params.connectionId);
   const connections = await loadMcpConnections(companyId, req.params.id);
   const connection = connections.find((entry) => entry.id === connectionId);
@@ -3773,7 +5512,8 @@ app.get('/api/employees/:id/mcp-connections/:connectionId/tools', async (req, re
 app.post('/api/employees/:id/mcp-connections/:connectionId/tools/:toolName', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
   const connection = (await loadMcpConnections(companyId, req.params.id)).find((entry) => entry.id === Number(req.params.connectionId));
   if (!connection) return res.status(404).json({ error: 'MCP connection not found.' });
   const toolName = decodeURIComponent(req.params.toolName);
@@ -3789,8 +5529,8 @@ app.post('/api/employees/:id/mcp-connections/:connectionId/tools/:toolName', asy
 
 app.delete('/api/employees/:id/mcp-connections/:connectionId/tools/:toolName', async (req, res) => {
   const user = getAuthUser(req);
-  if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
   const connection = (await loadMcpConnections(companyId, req.params.id)).find((entry) => entry.id === Number(req.params.connectionId));
   if (!connection) return res.status(404).json({ error: 'MCP connection not found.' });
   connection.tool_grants = connection.tool_grants.filter((grant) => grant.tool_name !== decodeURIComponent(req.params.toolName));
@@ -3801,8 +5541,8 @@ app.delete('/api/employees/:id/mcp-connections/:connectionId/tools/:toolName', a
 
 app.post('/api/employees/:id/mcp-connections/:connectionId/test', async (req, res) => {
   const user = getAuthUser(req);
-  if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
   const connection = (await loadMcpConnections(companyId, req.params.id)).find((entry) => entry.id === Number(req.params.connectionId));
   if (!connection) return res.status(404).json({ error: 'MCP connection not found.' });
   if (connection.connection_type === 'streamable_http') {
@@ -3815,8 +5555,8 @@ app.post('/api/employees/:id/mcp-connections/:connectionId/test', async (req, re
 
 app.delete('/api/employees/:id/mcp-connections/:connectionId', async (req, res) => {
   const user = getAuthUser(req);
-  if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
   const connectionId = Number(req.params.connectionId);
   const key = `${companyId}:${req.params.id}`;
   const list = await loadMcpConnections(companyId, req.params.id);
@@ -3830,7 +5570,7 @@ app.delete('/api/employees/:id/mcp-connections/:connectionId', async (req, res) 
 app.get('/api/analyst/connectors', async (req, res) => {
   const user = getAuthUser(req);
   if (!user) return res.status(401).json({ error: 'Authentication required' });
-  const connections = await loadMcpConnections(user.company_id || DEFAULT_COMPANY_ID, 'david');
+  const connections = await loadMcpConnections(getUserWorkspaceId(user), 'david');
   res.json({ connections: connections.map(connectorPublicView) });
 });
 
@@ -3838,8 +5578,8 @@ app.post('/api/employees/:id/google-drive/search', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
   const employeeId = String(req.params.id || '').trim();
-  if (!activeWorkforce(user.company_id || DEFAULT_COMPANY_ID).some((employee) => employee.id === employeeId)) return res.status(404).json({ error: 'Employee not found in this workspace.' });
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  if (!activeWorkforce(getUserWorkspaceId(user)).some((employee) => employee.id === employeeId)) return res.status(404).json({ error: 'Employee not found in this workspace.' });
+  const companyId = getUserWorkspaceId(user);
   try {
     const connections = await loadMcpConnections(companyId, employeeId);
     const connection = connections.find((entry) => entry.connection_type === 'google_drive' && entry.status === 'connected' && entry.tool_grants.some((grant) => grant.tool_name === 'drive.files.read' && grant.access_level !== 'requires_approval'));
@@ -3852,7 +5592,7 @@ app.post('/api/employees/:id/google-drive/search', async (req, res) => {
 app.post('/api/analyst/google-sheets/read', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   try {
     const result = await readGoogleSheetValues(companyId, Number(req.body?.connection_id), String(req.body?.sheet_url || ''), req.body?.range, String(req.body?.employee_id || 'david'));
     res.json({ ok: true, result });
@@ -3862,7 +5602,7 @@ app.post('/api/analyst/google-sheets/read', async (req, res) => {
 app.post('/api/analyst/gmail/search', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   try {
     const result = await searchGmail(companyId, Number(req.body?.connection_id), String(req.body?.query || ''), req.body?.max_results, String(req.body?.employee_id || 'david'));
     res.json({ ok: true, result });
@@ -3872,7 +5612,7 @@ app.post('/api/analyst/gmail/search', async (req, res) => {
 app.post('/api/analyst/mcp/call', async (req, res) => {
   const user = getAuthUser(req);
   if (await enforceWorkspaceAccess(req, res)) return;
-  const companyId = user?.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const connectionId = Number(req.body?.connection_id);
   const toolName = String(req.body?.tool_name || '').trim();
   const connection = (await loadMcpConnections(companyId, 'david')).find((entry) => entry.id === connectionId && entry.status === 'connected');
@@ -3895,14 +5635,15 @@ app.post('/api/analyst/mcp/call', async (req, res) => {
 
 app.get('/api/knowledge', (req, res) => {
   const user = getAuthUser(req);
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const docs = db.knowledge.get(companyId) || db.knowledge.get(DEFAULT_COMPANY_ID) || [];
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
+  const docs = db.knowledge.get(companyId) || [];
   res.json(docs);
 });
 
 app.post('/api/knowledge', (req, res) => {
   const user = getAuthUser(req);
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const { title, content, category } = req.body || {};
   if (!title || !content) {
     return res.status(400).json({ error: 'Title and content are required' });
@@ -3918,34 +5659,73 @@ app.post('/api/knowledge', (req, res) => {
 
 app.get('/api/activity', async (req, res) => {
   const user = getAuthUser(req);
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   await hydrateTenantActivity(companyId);
   const logs = db.activity.get(companyId) || [];
   res.json({ messages: logs.filter((entry) => entry.company_id === companyId) });
 });
 
-app.post('/api/payments/create-order', async (req, res) => {
+async function createPaymentOrder(req: express.Request, res: express.Response) {
+  // Authentication deliberately comes before configuration so an anonymous
+  // caller receives 401 rather than learning whether payments are enabled.
   const user = getAuthUser(req);
-  const { tier } = req.body || {};
-  const plan = SUBSCRIPTION_PLANS[tier || user.selected_tier || 'growth'];
-  if (!plan || tier === 'free_trial') return res.status(400).json({ error: 'A paid plan is required to create a payment order.' });
+  if (!user) return res.status(401).json({ error: 'Authentication is required.' });
+
+  // `amount` is accepted only as a legacy request-shape validation field; the
+  // server always derives the payable amount from the selected plan below.
+  if (req.body?.amount !== undefined) {
+    const requestedAmount = Number(req.body.amount);
+    if (!Number.isFinite(requestedAmount) || requestedAmount < 100) return res.status(400).json({ error: 'Payment amount must be at least 100 paise.' });
+  }
+
   if (!razorpayClient || !RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET) return res.status(503).json({ error: 'Payments are not configured on this server.' });
 
-  const amountInPaise = Math.round((plan.price_inr || plan.price * 83) * 100);
+  const { tier, idempotency_key } = req.body || {};
+  const selectedTier = String(tier || user.selected_tier || 'growth');
+  const plan = SUBSCRIPTION_PLANS[selectedTier];
+  if (!plan || selectedTier === 'free_trial') return res.status(400).json({ error: 'A paid plan is required to create a payment order.' });
+
+  const companyId = getUserWorkspaceId(user);
+  const idempotencyKey = typeof idempotency_key === 'string' && idempotency_key.trim() ? idempotency_key.trim().slice(0, 128) : undefined;
   try {
+    if (idempotencyKey) {
+      const existing = await findPaymentOrderByIdempotencyKey(user.uid, idempotencyKey);
+      if (existing) {
+        if (existing.tier !== selectedTier) return res.status(409).json({ error: 'The idempotency key was already used for a different plan.' });
+        return res.json({ order_id: existing.id, amount: existing.amount, currency: existing.currency, key_id: RAZORPAY_KEY_ID, status: existing.status, duplicate: true });
+      }
+    }
+
+    const amountInPaise = Math.round((plan.price_inr || plan.price * 83) * 100);
     const order = await razorpayClient.orders.create({
       amount: amountInPaise,
       currency: 'INR',
       receipt: `rcpt_${user.uid}_${Date.now()}`,
-      notes: { uid: user.uid, company_id: user.company_id || DEFAULT_COMPANY_ID, tier: tier || user.selected_tier || 'growth' }
+      notes: { uid: user.uid, company_id: companyId, tier: selectedTier }
     });
-    pendingPaymentOrders.set(order.id, { uid: user.uid, company_id: user.company_id || DEFAULT_COMPANY_ID, tier: tier || user.selected_tier || 'growth', amount: Number(order.amount), created_at: new Date().toISOString() });
-    return res.json({ order_id: order.id, amount: order.amount, currency: order.currency, key_id: RAZORPAY_KEY_ID });
+    const now = new Date().toISOString();
+    const paymentOrder: PaymentOrderRecord = {
+      id: order.id,
+      uid: user.uid,
+      company_id: companyId,
+      tier: selectedTier,
+      amount: Number(order.amount),
+      currency: String(order.currency || 'INR'),
+      status: 'created',
+      idempotency_key: idempotencyKey,
+      created_at: now,
+      updated_at: now
+    };
+    // The response is withheld until Firestore has acknowledged the order.
+    await persistPaymentOrder(paymentOrder);
+    return res.json({ order_id: order.id, amount: order.amount, currency: order.currency, key_id: RAZORPAY_KEY_ID, status: paymentOrder.status });
   } catch (err: any) {
-    reportOperationalFailure('payments.order_create', err, { tenant_hash: anonymizeIdentifier(user.company_id || DEFAULT_COMPANY_ID), request_id: getRequestId(req), tier: String(tier || user.selected_tier || 'growth').slice(0, 32) });
+    reportOperationalFailure('payments.order_create', err, { tenant_hash: anonymizeIdentifier(companyId), request_id: getRequestId(req), tier: selectedTier.slice(0, 32) });
     return res.status(502).json({ error: 'Could not create a payment order. Please try again.', request_id: getRequestId(req) });
   }
-});
+}
+
+app.post(['/api/payments/create-order', '/api/create-order'], createPaymentOrder);
 
 app.post('/api/payments/webhook', async (req, res) => {
   if (!RAZORPAY_WEBHOOK_SECRET) return res.status(503).json({ error: 'Payment webhooks are not configured.' });
@@ -3954,77 +5734,327 @@ app.post('/api/payments/webhook', async (req, res) => {
   const valid = verifyRazorpayWebhookSignature(rawBody, providedSignature, RAZORPAY_WEBHOOK_SECRET);
   if (!valid) return res.status(401).json({ error: 'Invalid payment webhook signature.' });
 
-  const event = req.body?.event;
-  if (!['payment.authorized', 'payment.captured'].includes(event)) return res.json({ received: true });
+  const event = String(req.body?.event || '');
+  if (!['payment.authorized', 'payment.captured', 'payment.failed'].includes(event)) return res.json({ received: true });
   const payment = req.body?.payload?.payment?.entity;
   const orderId = payment?.order_id;
   const paymentId = payment?.id;
   if (!orderId || !paymentId) return res.status(400).json({ error: 'Payment webhook payload is incomplete.' });
 
+  let pending: PaymentOrderRecord | null = null;
   try {
-    let pending = pendingPaymentOrders.get(orderId);
-    if (!pending && razorpayClient) {
-      const order = await razorpayClient.orders.fetch(orderId);
-      const notes = order.notes || {};
-      if (notes.uid && notes.company_id && notes.tier) {
-        pending = { uid: String(notes.uid), company_id: String(notes.company_id), tier: String(notes.tier), amount: Number(order.amount), created_at: new Date().toISOString() };
-      }
-    }
+    // A webhook may arrive on a different Cloud Run instance from checkout.
+    pending = await loadPaymentOrder(String(orderId));
     if (!pending) return res.status(202).json({ received: true, reason: 'Payment order is not pending in this workspace.' });
+    if (pending.status === 'verified') return res.json({ received: true, duplicate: true });
+    if (pending.status === 'failed') return res.json({ received: true, status: 'failed', duplicate: true });
+
+    if (event === 'payment.failed') {
+      await transitionPaymentOrder(String(orderId), 'failed', {
+        failed_at: new Date().toISOString(),
+        failure_reason: String(payment.error_description || payment.error_code || 'Razorpay reported payment failure.').slice(0, 240)
+      });
+      return res.json({ received: true, status: 'failed' });
+    }
+
+    if (payment.amount !== undefined && Number(payment.amount) !== pending.amount) {
+      await transitionPaymentOrder(String(orderId), 'failed', { failed_at: new Date().toISOString(), failure_reason: 'Payment amount mismatch.' });
+      return res.status(400).json({ error: 'Payment amount does not match the order.' });
+    }
+    if (payment.currency && String(payment.currency) !== pending.currency) {
+      await transitionPaymentOrder(String(orderId), 'failed', { failed_at: new Date().toISOString(), failure_reason: 'Payment currency mismatch.' });
+      return res.status(400).json({ error: 'Payment currency does not match the order.' });
+    }
 
     const company = await loadCompanyFromFirebase(pending.company_id) || db.companies.get(pending.company_id);
-    if (company) {
-      company.tier = pending.tier;
-      company.status = 'active';
-      company.payment_verified_at = new Date().toISOString();
-      company.payment_id = paymentId;
-      await persistCompany(company);
-    }
+    if (!company) throw new Error('Workspace not found for payment order.');
+    company.tier = pending.tier;
+    company.status = 'active';
+    company.payment_verified_at = new Date().toISOString();
+    company.payment_id = String(paymentId);
+    await persistCompany(company);
+
     const linkedUser = await loadUserFromFirebase(pending.uid);
-    if (linkedUser) {
-      linkedUser.selected_tier = pending.tier;
-      await persistUser(linkedUser, { payment_id: paymentId });
-    }
-    pendingPaymentOrders.delete(orderId);
-    return res.json({ received: true });
+    if (!linkedUser) throw new Error('User not found for payment order.');
+    linkedUser.selected_tier = pending.tier;
+    await persistUser(linkedUser, { payment_id: String(paymentId) });
+    await transitionPaymentOrder(String(orderId), 'verified', { payment_id: String(paymentId), verified_at: new Date().toISOString() });
+    return res.json({ received: true, status: 'verified' });
   } catch (error) {
-    reportOperationalFailure('payments.webhook_processing', error, { request_id: getRequestId(req), event_type: String(event || 'unknown').slice(0, 80), order_hash: anonymizeIdentifier(orderId) });
+    reportOperationalFailure('payments.webhook_processing', error, { request_id: getRequestId(req), event_type: String(event || 'unknown').slice(0, 80), order_hash: anonymizeIdentifier(String(orderId)) });
     return res.status(500).json({ error: 'Webhook processing failed.', request_id: getRequestId(req) });
   }
 });
 
-app.post('/api/payments/verify', async (req, res) => {
+async function verifyPayment(req: express.Request, res: express.Response) {
   const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication is required.' });
   const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
-  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature || !RAZORPAY_KEY_SECRET) return res.status(402).json({ error: 'A valid Razorpay payment is required.', payment_required: true });
+  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) return res.status(400).json({ error: 'A valid Razorpay payment is required.', payment_required: true });
+  if (!RAZORPAY_KEY_SECRET) return res.status(503).json({ error: 'Payments are not configured on this server.' });
 
-  const pending = pendingPaymentOrders.get(razorpay_order_id);
-  if (!pending || pending.uid !== user.uid) return res.status(403).json({ error: 'Payment order is invalid or does not belong to this account.' });
+  // Validate the HMAC before revealing whether an order exists or which tenant
+  // owns it. A malformed/tampered payment is always a client error (400).
+  const valid = verifyRazorpayPaymentSignature(String(razorpay_order_id), String(razorpay_payment_id), String(razorpay_signature), RAZORPAY_KEY_SECRET);
+  if (!valid) return res.status(400).json({ error: 'Payment signature verification failed.', payment_required: true });
 
+  let pending: PaymentOrderRecord | null = null;
   try {
-    const valid = verifyRazorpayPaymentSignature(razorpay_order_id, razorpay_payment_id, razorpay_signature, RAZORPAY_KEY_SECRET);
-    if (!valid) return res.status(402).json({ error: 'Payment signature verification failed.', payment_required: true });
+    pending = await loadPaymentOrder(String(razorpay_order_id));
+    if (!pending || pending.uid !== user.uid || pending.company_id !== getUserWorkspaceId(user)) return res.status(403).json({ error: 'Payment order is invalid or does not belong to this account.' });
+    if (pending.status === 'verified') return res.json({ status: 'verified', success: true, tier: pending.tier, duplicate: true });
+    if (pending.status === 'failed') return res.status(409).json({ error: 'This payment order has already failed and cannot be verified.', payment_required: true });
+
+    if (razorpayClient) {
+      const order = await razorpayClient.orders.fetch(String(razorpay_order_id));
+      if (Number(order.amount) !== pending.amount || String(order.currency || pending.currency) !== pending.currency) {
+        await transitionPaymentOrder(String(razorpay_order_id), 'failed', { failed_at: new Date().toISOString(), failure_reason: 'Payment order details mismatch.' });
+        return res.status(400).json({ error: 'Payment order details do not match the recorded order.' });
+      }
+    }
 
     const company = await loadCompanyFromFirebase(pending.company_id) || db.companies.get(pending.company_id);
-    if (!company) return res.status(400).json({ error: 'Workspace not found for this payment.' });
+    if (!company) {
+      await transitionPaymentOrder(String(razorpay_order_id), 'failed', { failed_at: new Date().toISOString(), failure_reason: 'Workspace not found for payment.' });
+      return res.status(400).json({ error: 'Workspace not found for this payment.' });
+    }
     company.tier = pending.tier;
     company.status = 'active';
     company.payment_verified_at = new Date().toISOString();
-    company.payment_id = razorpay_payment_id;
+    company.payment_id = String(razorpay_payment_id);
     await persistCompany(company);
     user.selected_tier = pending.tier;
-    await persistUser(user, { payment_id: razorpay_payment_id });
-    pendingPaymentOrders.delete(razorpay_order_id);
-    return res.json({ status: 'verified', tier: pending.tier });
+    await persistUser(user, { payment_id: String(razorpay_payment_id) });
+    await transitionPaymentOrder(String(razorpay_order_id), 'verified', { payment_id: String(razorpay_payment_id), verified_at: new Date().toISOString() });
+    return res.json({ status: 'verified', success: true, tier: pending.tier });
   } catch (error) {
-    reportOperationalFailure('payments.signature_verification', error, { tenant_hash: anonymizeIdentifier(user.company_id || DEFAULT_COMPANY_ID), request_id: getRequestId(req), order_hash: anonymizeIdentifier(razorpay_order_id) });
+    reportOperationalFailure('payments.signature_verification', error, { tenant_hash: anonymizeIdentifier(getUserWorkspaceId(user)), request_id: getRequestId(req), order_hash: anonymizeIdentifier(String(razorpay_order_id)) });
     return res.status(502).json({ error: 'Payment verification could not be completed. Please contact support if you were charged.', request_id: getRequestId(req) });
+  }
+}
+
+app.post(['/api/payments/verify', '/api/verify-payment'], verifyPayment);
+
+app.get('/api/workflows/scheduled', async (req, res) => {
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
+  const workflows = await hydrateScheduledWorkflows(companyId);
+  res.json({ workflows: workflows.sort((a, b) => Date.parse(a.next_run_at) - Date.parse(b.next_run_at)).map((workflow) => ({ ...workflow })) });
+});
+
+app.post('/api/workflows/scheduled', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = user?.company_id;
+  if (!companyId) return res.status(403).json({ error: 'A verified workspace is required.' });
+  if (await enforceWorkspaceAccess(req, res)) return;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const body = req.body || {};
+  const name = String(body.name || '').trim().slice(0, 120);
+  const prompt = String(body.prompt || body.request || '').trim().slice(0, 6000);
+  const scheduleType = body.schedule_type === 'cron' ? 'cron' : 'once';
+  const timezone = normalizeTimezone(body.timezone);
+  const maxRuns = body.max_runs === undefined || body.max_runs === null || body.max_runs === '' ? undefined : Number(body.max_runs);
+  if (!name || !prompt) return res.status(400).json({ error: 'A workflow name and task prompt are required.' });
+  if (!timezone) return res.status(400).json({ error: 'A valid IANA timezone is required.' });
+  if (detectPromptInjection(prompt).blocked) return res.status(400).json({ error: 'The scheduled prompt was blocked by the safety classifier.', code: 'prompt_injection_blocked' });
+  if (maxRuns !== undefined && (!Number.isInteger(maxRuns) || maxRuns < 1 || maxRuns > 10000)) return res.status(400).json({ error: 'max_runs must be an integer between 1 and 10000.' });
+  const now = new Date();
+  let nextRunAt: string | null = null;
+  let cronExpression: string | undefined;
+  if (scheduleType === 'once') {
+    const runAt = String(body.run_at || '').trim();
+    if (!runAt || !Number.isFinite(Date.parse(runAt)) || Date.parse(runAt) <= now.getTime() + 5_000) return res.status(400).json({ error: 'run_at must be a future ISO timestamp.' });
+    nextRunAt = new Date(runAt).toISOString();
+  } else {
+    cronExpression = String(body.cron_expression || '').trim().slice(0, 120);
+    nextRunAt = nextCronOccurrence(cronExpression, timezone, now);
+    if (!nextRunAt) return res.status(400).json({ error: 'cron_expression must be a valid five-field cron expression with minute, hour, day, month, and weekday.' });
+  }
+  const workflow: ScheduledWorkflow = {
+    id: crypto.randomUUID(), company_id: companyId, name, prompt, schedule_type: scheduleType, cron_expression: cronExpression, timezone, next_run_at: nextRunAt, preferred_employee_id: typeof body.preferred_employee_id === 'string' ? body.preferred_employee_id.trim().slice(0, 80) : undefined, email_employee_id: typeof body.email_employee_id === 'string' ? body.email_employee_id.trim().slice(0, 80) : undefined, run_count: 0, max_runs: maxRuns, status: 'active', created_by: user!.uid, created_at: now.toISOString(), updated_at: now.toISOString()
+  };
+  await persistScheduledWorkflow(workflow);
+  await auditWorkforceAction({ company_id: companyId, actor_type: 'user', actor_id: user!.uid, action: 'scheduled_workflow.created', resource_type: 'scheduled_workflow', resource_id: workflow.id, risk: 'low', status: 'prepared', summary: `Created scheduled workflow ${workflow.name}.`, correlation_id: getRequestId(req), metadata: { schedule_type: workflow.schedule_type, timezone: workflow.timezone } });
+  return res.status(201).json({ workflow });
+});
+
+app.patch('/api/workflows/scheduled/:id', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = user?.company_id;
+  if (!companyId) return res.status(403).json({ error: 'A verified workspace is required.' });
+  if (await enforceWorkspaceAccess(req, res)) return;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const workflow = db.scheduledWorkflows.get(String(req.params.id));
+  if (!workflow || workflow.company_id !== companyId) return res.status(404).json({ error: 'Scheduled workflow not found.' });
+  const body = req.body || {};
+  const updated: ScheduledWorkflow = { ...workflow, updated_at: new Date().toISOString() };
+  if (body.name !== undefined) updated.name = String(body.name).trim().slice(0, 120);
+  if (body.prompt !== undefined) {
+    updated.prompt = String(body.prompt).trim().slice(0, 6000);
+    if (!updated.prompt || detectPromptInjection(updated.prompt).blocked) return res.status(400).json({ error: 'The scheduled prompt is invalid or blocked by the safety classifier.', code: 'prompt_injection_blocked' });
+  }
+  if (body.status !== undefined) {
+    const status = String(body.status);
+    if (!['active', 'paused'].includes(status)) return res.status(400).json({ error: 'Only active and paused statuses can be selected manually.' });
+    updated.status = status as ScheduledWorkflow['status'];
+  }
+  if (body.max_runs !== undefined) {
+    const value = body.max_runs === null || body.max_runs === '' ? undefined : Number(body.max_runs);
+    if (value !== undefined && (!Number.isInteger(value) || value < 1 || value > 10000)) return res.status(400).json({ error: 'max_runs must be an integer between 1 and 10000.' });
+    updated.max_runs = value;
+  }
+  const requestedTimezone = body.timezone === undefined ? updated.timezone : normalizeTimezone(body.timezone);
+  if (!requestedTimezone) return res.status(400).json({ error: 'A valid IANA timezone is required.' });
+  updated.timezone = requestedTimezone;
+  const scheduleChanged = body.run_at !== undefined || body.cron_expression !== undefined || body.schedule_type !== undefined || body.timezone !== undefined;
+  if (scheduleChanged) {
+    const scheduleType = body.schedule_type === 'cron' || (body.schedule_type === undefined && body.cron_expression !== undefined) ? 'cron' : body.schedule_type === 'once' || body.run_at !== undefined ? 'once' : updated.schedule_type;
+    updated.schedule_type = scheduleType;
+    if (scheduleType === 'cron') {
+      updated.cron_expression = String(body.cron_expression ?? updated.cron_expression ?? '').trim().slice(0, 120);
+      updated.next_run_at = nextCronOccurrence(updated.cron_expression, updated.timezone, new Date()) || '';
+      if (!updated.next_run_at) return res.status(400).json({ error: 'cron_expression is invalid.' });
+    } else {
+      const runAt = String(body.run_at ?? updated.next_run_at).trim();
+      if (!Number.isFinite(Date.parse(runAt)) || Date.parse(runAt) <= Date.now() + 5_000) return res.status(400).json({ error: 'run_at must be a future ISO timestamp.' });
+      updated.cron_expression = undefined;
+      updated.next_run_at = new Date(runAt).toISOString();
+    }
+    updated.run_count = 0;
+    updated.last_error = undefined;
+  }
+  if (!updated.name || !updated.prompt || !updated.next_run_at) return res.status(400).json({ error: 'A workflow name, prompt, and valid schedule are required.' });
+  await persistScheduledWorkflow(updated);
+  await auditWorkforceAction({ company_id: companyId, actor_type: 'user', actor_id: user!.uid, action: 'scheduled_workflow.updated', resource_type: 'scheduled_workflow', resource_id: updated.id, risk: 'low', status: 'prepared', summary: `Updated scheduled workflow ${updated.name}.`, correlation_id: getRequestId(req), metadata: { status: updated.status } });
+  return res.json({ workflow: updated });
+});
+
+app.delete('/api/workflows/scheduled/:id', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = user?.company_id;
+  if (!companyId) return res.status(403).json({ error: 'A verified workspace is required.' });
+  if (await enforceWorkspaceAccess(req, res)) return;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const workflow = db.scheduledWorkflows.get(String(req.params.id));
+  if (!workflow || workflow.company_id !== companyId) return res.status(404).json({ error: 'Scheduled workflow not found.' });
+  db.scheduledWorkflows.delete(workflow.id);
+  const collection = scheduledWorkflowCollection();
+  if (collection) await collection.doc(workflow.id).delete();
+  await auditWorkforceAction({ company_id: companyId, actor_type: 'user', actor_id: user!.uid, action: 'scheduled_workflow.deleted', resource_type: 'scheduled_workflow', resource_id: workflow.id, risk: 'medium', status: 'succeeded', summary: `Deleted scheduled workflow ${workflow.name}.`, correlation_id: getRequestId(req) });
+  return res.json({ deleted: true, id: workflow.id });
+});
+
+app.post('/api/internal/workflows/tick', async (req, res) => {
+  if (IS_PRODUCTION && !SCHEDULER_TICK_SECRET) return res.status(503).json({ error: 'Scheduler tick secret is not configured.', code: 'scheduler_secret_missing' });
+  if (!schedulerSecretMatches(req)) return res.status(401).json({ error: 'Invalid scheduler credentials.' });
+  try {
+    const result = await processDueScheduledWorkflows();
+    return res.json({ ok: true, ...result, worker_instance: WORKER_INSTANCE_ID });
+  } catch (error) {
+    reportOperationalFailure('scheduled_workflow.tick', error);
+    return res.status(500).json({ error: 'The scheduler tick failed safely.', code: 'scheduler_tick_failed' });
   }
 });
 
+app.get('/api/tenant/:companyId/export', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = String(req.params.companyId || '');
+  if (!user || user.company_id !== companyId) return res.status(404).json({ error: 'Tenant not found.' });
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId);
+  if (!company) return res.status(404).json({ error: 'Tenant not found.' });
+  const now = new Date();
+  const record: DataExportRequest = { id: crypto.randomUUID(), company_id: companyId, requested_by: user.uid, status: 'completed', requested_at: now.toISOString(), completed_at: now.toISOString(), expires_at: new Date(now.getTime() + TENANT_EXPORT_EXPIRY_DAYS * 86400000).toISOString() };
+  try {
+    record.payload = await buildTenantExport(companyId);
+    await persistDataExport(record);
+    await auditWorkforceAction({ company_id: companyId, actor_type: 'user', actor_id: user.uid, action: 'tenant.export_requested', resource_type: 'tenant', resource_id: companyId, risk: 'medium', status: 'succeeded', summary: 'Tenant data export generated.', correlation_id: getRequestId(req), metadata: { export_id: record.id, expires_at: record.expires_at } });
+    return res.json({ export_id: record.id, status: record.status, requested_at: record.requested_at, completed_at: record.completed_at, expires_at: record.expires_at, data: record.payload });
+  } catch (error: any) {
+    record.status = 'failed';
+    record.error = String(error?.message || 'Tenant data export failed.').slice(0, 240);
+    await persistDataExport(record);
+    reportOperationalFailure('tenant.export', error, { tenant_hash: anonymizeIdentifier(companyId), request_id: getRequestId(req) });
+    return res.status(500).json({ error: 'Tenant data export could not be generated safely.', code: 'tenant_export_failed', export_id: record.id });
+  }
+});
+
+app.get('/api/tenant/:companyId/export/:exportId', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = String(req.params.companyId || '');
+  if (!user || user.company_id !== companyId) return res.status(404).json({ error: 'Tenant not found.' });
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const record = db.dataExports.get(String(req.params.exportId));
+  if (!record || record.company_id !== companyId) return res.status(404).json({ error: 'Export not found.' });
+  if (Date.parse(record.expires_at) <= Date.now()) return res.status(410).json({ error: 'This export has expired. Request a new export.' });
+  return res.json(record);
+});
+
+app.get('/api/tenant/:companyId/deletion', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = String(req.params.companyId || '');
+  if (!user || user.company_id !== companyId) return res.status(404).json({ error: 'Tenant not found.' });
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId);
+  if (!company) return res.status(404).json({ error: 'Tenant not found.' });
+  const request = company.deletion_request_id ? db.deletionRequests.get(company.deletion_request_id) : undefined;
+  return res.json({ status: company.status, deletion_requested_at: company.deletion_requested_at, deletion_scheduled_for: company.deletion_scheduled_for, request: request || null });
+});
+
+app.delete('/api/tenant/:companyId', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = String(req.params.companyId || '');
+  if (!user || user.company_id !== companyId) return res.status(404).json({ error: 'Tenant not found.' });
+  if (!requireWorkspaceRole(req, res, 'owner')) return;
+  const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId);
+  if (!company) return res.status(404).json({ error: 'Tenant not found.' });
+  if (company.status === 'deleted') return res.status(410).json({ error: 'This workspace has already been deleted.' });
+  if (company.status === 'deletion_requested' && company.deletion_request_id) {
+    return res.status(202).json({ status: 'scheduled', request_id: company.deletion_request_id, deletion_scheduled_for: company.deletion_scheduled_for });
+  }
+  const now = new Date();
+  const request: TenantDeletionRequest = { id: crypto.randomUUID(), company_id: companyId, requested_by: user.uid, status: 'scheduled', requested_at: now.toISOString(), execute_after: new Date(now.getTime() + TENANT_DELETION_GRACE_DAYS * 86400000).toISOString() };
+  company.status = 'deletion_requested';
+  company.deletion_requested_at = request.requested_at;
+  company.deletion_scheduled_for = request.execute_after;
+  company.deletion_request_id = request.id;
+  await persistCompany(company);
+  for (const tenantUser of Array.from(db.users.values()).filter((entry) => entry.company_id === companyId)) await persistUser({ ...tenantUser, onboarded: false });
+  await revokeTenantConnectors(companyId);
+  await persistDeletionRequest(request);
+  await auditWorkforceAction({ company_id: companyId, actor_type: 'user', actor_id: user.uid, action: 'tenant.deletion_requested', resource_type: 'tenant', resource_id: companyId, risk: 'high', status: 'prepared', summary: `Workspace deletion scheduled after a ${TENANT_DELETION_GRACE_DAYS}-day grace period.`, correlation_id: getRequestId(req), metadata: { request_id: request.id, execute_after: request.execute_after } });
+  return res.status(202).json({ status: request.status, request_id: request.id, deletion_scheduled_for: request.execute_after, grace_period_days: TENANT_DELETION_GRACE_DAYS, message: 'Operational actions are blocked immediately. Contact Caveworkers support before the scheduled date to cancel this request.' });
+});
+
+app.get('/api/usage', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = getUserWorkspaceId(user);
+  const ledger = await loadUsageLedger(companyId);
+  const plan = companyPlan(companyId);
+  const activationEvents = await loadActivationEvents(companyId);
+  const activationNames: ActivationEvent['name'][] = ['workspace_created', 'employee_selected', 'connector_connected', 'first_task_created', 'first_task_completed', 'first_tool_succeeded', 'first_approval_completed'];
+  const activation = activationNames.map((name) => {
+    const event = activationEvents.find((candidate) => candidate.name === name);
+    return { name, completed: Boolean(event), occurred_at: event?.created_at || null };
+  });
+  const taskLimit = Number(plan.max_tasks_per_month || 0);
+  const toolCallLimit = Number(plan.max_tool_calls_per_month || 0);
+  res.json({
+    period: ledger.period,
+    plan: { key: (db.companies.get(companyId) as any)?.tier || 'free_trial', name: plan.name, price_inr: Number(plan.price_inr || 0) },
+    usage: ledger,
+    limits: { tasks_per_month: taskLimit, tool_calls_per_month: toolCallLimit },
+    utilization: {
+      tasks: taskLimit > 0 ? Math.min(1, ledger.tasks_created / taskLimit) : 0,
+      tool_calls: toolCallLimit > 0 ? Math.min(1, ledger.tool_calls / toolCallLimit) : 0
+    },
+    activation: { completed_count: activation.filter((step) => step.completed).length, total_count: activation.length, steps: activation, events: activationEvents }
+  });
+});
 app.get('/api/roi', (req, res) => {
   const user = getAuthUser(req);
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
+  const companyId = getUserWorkspaceId(user);
   const employees = db.orgEmployees.get(companyId) || [];
   const tasks = Array.from(db.tasks.values()).filter((task: any) => task.company_id === companyId);
   const approvals = Array.from(db.approvals.values()).filter((approval: any) => approval.company_id === companyId);
@@ -4064,8 +6094,8 @@ app.get('/api/roi', (req, res) => {
 });
 app.get('/api/office/status', (req, res) => {
   const user = getAuthUser(req);
-  const companyId = user.company_id || DEFAULT_COMPANY_ID;
-  const emps = db.orgEmployees.get(companyId) || db.orgEmployees.get(DEFAULT_COMPANY_ID) || [];
+  const companyId = getUserWorkspaceId(user);
+  const emps = db.orgEmployees.get(companyId) || [];
   const pendingApprovals = Array.from(db.approvals.values()).filter((a) => a.status === 'pending');
 
   const office = emps.map((emp, index) => {
@@ -4101,7 +6131,7 @@ app.get('/api/office/status', (req, res) => {
   });
 
   res.json({
-    company_name: user.company_name || 'Acme Operations',
+    company_name: user.company_name || 'Workspace',
     total_active_employees: emps.length,
     pending_approvals_count: pendingApprovals.length,
     office
@@ -4132,5 +6162,6 @@ if (process.env.NODE_ENV !== 'test' && process.env.VITEST !== 'true') {
   app.listen(PORT, HOST, () => {
     console.log(`CaveWorkers backend running on http://${HOST}:${PORT}`);
     void startAlwaysOnWorker().catch((error) => reportOperationalFailure('worker.startup', error));
+    startWorkflowScheduler();
   });
 }

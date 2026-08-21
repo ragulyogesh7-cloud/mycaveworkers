@@ -1,0 +1,141 @@
+{
+  "entities": {
+    "User": {
+      "title": "User Profile",
+      "description": "User account information and workspace ownership",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "display_name": { "type": "string" },
+        "photo_url": { "type": "string" },
+        "company_id": { "type": "string" },
+        "company_name": { "type": "string" },
+        "user_role": { "type": "string" },
+        "onboarded": { "type": "boolean" },
+        "selected_tier": { "type": "string" },
+        "role": { "type": "string" },
+        "created_at": { "type": "string" },
+        "updated_at": { "type": "string" }
+      },
+      "required": ["uid", "email"]
+    },
+    "Company": {
+      "title": "Company Workspace",
+      "description": "Tenant workspace settings and subscription plan",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "industry": { "type": "string" },
+        "team_size": { "type": "string" },
+        "user_role": { "type": "string" },
+        "business_goals": { "type": "string" },
+        "workspace_guidelines": { "type": "string" },
+        "owner_uid": { "type": "string" },
+        "tier": { "type": "string" },
+        "status": { "type": "string" },
+        "selected_employees": {
+          "type": "array"
+        },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "owner_uid"]
+    },
+    "OrgEmployee": {
+      "title": "AI Employee",
+      "description": "AI employee configuration in the tenant workspace",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "employee_id": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string" },
+        "department": { "type": "string" },
+        "color": { "type": "string" },
+        "status": { "type": "string" }
+      },
+      "required": ["id", "name"]
+    },
+    "TaskRecord": {
+      "title": "Task Record",
+      "description": "Workforce task and execution state",
+      "type": "object",
+      "properties": {
+        "id": { "type": "integer" },
+        "company_id": { "type": "string" },
+        "question": { "type": "string" },
+        "owner": { "type": "string" },
+        "status": { "type": "string" },
+        "created_at": { "type": "string" }
+      },
+      "required": ["id", "company_id", "question"]
+    },
+    "WorkspaceSettings": {
+      "title": "Workspace Settings",
+      "description": "Custom preferences and operating guidelines",
+      "type": "object",
+      "properties": {
+        "company_id": { "type": "string" },
+        "company_name": { "type": "string" },
+        "user_role": { "type": "string" },
+        "industry": { "type": "string" },
+        "team_size": { "type": "string" },
+        "business_goals": { "type": "string" },
+        "workspace_guidelines": { "type": "string" },
+        "updated_at": { "type": "string" }
+      },
+      "required": ["company_id"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User account documents indexed by UID"
+    },
+    "/companies/{companyId}": {
+      "schema": { "$ref": "#/entities/Company" },
+      "description": "Company workspace records"
+    },
+    "/tenants/{companyId}/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/WorkspaceSettings" },
+      "description": "Tenant workspace configuration"
+    },
+    "/tenants/{companyId}/employees/{employeeId}": {
+      "schema": { "$ref": "#/entities/OrgEmployee" },
+      "description": "Tenant configured AI employees"
+    },
+    "/tenants/{companyId}/tasks/{taskId}": {
+      "schema": { "$ref": "#/entities/TaskRecord" },
+      "description": "Tenant task history"
+    },
+    "/tenants/{companyId}/activity/{activityId}": {
+      "schema": "object",
+      "description": "Tenant activity audit log"
+    },
+    "/tenants/{companyId}/employee_memory/{memoryId}": {
+      "schema": "object",
+      "description": "Employee preferences and context memories"
+    },
+    "/tenants/{companyId}/conversations/{employeeId}": {
+      "schema": "object",
+      "description": "Chat threads with AI specialists"
+    },
+    "/tenants/{companyId}/connectors/{connectorId}": {
+      "schema": "object",
+      "description": "Tenant MCP and OAuth connector configurations"
+    },
+    "/workforce_jobs/{jobId}": {
+      "schema": "object",
+      "description": "Asynchronous workforce queue jobs"
+    },
+    "/scheduled_workflows/{workflowId}": {
+      "schema": "object",
+      "description": "Scheduled workforce workflows and recurring cron tasks"
+    },
+    "/payments/{paymentId}": {
+      "schema": "object",
+      "description": "Payment transactions and subscription orders"
+    }
+  }
+}

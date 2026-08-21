@@ -1,0 +1,70 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function ownUser(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function userCompanyId() {
+      return signedIn()
+        ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data.company_id
+        : null;
+    }
+
+    function sameCompany(companyId) {
+      return signedIn() && userCompanyId() == companyId;
+    }
+
+    function companyOwner(companyId) {
+      return sameCompany(companyId)
+        && get(/databases/$(database)/documents/companies/$(companyId)).data.owner_uid == request.auth.uid;
+    }
+
+    // User profiles are readable and writable only by the authenticated user.
+    match /users/{uid} {
+      allow read, create, update: if ownUser(uid);
+      allow delete: if false;
+    }
+
+    // Company records are tenant-scoped. Only the owner may mutate workspace settings.
+    match /companies/{companyId} {
+      allow read: if sameCompany(companyId);
+      allow create: if signedIn() && request.resource.data.owner_uid == request.auth.uid;
+      allow update: if companyOwner(companyId)
+        && request.resource.data.owner_uid == resource.data.owner_uid;
+      allow delete: if false;
+    }
+
+    // Payment records are tenant-scoped and intentionally immutable in identity.
+    // The server uses Firebase Admin for lifecycle writes; browser clients may
+    // only read their own company's records and create/update matching records.
+    match /payments/{paymentId} {
+      allow read: if sameCompany(resource.data.company_id);
+      allow create: if sameCompany(request.resource.data.company_id);
+      allow update: if sameCompany(resource.data.company_id)
+        && request.resource.data.company_id == resource.data.company_id;
+      allow delete: if false;
+    }
+
+    // All other top-level tenant collections must carry an immutable company_id field.
+    match /{collection}/{documentId} {
+      allow read: if collection != 'payments' && sameCompany(resource.data.company_id);
+      allow create: if collection != 'payments' && sameCompany(request.resource.data.company_id);
+      allow update: if collection != 'payments' && sameCompany(resource.data.company_id)
+        && request.resource.data.company_id == resource.data.company_id;
+      allow delete: if collection != 'payments' && sameCompany(resource.data.company_id);
+    }
+
+    // Nested tenant documents follow the parent company identifier.
+    match /companies/{companyId}/{subcollection}/{documentId} {
+      allow read: if sameCompany(companyId);
+      allow create, update: if sameCompany(companyId);
+      allow delete: if companyOwner(companyId);
+    }
+  }
+}

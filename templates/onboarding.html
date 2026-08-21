@@ -22,7 +22,7 @@
     <nav class="nav">
       <div class="wrap nav-row">
         <a href="/" class="brand">
-          <img class="brand-logo" src="/static/logo.jpeg" alt="">
+          <img class="brand-logo" src="/static/logo.svg" alt="">
           CaveWorkers
         </a>
         <div class="mono eyebrow"><span>✦</span> Workspace Setup Wizard</div>
@@ -60,19 +60,26 @@
         <div class="wizard-step" id="step-1">
           <div class="step-header">
             <span class="mono eyebrow">Step 1 of 4</span>
-            <h2>Set up your company profile</h2>
-            <p>We'll personalize your AI employees for your industry and organization size.</p>
+            <h2>Set up your business & user memory</h2>
+            <p>Tell us about your business. Your AI crew will remember your company, goals, and settings in an isolated memory space.</p>
           </div>
 
-          <div class="form-group">
-            <label for="company_name">Company Name *</label>
-            <input type="text" id="company_name" placeholder="e.g. Acme Corp / Northstar Technologies" required>
+          <div class="form-row">
+            <div class="form-group">
+              <label for="company_name">Business / Company Name *</label>
+              <input type="text" id="company_name" placeholder="e.g. Acme Corp / Northstar Technologies" required>
+            </div>
+            <div class="form-group">
+              <label for="user_role">Your Role / Title</label>
+              <input type="text" id="user_role" placeholder="e.g. Founder, CEO, VP Operations">
+            </div>
           </div>
 
           <div class="form-row">
             <div class="form-group">
               <label for="industry">Industry</label>
               <select id="industry">
+                <option value="" selected>Select your industry</option>
                 <option value="Technology">Technology &amp; Software</option>
                 <option value="Finance">Finance &amp; Banking</option>
                 <option value="E-commerce">E-commerce &amp; Retail</option>
@@ -84,12 +91,23 @@
             <div class="form-group">
               <label for="team_size">Team Size</label>
               <select id="team_size">
+                <option value="" selected>Select your team size</option>
                 <option value="1-10">1-10 employees</option>
                 <option value="11-50">11-50 employees</option>
                 <option value="51-200">51-200 employees</option>
                 <option value="201+">201+ employees</option>
               </select>
             </div>
+          </div>
+
+          <div class="form-group">
+            <label for="business_goals">Business Model &amp; Objectives (Stored in Crew Memory)</label>
+            <input type="text" id="business_goals" placeholder="e.g. B2B SaaS platform focused on enterprise automation and customer growth.">
+          </div>
+
+          <div class="form-group">
+            <label for="workspace_guidelines">Operating Guidelines &amp; Rules for Crew</label>
+            <input type="text" id="workspace_guidelines" placeholder="e.g. Require approval before sending external emails; prioritize high accuracy; maintain professional tone.">
           </div>
 
           <div class="step-actions">
@@ -102,34 +120,45 @@
           <div class="step-header">
             <span class="mono eyebrow">Step 2 of 4</span>
             <h2>Choose your subscription plan</h2>
-            <p>Pick the plan that fits your team size. You can upgrade anytime.</p>
+            <p>Pick the plan that fits your team size. Upgrade or change your tier anytime.</p>
           </div>
 
           <div class="plans-grid">
             <% Object.keys(plans || {}).forEach(function(tier_key) { var plan = plans[tier_key]; %>
-            <div class="plan-card <% if (tier_key === 'growth') { %>recommended<% } %><% if (tier_key === 'free_trial') { %> free-trial<% } %>" data-tier="<%= tier_key %>" data-max-employees="<%= plan.max_employees %>">
-              <% if (tier_key === 'growth') { %><span class="rec-badge">Most Popular</span><% } %>
-              <% if (tier_key === 'free_trial') { %><span class="trial-badge">Start here</span><% } %>
-              <h3><%= plan.name %></h3>
-              <% if (tier_key === 'free_trial') { %>
-              <div class="plan-price">Free<span>for 3 days</span></div>
-              <% } else { %>
-              <div class="plan-price">$<%= plan.price %><span>/mo</span></div>
-              <% } %>
-              <p class="plan-desc"><%= plan.description %></p>
-              <ul class="plan-features">
-                <% (plan.features || ['AI employees', 'Permissioned tools', 'HITL Approvals']).forEach(function(feat) { %>
-                <li>✓ <%= feat %></li>
-                <% }); %>
-              </ul>
-              <button class="btn plan-select-btn" data-tier="<%= tier_key %>">Select <%= plan.name %></button>
+            <div class="plan-card <% if (tier_key === 'growth') { %>recommended<% } %><% if (tier_key === 'free_trial') { %> free-trial selected<% } %>" data-tier="<%= tier_key %>" data-max-employees="<%= plan.max_employees %>">
+              <div class="plan-card-top">
+                <div class="plan-badge-slot">
+                  <% if (tier_key === 'growth') { %><span class="rec-badge">MOST POPULAR</span><% } %>
+                  <% if (tier_key === 'free_trial') { %><span class="trial-badge">START HERE</span><% } %>
+                </div>
+                <h3 class="plan-title"><%= plan.name %></h3>
+                <% if (tier_key === 'free_trial') { %>
+                <div class="plan-price"><span class="price-val">Free</span> <span class="price-sub">for 3 days</span></div>
+                <% } else { %>
+                <div class="plan-price"><span class="currency">₹</span><span class="price-val"><%= plan.price_inr || (plan.price ? Math.round(plan.price * 83) : 5) %></span> <span class="price-sub">/ mo</span></div>
+                <% } %>
+                <p class="plan-desc"><%= plan.description %></p>
+              </div>
+
+              <div class="plan-features-wrap">
+                <div class="plan-features-label">Included capabilities</div>
+                <ul class="plan-features">
+                  <% (plan.features || ['AI employees', 'Permissioned tools', 'HITL Approvals']).forEach(function(feat) { %>
+                  <li><span class="feature-check">✓</span> <span><%= feat %></span></li>
+                  <% }); %>
+                </ul>
+              </div>
+
+              <button type="button" class="btn plan-select-btn" data-tier="<%= tier_key %>">
+                <span><% if (tier_key === 'free_trial') { %>Select Free Trial<% } else { %>Select <%= plan.name %><% } %></span>
+              </button>
             </div>
             <% }); %>
           </div>
 
           <div class="step-actions">
-            <button class="btn btn-light" id="step2-back">← Back</button>
-            <button class="btn btn-primary" id="step2-next">Continue →</button>
+            <button type="button" class="btn btn-light" id="step2-back">← Back</button>
+            <button type="button" class="btn btn-primary" id="step2-next">Continue →</button>
           </div>
         </div>
 
@@ -141,27 +170,43 @@
             <p>Select the AI employees you want on your team. Each one assists with a specific domain — and every consequential action pauses for your approval.</p>
           </div>
 
+          <div id="emp-selection-notice" class="emp-limit-info" style="margin-bottom: 16px; padding: 10px 14px; border-radius: 10px; font-size: 13px; background: rgba(126, 232, 255, 0.08); border: 1px solid rgba(126, 232, 255, 0.25); color: var(--chalk);"></div>
+
           <div class="catalog-grid">
-            <% (employee_catalog || []).forEach(function(emp) { %>
-            <div class="emp-card" data-emp-id="<%= emp.id %>">
-              <div class="emp-header">
-                <input type="checkbox" class="emp-checkbox" value="<%= emp.id %>" id="chk-<%= emp.id %>" checked>
-                <span class="emp-icon" style="background: <%= emp.color %>;"><%= emp.name.charAt(0) %></span>
-                <div>
-                  <h4 style="color: <%= emp.color %>;"><%= emp.name %></h4>
-                  <small><%= emp.role %> • <%= emp.department %></small>
+            <% (employee_catalog || []).forEach(function(emp, index) { %>
+            <div class="emp-card <% if (index < 2) { %>selected<% } %>" data-emp-id="<%= emp.id %>">
+              <div class="emp-card-header">
+                <label class="emp-checkbox-label" for="chk-<%= emp.id %>">
+                  <input type="checkbox" class="emp-checkbox" value="<%= emp.id %>" id="chk-<%= emp.id %>" <% if (index < 2) { %>checked<% } %>>
+                  <span class="custom-chk-indicator"></span>
+                </label>
+                <div class="emp-avatar-disc" style="--emp-accent: <%= emp.color || '#7ee8ff' %>;">
+                  <span><%= emp.name.charAt(0) %></span>
+                </div>
+                <div class="emp-meta">
+                  <div class="emp-title-row">
+                    <h4 style="color: <%= emp.color || '#f4f7ff' %>;"><%= emp.name %></h4>
+                    <span class="emp-autonomy-tag"><%= emp.autonomy_level ? emp.autonomy_level.split(' ')[0] : 'Level 2' %></span>
+                  </div>
+                  <div class="emp-subtitle">
+                    <span class="emp-role-name"><%= emp.role %></span>
+                    <span class="emp-sep">•</span>
+                    <span class="emp-dept-name"><%= emp.department %></span>
+                  </div>
                 </div>
               </div>
-              <p class="emp-desc"><%= emp.system_prompt || emp.role %></p>
-              <div class="emp-skills">
-                <label>Custom Skills / Tools:</label>
+
+              <p class="emp-summary"><%= emp.persona || emp.system_prompt || emp.role %></p>
+
+              <div class="emp-tools-section">
+                <div class="emp-tools-label">Assigned tools &amp; connectors</div>
                 <div class="skills-chips" id="skills-<%= emp.id %>">
                   <% (emp.default_tools || []).forEach(function(tool) { %>
-                  <span class="chip"><%= tool %></span>
+                  <span class="chip"><span class="chip-pip"></span><%= tool %></span>
                   <% }); %>
                 </div>
                 <div class="add-skill-row">
-                  <input type="text" class="new-skill-input" placeholder="+ Add skill (e.g. Gmail)" data-emp-id="<%= emp.id %>">
+                  <input type="text" class="new-skill-input" placeholder="+ Add tool or MCP (press Enter)..." data-emp-id="<%= emp.id %>">
                 </div>
               </div>
             </div>
@@ -169,8 +214,8 @@
           </div>
 
           <div class="step-actions">
-            <button class="btn btn-light" id="step3-back">← Back</button>
-            <button class="btn btn-primary" id="step3-next">Continue →</button>
+            <button type="button" class="btn btn-light" id="step3-back">← Back</button>
+            <button type="button" class="btn btn-primary" id="step3-next">Continue →</button>
           </div>
         </div>
 

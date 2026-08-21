@@ -92,12 +92,14 @@ function renderConnections(connectionSets) {
   container.innerHTML = all.length ? all.map(({ employee, connection }) => {
     const typeLabel = { google_gmail: 'Google Gmail', google_drive: 'Google Drive', google_sheets: 'Google Sheets', streamable_http: 'Custom MCP', git_repository: 'Git repository', custom_skill: 'Custom skill' }[connection.connection_type] || connection.connection_type;
     const source = connection.oauth_email || connection.config?.company_email || connection.server_url || connection.config?.repo_path || connection.config?.notes || 'Employee capability';
-    const needsOauth = (connection.connection_type === 'google_gmail' || connection.connection_type === 'google_drive' || connection.connection_type === 'google_sheets') && connection.status !== 'connected';
+    const isGoogle = connection.connection_type === 'google_gmail' || connection.connection_type === 'google_drive' || connection.connection_type === 'google_sheets';
+    const needsOauth = isGoogle && connection.status !== 'connected';
     const employeeGmailGovernance = connection.connection_type === 'google_gmail'
       ? `<p class="connection-governance ${connection.config?.gmail_send_enabled ? 'enabled' : 'disabled'}">${connection.config?.gmail_send_enabled ? `Send after manager approval is enabled for ${safe(employee.name)}. Reconnect Google if the send permission has not yet been granted.` : `Read access only. Enable “Allow ${safe(employee.name)} to send after approval” when adding a new Gmail connection to permit approval-gated delivery.`}</p>`
       : '';
     const connectionAutonomy = connection.autonomy_mode || 'autopilot';
-    return `<article class="connection-card agent-connector-card"><div class="connection-card-top"><div><p class="connection-owner">${employeePortraitMarkup(employee, employee.name?.[0] || 'AI', 'connection-owner-dp')}${safe(employee.name)}’s tool belt</p><h4>${safe(connection.name)} <em class="connection-status ${safe(connection.status || 'unknown')}">${safe(connection.status || 'unknown')}</em></h4><p class="connection-source">${safe(typeLabel)} · ${safe(source)}</p>${employeeGmailGovernance}</div><div class="connection-actions"><label class="connector-autonomy"><span>Agent mode</span><select data-action="set-connector-autonomy" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}" aria-label="${safe(connection.name)} agent mode"><option value="autopilot" ${connectionAutonomy === 'autopilot' ? 'selected' : ''}>Autopilot</option><option value="copilot" ${connectionAutonomy === 'copilot' ? 'selected' : ''}>Copilot</option></select></label>${needsOauth ? `<a class="btn btn-primary compact-button" href="/api/employees/${encodeURIComponent(employee.id)}/mcp-connections/${encodeURIComponent(connection.id)}/google/start?service=${encodeURIComponent(connection.connection_type === 'google_gmail' ? 'gmail' : connection.connection_type === 'google_drive' ? 'drive' : 'sheets')}">Connect Google</a>` : ''}<button class="text-mini" type="button" data-action="test-mcp" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Test safely</button><button class="text-mini danger" type="button" data-action="remove-mcp" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Remove</button></div></div>${connection.connection_type === 'streamable_http' ? `<div class="connection-tools-header"><span>Choose the tools this employee can run</span><button class="btn btn-light compact-button" type="button" data-action="discover-tools" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">${connection.discovered_tools?.length ? 'Refresh tools' : 'Discover tools'}</button></div>${renderToolGrants(employee.id, connection)}` : ''}${connection.connection_type === 'git_repository' ? `<div class="connection-tools-header"><span>Repository changes follow the employee policy.</span><button class="btn btn-light compact-button" type="button" data-action="request-git-commit" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Request commit</button></div>` : ''}</article>`;
+    const googleService = connection.connection_type === 'google_gmail' ? 'gmail' : connection.connection_type === 'google_drive' ? 'drive' : 'sheets';
+    return `<article class="connection-card agent-connector-card"><div class="connection-card-top"><div><p class="connection-owner">${employeePortraitMarkup(employee, employee.name?.[0] || 'AI', 'connection-owner-dp')}${safe(employee.name)}’s tool belt</p><h4>${safe(connection.name)} <em class="connection-status ${safe(connection.status || 'unknown')}">${safe(connection.status || 'unknown')}</em></h4><p class="connection-source">${safe(typeLabel)} · ${safe(source)}</p>${employeeGmailGovernance}</div><div class="connection-actions"><label class="connector-autonomy"><span>Agent mode</span><select data-action="set-connector-autonomy" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}" aria-label="${safe(connection.name)} agent mode"><option value="autopilot" ${connectionAutonomy === 'autopilot' ? 'selected' : ''}>Autopilot</option><option value="copilot" ${connectionAutonomy === 'copilot' ? 'selected' : ''}>Copilot</option></select></label>${needsOauth ? `<button class="btn btn-primary compact-button" type="button" data-action="connect-google" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}" data-service="${safe(googleService)}" data-gmail-send="${connection.config?.gmail_send_enabled ? 'true' : 'false'}">Connect Google</button>` : ''}<button class="text-mini" type="button" data-action="test-mcp" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Test safely</button><button class="text-mini danger" type="button" data-action="remove-mcp" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Remove</button></div></div>${connection.connection_type === 'streamable_http' ? `<div class="connection-tools-header"><span>Choose the tools this employee can run</span><button class="btn btn-light compact-button" type="button" data-action="discover-tools" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">${connection.discovered_tools?.length ? 'Refresh tools' : 'Discover tools'}</button></div>${renderToolGrants(employee.id, connection)}` : ''}${connection.connection_type === 'git_repository' ? `<div class="connection-tools-header"><span>Repository changes follow the employee policy.</span><button class="btn btn-light compact-button" type="button" data-action="request-git-commit" data-employee-id="${safe(employee.id)}" data-connection-id="${safe(connection.id)}">Request commit</button></div>` : ''}</article>`;
   }).join('') : '<p class="empty-state-sm">No employee-scoped connections yet. Add only the tools your team needs.</p>';
 }
 
@@ -272,6 +274,30 @@ async function saveCompanySettings(event) {
   } catch (error) { notify(error.message || 'Workspace profile could not be saved.', 'error'); }
 }
 
+async function connectGoogle(employeeId, connectionId, service, gmailSendEnabled = false) {
+  try {
+    notify('Starting Google authorization…');
+    if (window.CaveworkersGoogleConnect) {
+      const res = await window.CaveworkersGoogleConnect({
+        employeeId,
+        connectionId,
+        service,
+        gmailSendEnabled
+      });
+      if (res && res.ok) {
+        notify(`Google ${service || 'account'} connected successfully!`, 'success');
+        await loadData();
+        activateTab('integrations', false);
+        return;
+      }
+    }
+    const sName = service === 'google_gmail' ? 'gmail' : service === 'google_drive' ? 'drive' : service === 'google_sheets' ? 'sheets' : service;
+    window.location.assign(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections/${encodeURIComponent(connectionId)}/google/start?service=${encodeURIComponent(sName)}&return_to=%2Fsettings`);
+  } catch (error) {
+    notify(error.message || 'Google authorization could not be completed.', 'error');
+  }
+}
+
 async function addCustomMcpConnection(event) {
   event.preventDefault();
   const employeeId = $('#custom-mcp-employee').value;
@@ -286,9 +312,19 @@ async function addCustomMcpConnection(event) {
     const config = { notes };
     if (connectionType === 'git_repository') config.repo_path = target;
     if (connectionType === 'google_gmail' && employeeId) config.gmail_send_enabled = $('#custom-mcp-gmail-send').checked;
-    await requestJson(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, connection_type: connectionType, server_url: connectionType === 'streamable_http' ? target : null, auth_token: authToken || undefined, config, access_level: accessLevel }) });
+    const saved = await requestJson(`/api/employees/${encodeURIComponent(employeeId)}/mcp-connections`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, connection_type: connectionType, server_url: connectionType === 'streamable_http' ? target : null, auth_token: authToken || undefined, config, access_level: accessLevel }) });
     $('#custom-mcp-form').reset();
     updateCustomMcpFields();
+    if (connectionType === 'google_gmail' || connectionType === 'google_drive' || connectionType === 'google_sheets') {
+      const googleService = connectionType === 'google_gmail' ? 'gmail' : connectionType === 'google_drive' ? 'drive' : 'sheets';
+      notify('Connection saved. Opening Google sign-in…', 'success');
+      await loadData();
+      activateTab('integrations', false);
+      if (saved?.connection?.id) {
+        void connectGoogle(employeeId, saved.connection.id, googleService, Boolean(config.gmail_send_enabled));
+      }
+      return;
+    }
     notify('Connection saved. Complete OAuth or discover available tools before use.', 'success');
     await loadData();
     activateTab('integrations', false);
@@ -424,18 +460,32 @@ async function startUpgrade(tier) {
   try {
     notify('Preparing a secure checkout…');
     // Do not pre-apply a paid tier. The server applies it only after Razorpay signature verification.
-    const order = await requestJson('/api/payments/create-order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tier }) });
+    const order = await requestJson('/api/create-order', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ tier }) });
     if (typeof window.Razorpay === 'undefined') throw new Error('Secure checkout is unavailable. Refresh the page and try again.');
-    const checkout = new window.Razorpay({ key: order.key_id, amount: order.amount, currency: order.currency, name: 'Caveworkers', description: `${tier} workspace plan`, order_id: order.order_id, theme: { color: '#7ee8ff' }, handler: async (payment) => {
-      try {
-        const verification = await requestJson('/api/payments/verify', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payment) });
-        if (verification.status !== 'verified') throw new Error('Payment verification did not complete.');
-        notify(`Your workspace is now on the ${tier.toUpperCase()} plan.`, 'success');
-        await loadData();
-        activateTab('billing', false);
-      } catch (error) { notify(error.message || 'Payment could not be verified. Your plan was not changed.', 'error'); }
-    } });
-    checkout.on('payment.failed', () => notify('Payment was not completed. Your plan has not changed.', 'error'));
+    const checkout = new window.Razorpay({
+      key: order.key_id || window.RAZORPAY_KEY,
+      amount: order.amount,
+      currency: order.currency || 'INR',
+      name: 'Caveworkers',
+      description: `${tier} workspace plan`,
+      order_id: order.order_id || order.id,
+      theme: { color: '#7ee8ff' },
+      modal: {
+        ondismiss: function () {
+          notify('Checkout window was closed before completing payment.', 'info');
+        }
+      },
+      handler: async (payment) => {
+        try {
+          const verification = await requestJson('/api/verify-payment', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payment) });
+          if (verification.status !== 'verified' && !verification.success) throw new Error('Payment verification did not complete.');
+          notify(`Your workspace is now on the ${tier.toUpperCase()} plan.`, 'success');
+          await loadData();
+          activateTab('billing', false);
+        } catch (error) { notify(error.message || 'Payment could not be verified. Your plan was not changed.', 'error'); }
+      }
+    });
+    checkout.on('payment.failed', (resp) => notify(resp?.error?.description || 'Payment was not completed. Your plan has not changed.', 'error'));
     checkout.open();
   } catch (error) { notify(error.message || 'Secure checkout could not be started.', 'error'); }
 }
@@ -501,6 +551,7 @@ function bindEvents() {
     const { employeeId, connectionId, toolName, access } = target.dataset;
     if (target.dataset.plan) startUpgrade(target.dataset.plan);
     if (action === 'add-employee') configureEmployee(employeeId, 'add');
+    if (action === 'connect-google') connectGoogle(employeeId, connectionId, target.dataset.service, target.dataset.gmailSend === 'true');
     if (action === 'remove-employee') { if (window.confirm('Remove this employee from your active team?')) configureEmployee(employeeId, 'remove'); }
     if (action === 'revoke-direct-tool') revokeDirectTool(employeeId, toolName);
     if (action === 'test-mcp') testMcp(employeeId, connectionId);
