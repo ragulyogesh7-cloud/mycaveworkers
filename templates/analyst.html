@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#0c100e">
+  <meta name="description" content="David's read-only data analysis workspace for Caveworkers.">
+  <title>David — Data Analyst | Caveworkers</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/command.css">
+  <link rel="stylesheet" href="/static/motion.css">
+  <link rel="stylesheet" href="/static/ui-reimplementation.css">
+  <link rel="stylesheet" href="/static/analyst.css">
+</head>
+<body class="analyst-body">
+  <div class="analyst-shell">
+    <aside class="analyst-rail" aria-label="Analyst workspace navigation">
+      <a class="analyst-brand" href="/"><img class="brand-logo" src="/static/logo.svg" alt=""><span>Caveworkers</span></a>
+      <div class="analyst-rail-label">WORKSPACE</div>
+      <a class="analyst-rail-link" href="/command"><i></i>Overview</a>
+      <a class="analyst-rail-link active" href="/analyst"><i></i>David's data lab</a>
+      <a class="analyst-rail-link" href="/command#new-task"><i></i>New task</a>
+      <a class="analyst-rail-link" href="/command#approvals-section"><i></i>Approvals <span class="analyst-rail-badge" id="analyst-approval-count">0</span></a>
+      <div class="analyst-rail-label analyst-rail-gap">MANAGE</div>
+      <a class="analyst-rail-link" href="/settings"><i></i>Workspace settings</a>
+      <div class="analyst-rail-footer"><span class="analyst-system-dot"></span><div><b id="analyst-system-status">Analyst ready</b><small>Read-only by default</small></div></div>
+    </aside>
+
+    <main class="analyst-main">
+      <header class="analyst-topbar">
+        <button class="analyst-menu-button" id="analyst-menu-button" aria-label="Open navigation">☰</button>
+        <div class="analyst-workspace-name"><span class="analyst-live-dot"></span><span><%= (user && user.company_name) || 'Your workspace' %></span><small>DAVID / DATA LAB</small></div>
+        <div class="analyst-top-actions"><a href="/command" class="analyst-back-link">Command center ↗</a><a href="/settings" class="analyst-settings-link">Settings ↗</a><a id="analyst-logout" href="/logout" class="analyst-logout">Sign out</a></div>
+      </header>
+
+      <div class="analyst-wrap">
+        <section class="analyst-hero reveal-in">
+          <div class="analyst-hero-copy">
+            <p class="analyst-eyebrow">EMPLOYEE WORKSPACE / CW_EMP_002</p>
+            <h1>David turns questions<br><em>into decisions.</em></h1>
+            <p class="analyst-hero-lede">A focused analysis room for asking better business questions, connecting approved data, and reviewing the evidence before anything leaves your workspace.</p>
+            <div class="analyst-hero-tags"><span>PERCEIVE → PLAN → ACT → REFLECT</span><span>READ-ONLY BY DEFAULT</span><span>HUMAN REVIEW ON</span></div>
+          </div>
+          <div class="david-profile-orb" aria-hidden="true"><div class="david-orb-ring"></div><div class="david-orb-core">D<span>◒</span></div><div class="david-orb-label">DAVID<br><small>ANALYST</small></div></div>
+        </section>
+
+        <section class="analyst-status-grid reveal-in delay-1" aria-label="Analyst status">
+          <div class="analyst-status-card"><span>STATUS</span><strong id="analyst-profile-status">Loading…</strong><small id="analyst-profile-role">Data &amp; Financial Analyst</small></div>
+          <div class="analyst-status-card"><span>REASONING CORE</span><strong id="analyst-model-name"><%= analyst_model || 'Preview planner' %></strong><small id="analyst-model-provider">Configurable model routing</small></div>
+          <div class="analyst-status-card"><span>DATA SOURCES</span><strong id="analyst-source-count">0 connected</strong><small>Tenant-scoped and read-only</small></div>
+          <div class="analyst-status-card"><span>MEMORY</span><strong id="analyst-memory-count">0 durable notes</strong><small>Workspace preferences only</small></div>
+        </section>
+
+        <div class="analyst-grid analyst-top-grid">
+          <section class="analyst-panel brief-panel reveal-in delay-2" aria-labelledby="analysis-brief-title">
+            <div class="analyst-panel-head"><div><p class="analyst-panel-kicker">01 / DIRECT DAVID</p><h2 id="analysis-brief-title">Start an analysis brief</h2></div><span class="analyst-secure-chip">● PRIVATE</span></div>
+            <p class="analyst-help">State the business question in plain language. David will choose a read-only path, show his work, and pause before external delivery.</p>
+            <form id="analysis-form" class="analysis-form">
+              <label for="analysis-question">Business question <span>REQUIRED</span></label>
+              <textarea id="analysis-question" rows="5" required placeholder="Example: What changed in our revenue and margin this quarter, and what should I investigate next?"></textarea>
+              <div class="analysis-form-row">
+                <div><label for="analysis-source">Use data from</label><select id="analysis-source"><option value="">No source selected — transparent preview</option></select></div>
+                <div><label for="analysis-format">Output format</label><select id="analysis-format"><option value="brief">Decision brief</option><option value="report">Full report</option><option value="chart">Chart and readout</option><option value="table">Table outline</option></select></div>
+              </div>
+              <div class="analysis-form-foot"><span><i class="analyst-signal-dot"></i> External actions remain drafts until approved.</span><button type="submit" id="analysis-submit" class="analyst-primary-button">Ask David <span>↗</span></button></div>
+              <p class="analyst-form-message" id="analysis-form-message" role="status"></p>
+            </form>
+          </section>
+
+          <section class="analyst-panel source-panel reveal-in delay-3" aria-labelledby="sources-title">
+            <div class="analyst-panel-head"><div><p class="analyst-panel-kicker">02 / SOURCE ROOM</p><h2 id="sources-title">Data sources</h2></div><span class="analyst-readonly-chip">READ-ONLY</span></div>
+              <p class="analyst-help">Connect the data David is allowed to inspect. CSV is available now; Google Sheets can become live after OAuth, while SQL remains a controlled read-only shell.</p>
+            <div id="data-source-list" class="data-source-list"><div class="analyst-empty-row">Loading source registry…</div></div>
+            <form id="source-form" class="source-form">
+              <div class="source-form-row"><div><label for="source-kind">Add source</label><select id="source-kind"><option value="csv">CSV upload</option><option value="google_sheets">Google Sheets</option><option value="sql">SQL workspace</option></select></div><div><label for="source-name">Name</label><input id="source-name" type="text" placeholder="Q3 revenue export"></div></div>
+              <div id="source-csv-field"><label for="source-csv">CSV file</label><input id="source-csv" type="file" accept=".csv,text/csv"><small>Imported read-only, limited to 300 KB in this workspace preview.</small></div>
+              <div id="source-url-field" hidden><label for="source-reference">Sheet URL or database label</label><input id="source-reference" type="text" placeholder="https://docs.google.com/spreadsheets/…"></div>
+              <button class="analyst-secondary-button" type="submit">Register source <span>+</span></button>
+              <p class="analyst-form-message" id="source-form-message" role="status"></p>
+            </form>
+            <div class="connector-room" aria-labelledby="connector-room-title">
+              <div class="connector-room-head"><div><p class="analyst-panel-kicker">CONNECTOR ROOM</p><h3 id="connector-room-title">Give David approved tools</h3></div><span class="analyst-secure-chip">OAUTH + HITL</span></div>
+              <p class="analyst-help">Each connection belongs to this workspace and David only. Gmail and Sheets start with read-only scopes; custom MCP write tools stay behind manager approval.</p>
+              <div id="analyst-connector-list" class="connector-list"><div class="analyst-empty-row">Loading connector registry…</div></div>
+              <form id="connector-form" class="connector-form">
+                <div class="source-form-row"><div><label for="connector-type">Add connector</label><select id="connector-type"><option value="google_gmail">Google Gmail</option><option value="google_sheets">Google Sheets</option><option value="streamable_http">Custom MCP / Streamable HTTP</option></select></div><div><label for="connector-name">Name</label><input id="connector-name" required placeholder="David's Gmail or finance MCP"></div></div>
+                <div id="connector-url-field" hidden><label for="connector-url">Custom MCP HTTPS URL</label><input id="connector-url" type="url" placeholder="https://mcp.example.com/mcp"></div>
+                <div id="connector-token-field" hidden><label for="connector-token">MCP bearer token <small>(stored encrypted, never displayed again)</small></label><input id="connector-token" type="password" autocomplete="new-password" placeholder="Optional bearer token"></div>
+                <div class="source-form-row"><div><label for="connector-access">Default access</label><select id="connector-access"><option value="read_only">Read only</option><option value="requires_approval" selected>Requires approval</option><option value="read_write">Read &amp; write</option></select></div><div><label for="connector-notes">Purpose</label><input id="connector-notes" maxlength="800" placeholder="What David should use it for"></div></div>
+                <button class="analyst-secondary-button" type="submit">Save connector <span>+</span></button>
+                <p class="analyst-form-message" id="connector-form-message" role="status"></p>
+              </form>
+            </div>
+          </section>
+        </div>
+
+        <section class="analyst-panel result-panel reveal-in delay-4" id="analysis-result" hidden aria-live="polite">
+          <div class="analyst-panel-head"><div><p class="analyst-panel-kicker">03 / EVIDENCE DESK</p><h2 id="result-heading">Latest analysis</h2></div><span class="analyst-result-state" id="result-state">COMPLETE</span></div>
+          <div class="result-layout"><article class="result-report"><div id="result-report-body" class="markdown-lite"></div><div id="result-notice" class="analyst-notice"></div></article><aside class="chart-card"><div class="chart-card-head"><span>VISUAL SIGNAL</span><small id="chart-unit">PREVIEW</small></div><h3 id="chart-title">Trend preview</h3><div id="chart-bars" class="chart-bars"></div><p id="chart-note" class="chart-note"></p></aside></div>
+          <div class="trace-section"><div class="trace-head"><span>EXECUTION TRACE</span><small>Checkpointed stages</small></div><div id="analyst-trace" class="analyst-trace"></div></div>
+        </section>
+
+        <div class="analyst-grid analyst-bottom-grid">
+          <section class="analyst-panel memory-panel reveal-in delay-5" aria-labelledby="memory-title">
+            <div class="analyst-panel-head"><div><p class="analyst-panel-kicker">04 / WORKSPACE MEMORY</p><h2 id="memory-title">What David remembers</h2></div><span class="analyst-private-chip">TENANT ONLY</span></div>
+            <p class="analyst-help">Add durable reporting preferences and business rules. These notes stay partitioned to this workspace and can be removed anytime.</p>
+            <form id="memory-form" class="memory-form"><input id="memory-content" type="text" maxlength="800" placeholder="Example: Always report percentage change before absolute values."><div class="memory-form-row"><select id="memory-category"><option value="preference">Reporting preference</option><option value="business_rule">Business rule</option><option value="metric_definition">Metric definition</option></select><button type="submit" class="analyst-secondary-button">Save note <span>↗</span></button></div><p class="analyst-form-message" id="memory-form-message" role="status"></p></form>
+            <div id="memory-list" class="memory-list"><div class="analyst-empty-row">Loading workspace memory…</div></div>
+          </section>
+
+          <section class="analyst-panel approval-panel reveal-in delay-6" aria-labelledby="analyst-approval-title">
+            <div class="analyst-panel-head"><div><p class="analyst-panel-kicker">05 / HUMAN GATE</p><h2 id="analyst-approval-title">David's approvals</h2></div><span class="analyst-approval-chip" id="analyst-approval-status">CLEAR</span></div>
+            <p class="analyst-help">Sending a report or writing to Slack, Notion, Gmail, or WhatsApp always pauses here as a draft.</p>
+            <div id="analyst-approval-list" class="analyst-approval-list"><div class="analyst-empty-row">Loading approval queue…</div></div>
+          </section>
+        </div>
+
+        <section class="analyst-panel runs-panel reveal-in delay-6" aria-labelledby="runs-title">
+          <div class="analyst-panel-head"><div><p class="analyst-panel-kicker">06 / RUN HISTORY</p><h2 id="runs-title">Recent analysis runs</h2></div><a href="/command#task-dashboard-section" class="analyst-panel-link">Open task ledger ↗</a></div>
+          <div id="analyst-runs" class="analyst-runs"><div class="analyst-empty-row">Loading analysis history…</div></div>
+        </section>
+
+        <footer class="analyst-footer"><span>CAVEWORKERS / DAVID</span><span>Evidence first. External action second.</span><span>Model: <%= analyst_model || 'Preview planner' %></span></footer>
+      </div>
+    </main>
+  </div>
+  <script src="/static/csrf.js"></script>
+  <script src="/static/analyst.js"></script>
+  <script src="/static/motion.js"></script>
+</body>
+</html>

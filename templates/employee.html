@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0c100e">
+  <title><%= employee.name %> — Caveworkers</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/command.css">
+  <link rel="stylesheet" href="/static/motion.css">
+  <link rel="stylesheet" href="/static/ui-reimplementation.css">
+  <link rel="stylesheet" href="/static/employee.css">
+</head>
+<body class="command-body employee-body" data-employee-id="<%= employee.id %>">
+  <div class="app-shell">
+    <aside class="side-rail" aria-label="Workspace navigation">
+      <a class="brand" href="/"><img class="brand-logo" src="/static/logo.svg" alt=""><span>Caveworkers</span></a>
+      <div class="rail-label">WORKSPACE</div>
+      <a class="rail-link" href="/command"><i></i>Overview</a>
+      <a class="rail-link" href="/analyst"><i></i>David's data lab</a>
+      <a class="rail-link active" href="#employee-workspace"><i></i><%= employee.name %>'s workspace</a>
+      <a class="rail-link" href="#team-awareness"><i></i>AI team</a>
+      <a class="rail-link" href="#employee-memory"><i></i>Memory</a>
+      <div class="rail-label rail-gap">MANAGE</div>
+      <a class="rail-link" href="/settings"><i></i>Tools &amp; permissions</a>
+      <a class="rail-link" href="/command#task-dashboard-section"><i></i>Task group chats</a>
+      <div class="rail-footer"><span class="system-dot"></span><div><b id="employee-status">Loading instance</b><small>Tenant-scoped workspace</small></div></div>
+    </aside>
+
+    <main class="command-main" id="employee-workspace">
+      <header class="app-topbar">
+        <button class="menu-button" id="menuButton" aria-label="Open navigation">☰</button>
+        <div class="workspace-name"><span class="status-dot"></span><span><%= (user && user.company_name) || 'Your workspace' %></span><small>AI EMPLOYEE</small></div>
+        <div class="top-actions"><a class="settings-link" href="/command">Command center <span>↗</span></a><a id="logout-btn" href="/logout" class="logout-button" style="text-decoration:none; display:inline-flex; align-items:center;">Sign out</a></div>
+      </header>
+
+      <div class="command-wrap employee-wrap">
+        <section class="employee-hero glass-panel">
+          <div class="employee-identity">
+            <span class="employee-orb" style="--employee-color:<%= employee.color %>"><%= employee.name.slice(0, 1) %></span>
+            <div><p class="eyebrow"><%= employee.employee_code %> · <%= employee.department %></p><h1><%= employee.name %>, <em><%= employee.role %>.</em></h1><p class="employee-persona"><%= employee.persona %></p></div>
+          </div>
+          <div class="employee-hero-meta"><span class="autonomy-chip"><%= employee.autonomy_level %></span><span class="active-chip" id="employee-instance-state">Checking workspace access</span></div>
+        </section>
+
+        <section class="employee-work-grid">
+          <article class="panel-block employee-brief-card">
+            <div class="panel-head"><div><p class="panel-kicker">DIRECT BRIEF</p><h2>Give <%= employee.name %> a task</h2></div><a class="panel-link" href="/command#new-task">Open team task ↗</a></div>
+            <p class="section-help">Use a team task when the work needs other specialists. <%= employee.name %> will name and involve the right teammates in the visible task group chat.</p>
+            <form id="employee-brief-form" class="employee-brief-form"><textarea id="employee-brief" rows="5" placeholder="Describe the outcome, deadline, context, and any data or tools <%= employee.name %> should use."></textarea><button type="submit" class="run-button">Start collaborative task <span>↗</span></button></form>
+            <div id="employee-brief-result" class="employee-brief-result" hidden></div>
+          </article>
+
+          <article class="panel-block employee-tool-card" id="employee-tools">
+            <div class="panel-head"><div><p class="panel-kicker">PERMISSIONED TOOLS</p><h2>Connected for <%= employee.name %></h2></div><a class="panel-link" href="/settings">Manage ↗</a></div>
+            <p class="section-help">Customers choose connectors and per-tool access for each employee. Read tools can inform a brief; consequential writes are approval-gated.</p>
+            <div class="employee-default-tools"><% employee.default_tools.forEach((tool) => { %><span><%= tool %></span><% }) %></div>
+            <div id="employee-connector-list" class="employee-connector-list"><p class="empty-state-sm">Loading tenant connectors…</p></div>
+          </article>
+        </section>
+
+        <section class="employee-work-grid lower-grid">
+          <article class="panel-block" id="team-awareness">
+            <div class="panel-head"><div><p class="panel-kicker">WORKFORCE AWARENESS</p><h2>Teammates <%= employee.name %> can involve</h2></div><a class="panel-link" href="/command#team">Open team ↗</a></div>
+            <p class="section-help">Every handoff is visible in the task’s group-chat record. Employees share only the task context required to complete the approved work.</p>
+            <div id="employee-teammates" class="employee-teammates"><p class="empty-state-sm">Loading team…</p></div>
+          </article>
+
+          <article class="panel-block" id="employee-memory">
+            <div class="panel-head"><div><p class="panel-kicker">PRIVATE ROLE MEMORY</p><h2>What <%= employee.name %> should remember</h2></div><span class="pending-label">TENANT ONLY</span></div>
+            <p class="section-help">Add a preference, role playbook, or handoff rule for this employee. It stays inside this workspace’s tenant boundary.</p>
+            <form id="employee-memory-form" class="employee-memory-form"><select id="employee-memory-category"><option value="preference">Preference</option><option value="playbook">Playbook</option><option value="handoff">Handoff rule</option></select><textarea id="employee-memory-content" rows="3" placeholder="Example: Escalate customer security requests to Iris before drafting a reply."></textarea><button type="submit" class="text-button">Save memory <span>↗</span></button></form>
+            <div id="employee-memory-list" class="employee-memory-list"><p class="empty-state-sm">Loading role memory…</p></div>
+          </article>
+        </section>
+      </div>
+    </main>
+  </div>
+  <script src="/static/csrf.js"></script>
+  <script src="/static/employee.js"></script>
+  <script src="/static/motion.js"></script>
+  <script>document.getElementById('logout-btn')?.addEventListener('click', async (event) => { event.preventDefault(); await fetch('/api/session-logout', { method: 'POST' }); window.location.href = '/login'; });</script>
+</body>
+</html>

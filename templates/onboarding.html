@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Setup Workforce Workspace — CaveWorkers</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=Playfair+Display:ital,wght@0,600;1,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/command.css">
+  <link rel="stylesheet" href="/static/motion.css">
+  <link rel="stylesheet" href="/static/ui-reimplementation.css">
+  <link rel="stylesheet" href="/static/onboarding.css">
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+</head>
+<body class="onboarding-body">
+  <div class="sky onboarding-sky">
+    <div class="rain"></div>
+    <div class="moon"></div>
+    <div class="meteor"></div>
+
+    <nav class="nav">
+      <div class="wrap nav-row">
+        <a href="/" class="brand">
+          <img class="brand-logo" src="/static/logo.svg" alt="">
+          CaveWorkers
+        </a>
+        <div class="mono eyebrow"><span>✦</span> Workspace Setup Wizard</div>
+      </div>
+    </nav>
+
+    <div class="wrap onboarding-wrap">
+      <!-- Progress Bar -->
+      <div class="wizard-progress">
+        <div class="progress-step active" id="step-dot-1">
+          <span class="step-num">1</span>
+          <span class="step-name">Company</span>
+        </div>
+        <div class="progress-line"></div>
+        <div class="progress-step" id="step-dot-2">
+          <span class="step-num">2</span>
+          <span class="step-name">Subscription</span>
+        </div>
+        <div class="progress-line"></div>
+        <div class="progress-step" id="step-dot-3">
+          <span class="step-num">3</span>
+          <span class="step-name">AI Employees</span>
+        </div>
+        <div class="progress-line"></div>
+        <div class="progress-step" id="step-dot-4">
+          <span class="step-num">4</span>
+          <span class="step-name">Payment</span>
+        </div>
+      </div>
+
+      <div class="wizard-card">
+        <div id="onboarding-error" class="auth-error" style="display: none;"></div>
+
+        <!-- Step 1: Company Profile -->
+        <div class="wizard-step" id="step-1">
+          <div class="step-header">
+            <span class="mono eyebrow">Step 1 of 4</span>
+            <h2>Set up your business & user memory</h2>
+            <p>Tell us about your business. Your AI crew will remember your company, goals, and settings in an isolated memory space.</p>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label for="company_name">Business / Company Name *</label>
+              <input type="text" id="company_name" placeholder="e.g. Acme Corp / Northstar Technologies" required>
+            </div>
+            <div class="form-group">
+              <label for="user_role">Your Role / Title</label>
+              <input type="text" id="user_role" placeholder="e.g. Founder, CEO, VP Operations">
+            </div>
+          </div>
+
+          <div class="form-row">
+            <div class="form-group">
+              <label for="industry">Industry</label>
+              <select id="industry">
+                <option value="" selected>Select your industry</option>
+                <option value="Technology">Technology &amp; Software</option>
+                <option value="Finance">Finance &amp; Banking</option>
+                <option value="E-commerce">E-commerce &amp; Retail</option>
+                <option value="Healthcare">Healthcare &amp; Biotech</option>
+                <option value="Agency">Marketing &amp; Agency</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label for="team_size">Team Size</label>
+              <select id="team_size">
+                <option value="" selected>Select your team size</option>
+                <option value="1-10">1-10 employees</option>
+                <option value="11-50">11-50 employees</option>
+                <option value="51-200">51-200 employees</option>
+                <option value="201+">201+ employees</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label for="business_goals">Business Model &amp; Objectives (Stored in Crew Memory)</label>
+            <input type="text" id="business_goals" placeholder="e.g. B2B SaaS platform focused on enterprise automation and customer growth.">
+          </div>
+
+          <div class="form-group">
+            <label for="workspace_guidelines">Operating Guidelines &amp; Rules for Crew</label>
+            <input type="text" id="workspace_guidelines" placeholder="e.g. Require approval before sending external emails; prioritize high accuracy; maintain professional tone.">
+          </div>
+
+          <div class="step-actions">
+            <button class="btn btn-primary" id="step1-next">Continue →</button>
+          </div>
+        </div>
+
+        <!-- Step 2: Subscription Plan -->
+        <div class="wizard-step" id="step-2" style="display: none;">
+          <div class="step-header">
+            <span class="mono eyebrow">Step 2 of 4</span>
+            <h2>Choose your subscription plan</h2>
+            <p>Pick the plan that fits your team size. Upgrade or change your tier anytime.</p>
+          </div>
+
+          <div class="plans-grid">
+            <% Object.keys(plans || {}).filter(function(k){ return k === 'free_trial' || k === 'pro'; }).forEach(function(tier_key) { var plan = plans[tier_key]; %>
+            <div class="plan-card <% if (tier_key === 'pro') { %>recommended<% } %><% if (tier_key === 'free_trial') { %> free-trial selected<% } %>" data-tier="<%= tier_key %>" data-max-employees="<%= plan.max_employees %>">
+              <div class="plan-card-top">
+                <div class="plan-badge-slot">
+                  <% if (tier_key === 'pro') { %><span class="rec-badge">FULL WORKFORCE</span><% } %>
+                  <% if (tier_key === 'free_trial') { %><span class="trial-badge">START HERE</span><% } %>
+                </div>
+                <h3 class="plan-title"><%= plan.name %></h3>
+                <% if (tier_key === 'free_trial') { %>
+                <div class="plan-price"><span class="price-val">Free</span> <span class="price-sub">for 3 days</span></div>
+                <% } else { %>
+                <div class="plan-price"><span class="currency">₹</span><span class="price-val"><%= plan.price_inr || 5 %></span> <span class="price-sub">/ mo</span></div>
+                <% } %>
+                <p class="plan-desc"><%= plan.description %></p>
+              </div>
+
+              <div class="plan-features-wrap">
+                <div class="plan-features-label">Included capabilities</div>
+                <ul class="plan-features">
+                  <% (plan.features || ['4 AI employees', 'Permissioned tools', 'HITL Approvals']).forEach(function(feat) { %>
+                  <li><span class="feature-check">✓</span> <span><%= feat %></span></li>
+                  <% }); %>
+                </ul>
+              </div>
+
+              <button type="button" class="btn plan-select-btn" data-tier="<%= tier_key %>">
+                <span><% if (tier_key === 'free_trial') { %>Select Free Trial<% } else { %>Select <%= plan.name %><% } %></span>
+              </button>
+            </div>
+            <% }); %>
+          </div>
+
+          <div class="step-actions">
+            <button type="button" class="btn btn-light" id="step2-back">← Back</button>
+            <button type="button" class="btn btn-primary" id="step2-next">Continue →</button>
+          </div>
+        </div>
+
+        <!-- Step 3: Select Employees & Skills -->
+        <div class="wizard-step" id="step-3" style="display: none;">
+          <div class="step-header">
+            <span class="mono eyebrow">Step 3 of 4</span>
+            <h2>Assemble your AI crew</h2>
+            <p>Select the AI employees you want on your team. Each one assists with a specific domain — and every consequential action pauses for your approval.</p>
+          </div>
+
+          <div id="emp-selection-notice" class="emp-limit-info" style="margin-bottom: 16px; padding: 10px 14px; border-radius: 10px; font-size: 13px; background: rgba(126, 232, 255, 0.08); border: 1px solid rgba(126, 232, 255, 0.25); color: var(--chalk);"></div>
+
+          <div class="catalog-grid">
+            <% (employee_catalog || []).forEach(function(emp) { %>
+            <div class="emp-card selected" data-emp-id="<%= emp.id %>">
+              <div class="emp-card-header">
+                <label class="emp-checkbox-label" for="chk-<%= emp.id %>">
+                  <input type="checkbox" class="emp-checkbox" value="<%= emp.id %>" id="chk-<%= emp.id %>" checked>
+                  <span class="custom-chk-indicator"></span>
+                </label>
+                <div class="emp-avatar-disc" style="--emp-accent: <%= emp.color || '#7ee8ff' %>;">
+                  <span><%= emp.name.charAt(0) %></span>
+                </div>
+                <div class="emp-meta">
+                  <div class="emp-title-row">
+                    <h4 style="color: <%= emp.color || '#f4f7ff' %>;"><%= emp.name %></h4>
+                    <span class="emp-autonomy-tag"><%= emp.autonomy_level ? emp.autonomy_level.split(' ')[0] : 'Level 2' %></span>
+                  </div>
+                  <div class="emp-subtitle">
+                    <span class="emp-role-name"><%= emp.role %></span>
+                    <span class="emp-sep">•</span>
+                    <span class="emp-dept-name"><%= emp.department %></span>
+                  </div>
+                </div>
+              </div>
+
+              <p class="emp-summary"><%= emp.persona || emp.system_prompt || emp.role %></p>
+
+              <div class="emp-tools-section">
+                <div class="emp-tools-label">Assigned tools &amp; connectors</div>
+                <div class="skills-chips" id="skills-<%= emp.id %>">
+                  <% (emp.default_tools || []).forEach(function(tool) { %>
+                  <span class="chip"><span class="chip-pip"></span><%= tool %></span>
+                  <% }); %>
+                </div>
+                <div class="add-skill-row">
+                  <input type="text" class="new-skill-input" placeholder="+ Add tool or MCP (press Enter)..." data-emp-id="<%= emp.id %>">
+                </div>
+              </div>
+            </div>
+            <% }); %>
+          </div>
+
+          <div class="step-actions">
+            <button type="button" class="btn btn-light" id="step3-back">← Back</button>
+            <button type="button" class="btn btn-primary" id="step3-next">Continue →</button>
+          </div>
+        </div>
+
+        <!-- Step 4: Checkout Payment -->
+        <div class="wizard-step" id="step-4" style="display: none;">
+          <div class="step-header">
+            <span class="mono eyebrow">Step 4 of 4</span>
+            <h2>Review &amp; pay</h2>
+            <p>Review your selections and complete payment to activate your AI workforce.</p>
+          </div>
+
+          <div class="order-summary-card">
+            <h3>Order Summary</h3>
+            <div class="summary-row">
+              <span>Selected Plan:</span>
+              <strong id="sum-plan-name">Free Trial</strong>
+            </div>
+            <div class="summary-row">
+              <span>Billing Cycle:</span>
+              <span>Monthly</span>
+            </div>
+            <div class="summary-row">
+              <span>Assigned AI Employees:</span>
+              <span id="sum-emp-count">2 Employees</span>
+            </div>
+            <div class="summary-divider"></div>
+            <div class="summary-row total">
+              <span>Total Amount:</span>
+              <strong id="sum-total">Free for 3 days</strong>
+            </div>
+          </div>
+
+          <div class="step-actions">
+            <button class="btn btn-light" id="step4-back">← Back</button>
+            <button class="btn btn-primary pay-btn" id="pay-now-btn">⚡ Pay &amp; Activate</button>
+          </div>
+        </div>
+
+        <!-- Step 5: Complete -->
+        <div class="wizard-step" id="step-5" style="display: none; text-align: center; padding: 40px 0;">
+          <div class="success-icon">🚀</div>
+          <h2 style="font: 600 34px 'Playfair Display', serif; color: var(--aqua);">You're all set! 🎉</h2>
+          <p id="activation-message" style="color: rgba(255,255,255,0.7); font-size: 16px; margin: 16px 0 32px;">Your AI crew is configured and ready. Head to the operations room to assign your first task — consequential actions will always pause for your review.</p>
+          <a href="/command" class="btn btn-primary">Go to Dashboard ↗</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/csrf.js"></script>
+  <script>
+    window.RAZORPAY_KEY = <%- JSON.stringify(razorpay_key || "") %>;
+  </script>
+  <script src="/static/onboarding.js"></script>
+  <script src="/static/motion.js"></script>
+</body>
+</html>

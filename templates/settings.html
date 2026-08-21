@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#070b1a">
+  <meta name="description" content="Manage your Caveworkers workspace, team, tools, and plan.">
+  <title>Caveworkers — Settings</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/command.css">
+  <link rel="stylesheet" href="/static/motion.css">
+  <link rel="stylesheet" href="/static/ui-reimplementation.css">
+  <link rel="stylesheet" href="/static/settings.css">
+</head>
+<body class="command-body settings-body clean-settings-body">
+  <div class="app-shell settings-app-shell clean-settings-shell">
+    <aside class="side-rail settings-rail clean-settings-rail" aria-label="Workspace navigation">
+      <a class="brand" href="/command"><img class="brand-logo" src="/static/logo.svg" alt=""><span>Caveworkers</span></a>
+      <div class="rail-label">WORKSPACE</div>
+      <a class="rail-link" href="/command"><i></i>Company room</a>
+      <div class="rail-label rail-gap">MANAGE</div>
+      <a class="rail-link active" href="/settings"><i></i>Settings</a>
+      <div class="rail-footer"><span class="system-dot"></span><div><b>Workspace protected</b><small>Tenant-scoped controls</small></div></div>
+    </aside>
+
+    <main class="command-main settings-main clean-settings-main">
+      <header class="app-topbar settings-topbar clean-settings-topbar">
+        <button class="menu-button" id="menuButton" aria-label="Open navigation">☰</button>
+        <div class="workspace-name"><span class="status-dot"></span><span id="settings-workspace-title"><%= (user && user.company_name) || "Your workspace" %></span><small>SETTINGS</small></div>
+        <div class="top-actions"><a class="settings-link" href="/command">Back to room <span>↗</span></a><a id="logout-btn" href="/logout" class="logout-button">Sign out</a></div>
+      </header>
+
+      <div class="settings-wrap clean-settings-wrap">
+        <section class="settings-hero clean-settings-hero">
+          <div><p class="eyebrow">WORKSPACE SETTINGS</p><h1>Keep the room<br><em>simple.</em></h1><p>Set up your people and tools once. Then get back to the conversation.</p></div>
+          <div class="settings-plan-chip"><span class="plan-chip-kicker">CURRENT PLAN</span><strong id="settings-plan-name">Loading plan…</strong><small id="settings-plan-detail">Checking workspace capacity</small></div>
+        </section>
+        <p class="settings-feedback" id="settings-feedback" role="status" aria-live="polite"></p>
+
+        <div class="settings-layout clean-settings-layout">
+          <nav class="settings-nav clean-settings-nav" aria-label="Settings sections">
+            <button class="active" type="button" data-settings-tab="workspace"><span>01</span>Workspace</button>
+            <button type="button" data-settings-tab="team"><span>02</span>People</button>
+            <button type="button" data-settings-tab="integrations"><span>03</span>Tools</button>
+            <button type="button" data-settings-tab="billing"><span>04</span>Plan</button>
+            <p>Only you control this workspace. Connected tools stay isolated, and each employee runs within the autonomy policy you choose.</p>
+          </nav>
+
+          <div class="settings-panels clean-settings-panels">
+            <section class="settings-panel active clean-settings-panel" data-settings-panel="workspace" id="workspace">
+              <header class="settings-panel-header"><div><p class="panel-kicker">WORKSPACE</p><h2>Tell the team who you are</h2><p>Your company context helps employees make better decisions in the room.</p></div><span class="section-status">PRIVATE</span></header>
+              <form class="settings-form" id="company-settings-form">
+                <label for="setting-company-name">Company name<input id="setting-company-name" maxlength="120" autocomplete="organization" placeholder="Your company name"></label>
+                <label for="setting-industry">Industry<input id="setting-industry" maxlength="120" placeholder="e.g. Retail, SaaS, manufacturing"></label>
+                <div class="form-actions"><p>Saved only for this workspace.</p><button class="btn btn-primary" type="submit">Save changes</button></div>
+              </form>
+              <div class="security-overview clean-security-overview"><article><span class="security-icon">✓</span><div><b>Private by default</b><p>Your tasks, conversations, approvals, and tools are tenant-isolated.</p></div></article><article><span class="security-icon">↗</span><div><b>Policy before action</b><p>Employees run authorized work automatically; high-impact actions follow your chosen policy.</p></div></article></div>
+            </section>
+
+            <section class="settings-panel clean-settings-panel" data-settings-panel="team" id="team" hidden>
+              <header class="settings-panel-header"><div><p class="panel-kicker">PEOPLE</p><h2>Your AI workforce</h2><p>Add the employees you need. They collaborate in the Company Room.</p></div><a href="/command" class="panel-action-link">Open room ↗</a></header>
+              <div class="settings-section-row"><div><h3>Active employees</h3><p>These are the people the room can route work to.</p></div><span class="section-count" id="active-team-count">0 active</span></div>
+              <div class="employee-settings-list" id="employee-tools-list"><p class="empty-state-sm">Loading your employee team…</p></div>
+              <div class="settings-section-row catalog-row"><div><h3>More employees</h3><p>Add a specialist when your work needs one.</p></div></div>
+              <div class="employee-catalog" id="catalog-list"><p class="empty-state-sm">Loading employee catalog…</p></div>
+            </section>
+
+            <section class="settings-panel clean-settings-panel" data-settings-panel="integrations" id="integrations" hidden>
+              <header class="settings-panel-header"><div><p class="panel-kicker">TOOLS</p><h2>Give the room useful tools</h2><p>Choose an app, connect your account, and decide which employees can use it.</p></div><span class="section-status secure">ENCRYPTED</span></header>
+              <p class="settings-tool-note">Connector discovery now lives in the Company Room <b>+</b> button. Use this panel for advanced connection policy, existing connection review, and custom MCP administration.</p>
+
+              <form class="tool-add-card clean-connection-form" id="custom-mcp-form"><div class="card-heading"><div><p class="panel-kicker">CONNECTION</p><h3>Configure selected app</h3><p>Choose who can use it. Autonomy is controlled per employee and per tool.</p></div></div><div class="form-grid two"><label>Employee<select id="custom-mcp-employee"></select></label><label>Connection type<select id="custom-mcp-type"><option value="google_gmail">Google Gmail</option><option value="google_drive">Google Drive</option><option value="google_sheets">Google Sheets</option><option value="streamable_http">Custom MCP server</option><option value="git_repository">Git repository</option><option value="custom_skill">Custom skill</option></select></label></div><label>Connection name<input id="custom-mcp-name" maxlength="100" placeholder="e.g. GitHub workspace"></label><label id="custom-mcp-target-label">MCP Server URL<input id="custom-mcp-target" maxlength="500" placeholder="https://mcp.example.com"></label><div class="form-grid two"><label>Access level<select id="custom-mcp-access"><option value="read_only">Read only</option><option value="read_write">Run automatically</option><option value="requires_approval">Ask me first</option></select></label><label>Bearer token <span class="field-note">Stored encrypted</span><input id="custom-mcp-token" type="password" autocomplete="new-password" placeholder="Paste once; never shown again"></label></div><label class="gmail-send-option" id="gmail-send-option" hidden><input id="custom-mcp-gmail-send" type="checkbox"> <span><b>Allow this employee to send using their policy</b><small>Autopilot employees can send; Copilot employees will pause for review.</small></span></label><label>Notes <span class="field-note">Optional</span><textarea id="custom-mcp-notes" rows="2" maxlength="1000" placeholder="What should this connection be used for?"></textarea><button class="btn btn-primary" type="submit">Save connection</button></form>
+
+              <div class="settings-section-row connected-heading"><div><h3>Connected apps</h3><p>Review which employee can use each connection.</p></div><span class="section-count" id="connection-count">0 connected</span></div>
+              <div class="connection-list" id="custom-mcp-list"><p class="empty-state-sm">Loading connected capabilities…</p></div>
+
+              <details class="advanced-tools"><summary>Advanced connection controls</summary><div class="advanced-tools-inner">
+                <section class="registry-console" aria-labelledby="registry-console-title"><div class="card-heading"><div><p class="panel-kicker">OPTIONAL</p><h3 id="registry-console-title">Find an MCP server</h3><p>Search the official Registry, inspect the advertised remote, and connect it yourself.</p></div></div><form class="registry-search-form" id="mcp-registry-search-form"><label for="mcp-registry-query">Search MCP servers<input id="mcp-registry-query" maxlength="120" placeholder="e.g. Slack, Postgres" autocomplete="off"></label><button class="btn btn-light" type="submit">Search</button></form><div class="registry-results" id="mcp-registry-results" aria-live="polite"><p class="empty-state-sm">Search when you need a server outside the quick connect list.</p></div><form class="registry-connect-form" id="mcp-registry-connect-form" hidden><div class="registry-connect-header"><div><p class="panel-kicker">TENANT CONNECTION</p><h4 id="mcp-registry-selected-name">Choose a Registry server</h4><p id="mcp-registry-selected-description">Select a result above to inspect its advertised remote URLs.</p></div><a id="mcp-registry-directory-link" class="mini-link" href="#" target="_blank" rel="noopener noreferrer" hidden>Open MCP.Directory ↗</a></div><div class="form-grid two"><label>Advertised remote<select id="mcp-registry-remote"></select></label><label>Authentication header<input id="mcp-registry-header-name" value="Authorization" maxlength="120"></label></div><div class="form-grid two"><label>Header prefix<input id="mcp-registry-header-prefix" value="Bearer" maxlength="24"></label><label>Tenant token<input id="mcp-registry-token" type="password" autocomplete="new-password" placeholder="Paste your server token"></label></div><label class="registry-team-toggle"><input id="mcp-registry-all-employees" type="checkbox" checked><span><b>Connect to every active employee</b><small>Read tools are safe by default. Writes require approval.</small></span></label><div class="registry-employee-picker" id="mcp-registry-employee-picker" hidden></div><div class="form-actions"><p id="mcp-registry-remote-notes">The remote URL must pass Caveworkers’ HTTPS and SSRF checks.</p><button class="btn btn-primary" type="submit">Connect for the team</button></div></form></section>
+                <div class="integration-grid"><form class="tool-add-card" id="marketplace-form"><div class="card-heading"><div><h3>Marketplace server</h3><p>Attach a reviewed server to an employee.</p></div></div><label>Employee<select id="marketplace-employee"></select></label><label>Server<select id="marketplace-server"></select></label><div class="form-grid two"><label>Access level<select id="marketplace-access"><option value="read_only">Read only</option><option value="requires_approval">Requires approval</option></select></label><label>Connection name<input id="marketplace-name" maxlength="100" placeholder="Use server default"></label></div><button class="btn btn-light" type="submit">Attach server</button></form></div>
+                <form class="tool-grant-form" id="tool-grant-form"><div><p class="panel-kicker">DIRECT PERMISSION</p><h3>Grant a named tool</h3><p>Use this for a capability already registered in the workspace.</p></div><div class="tool-grant-fields"><select id="grant-emp-id" aria-label="Employee"></select><input id="grant-tool-name" maxlength="120" placeholder="Tool name"><select id="grant-access-level" aria-label="Access level"><option value="read_only">Read only</option><option value="requires_approval">Requires approval</option></select><button class="btn btn-light" type="submit">Grant tool</button></div></form>
+              </div></details>
+            </section>
+
+            <section class="settings-panel clean-settings-panel" data-settings-panel="billing" id="billing" hidden><header class="settings-panel-header"><div><p class="panel-kicker">PLAN</p><h2>Choose your workspace capacity</h2><p>Upgrade only when your workforce needs more room.</p></div><span class="section-status billing-status" id="billing-status">LOADING</span></header><div class="billing-summary" id="billing-summary"><p class="empty-state-sm">Loading billing details…</p></div><div class="plans-grid" aria-label="Caveworkers plans"><article class="plan-card"><p>STARTER</p><h3>₹5<span>/mo</span></h3><ul><li>Core AI workforce</li><li>Tenant-isolated room</li><li>Approval gates</li></ul><button class="btn btn-light" type="button" data-plan="starter">Choose Starter</button></article><article class="plan-card featured"><span class="plan-tag">POPULAR</span><p>GROWTH</p><h3>₹10<span>/mo</span></h3><ul><li>Expanded team capacity</li><li>Workspace connectors</li><li>Company collaboration</li></ul><button class="btn btn-primary" type="button" data-plan="growth">Choose Growth</button></article><article class="plan-card"><p>ENTERPRISE</p><h3>₹15<span>/mo</span></h3><ul><li>Full workforce capacity</li><li>Priority operations</li><li>Advanced controls</li></ul><button class="btn btn-light" type="button" data-plan="enterprise">Choose Enterprise</button></article></div><p class="billing-footnote">Testing prices: ₹5, ₹10, and ₹15 per month. Payments are initiated through Razorpay and verified server-side before a plan is applied.</p></section>
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="https://checkout.razorpay.com/v1/checkout.js"></script>
+  <script src="/static/csrf.js"></script>
+  <script src="/static/google-connect.js"></script>
+  <script src="/static/settings.js"></script>
+  <script src="/static/motion.js"></script>
+</body>
+</html>

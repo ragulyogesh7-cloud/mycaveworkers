@@ -1,0 +1,6237 @@
+import express from 'express';
+import path from 'path';
+import { readFileSync, existsSync } from 'fs';
+import cookieParser from 'cookie-parser';
+import dotenv from 'dotenv';
+import ejs from 'ejs';
+import crypto from 'crypto';
+import net from 'net';
+import { lookup } from 'dns/promises';
+import Razorpay from 'razorpay';
+import { initializeApp, getApps, cert } from 'firebase-admin/app';
+import { getAuth } from 'firebase-admin/auth';
+import { getFirestore } from 'firebase-admin/firestore';
+import { GoogleGenAI } from '@google/genai';
+import { google } from 'googleapis';
+import nodemailer from 'nodemailer';
+import { Sentry, anonymizeIdentifier, reportOperationalFailure, sentryEnabled } from './instrument.js';
+import { isTrialExpired, verifyRazorpayPaymentSignature, verifyRazorpayWebhookSignature } from './security.js';
+import { getMcpRegistryServer, searchMcpRegistry } from './mcp-registry.js';
+import { CONNECTOR_DIRECTORY_CATEGORIES, CONNECTOR_DIRECTORY_COUNT, connectorDirectoryPublicView, getConnectorDirectoryEntry, searchConnectorDirectory } from './connector-directory.js';
+
+dotenv.config();
+
+const app = express();
+const requestIds = new WeakMap<express.Request, string>();
+function getRequestId(req: express.Request): string { return requestIds.get(req) || 'unavailable'; }
+const PORT = Number(process.env.PORT || '3000') || 3000;
+const HOST = '0.0.0.0';
+const IS_PRODUCTION = process.env.CAVEWORKERS_ENV === 'production';
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || '').split(',').map((origin) => origin.trim().replace(/\/$/, '')).filter(Boolean);
+if (IS_PRODUCTION && ALLOWED_ORIGINS.length === 0) {
+  console.warn('ALLOWED_ORIGINS is empty in production; only same-origin requests will be accepted.');
+}
+function getRequestOrigin(req: express.Request): string {
+  const forwardedProto = req.get('x-forwarded-proto')?.split(',')[0]?.trim();
+  const protocol = forwardedProto || req.protocol;
+  const host = req.get('host');
+  return host ? `${protocol}://${host}`.replace(/\/$/, '') : '';
+}
+function isAllowedRequestOrigin(req: express.Request, origin: string): boolean {
+  const normalizedOrigin = origin.trim().replace(/\/$/, '');
+  return normalizedOrigin === getRequestOrigin(req) || ALLOWED_ORIGINS.includes(normalizedOrigin);
+}
+
+let genAIClient: GoogleGenAI | null = null;
+if (process.env.GEMINI_API_KEY) {
+  try {
+    genAIClient = new GoogleGenAI({
+      apiKey: process.env.GEMINI_API_KEY,
+      httpOptions: { headers: { 'User-Agent': 'aistudio-build' } }
+    });
+    console.log('Gemini 3.6 Flash SDK initialized successfully');
+  } catch (err) {
+    reportOperationalFailure('analyst.gemini_initialization', err);
+  }
+}
+
+// David's provider is configurable. OpenRouter/Qwen is preferred in production;
+// Gemini remains a backwards-compatible fallback while a tenant is provisioned.
+const OPENROUTER_API_KEY = (process.env.OPENROUTER_API_KEY || '').trim();
+const OPENROUTER_KEY_READY = Boolean(OPENROUTER_API_KEY && (OPENROUTER_API_KEY.startsWith('sk-or-') || OPENROUTER_API_KEY.length >= 15));
+if (OPENROUTER_API_KEY && !OPENROUTER_KEY_READY) console.warn('OPENROUTER_API_KEY is present but invalid; model calls are disabled.');
+const OPENROUTER_BASE_URL = (process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1').replace(/\/$/, '');
+const ANALYST_MODEL = process.env.ANALYST_MODEL || 'google/gemini-3.1-pro-preview';
+const WORKFORCE_MODEL_OVERRIDE = (process.env.WORKFORCE_MODEL || '').trim();
+
+function specialistModelFor(employeeId = 'data_analyst'): string {
+  const normalizedId = String(employeeId || 'data_analyst').toLowerCase();
+  const config = EMPLOYEE_SPECIALIST_CONFIGS[normalizedId] || EMPLOYEE_SPECIALIST_CONFIGS.data_analyst;
+  const employeeOverride = (process.env[`${normalizedId.toUpperCase()}_MODEL`] || '').trim();
+  return WORKFORCE_MODEL_OVERRIDE || employeeOverride || config.model;
+}
+const OPENROUTER_TIMEOUT_MS = Math.min(Math.max(Number(process.env.OPENROUTER_TIMEOUT_MS || '30000') || 30000, 5000), 60000);
+const ANALYST_MAX_TOKENS = Math.min(Math.max(Number(process.env.ANALYST_MAX_TOKENS || '900') || 900, 128), 2000);
+const PUBLIC_APP_URL = (process.env.PUBLIC_APP_URL || 'https://caveworkers.ai.studio').replace(/\/$/, '');
+const GOOGLE_OAUTH_CLIENT_ID = (process.env.GOOGLE_OAUTH_CLIENT_ID || '').trim();
+const GOOGLE_OAUTH_CLIENT_SECRET = (process.env.GOOGLE_OAUTH_CLIENT_SECRET || '').trim();
+const GOOGLE_OAUTH_REDIRECT_URI = (process.env.GOOGLE_OAUTH_REDIRECT_URI || `${PUBLIC_APP_URL}/api/google/oauth/callback`).replace(/\/$/, '');
+const MCP_TOKEN_ENCRYPTION_KEY = (process.env.MCP_TOKEN_ENCRYPTION_KEY || '').trim();
+const COMPANY_EMAIL = (process.env.COMPANY_EMAIL || '').trim().toLowerCase();
+const SMTP_ENABLED = process.env.SMTP_ENABLED === 'true';
+const SMTP_HOST = (process.env.SMTP_HOST || 'smtp.gmail.com').trim();
+const SMTP_PORT = Math.min(Math.max(Number(process.env.SMTP_PORT || '587') || 587, 1), 65535);
+const SMTP_SECURE = process.env.SMTP_SECURE === 'true' || SMTP_PORT === 465;
+const SMTP_USER = (process.env.SMTP_USER || COMPANY_EMAIL).trim().toLowerCase();
+const SMTP_APP_PASSWORD = (process.env.SMTP_APP_PASSWORD || '').trim();
+const SMTP_CONFIGURED = SMTP_ENABLED && Boolean(COMPANY_EMAIL && SMTP_USER && SMTP_APP_PASSWORD && SMTP_USER === COMPANY_EMAIL && SMTP_HOST);
+const OAUTH_STATE_SECRET = (process.env.FLASK_SECRET || process.env.OAUTH_STATE_SECRET || '').trim();
+const GOOGLE_OAUTH_CONFIGURED = Boolean(GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET && GOOGLE_OAUTH_REDIRECT_URI && (!IS_PRODUCTION || OAUTH_STATE_SECRET));
+const ALWAYS_ON_WORKER_ENABLED = process.env.ALWAYS_ON_WORKER_ENABLED !== 'false';
+const WORKER_POLL_MS = Math.min(Math.max(Number(process.env.WORKER_POLL_MS || '1500') || 1500, 500), 10000);
+const WORKER_INSTANCE_ID = process.env.WORKER_INSTANCE_ID || `worker-${crypto.randomBytes(6).toString('hex')}`;
+const WEB_RESEARCH_ENABLED = process.env.WEB_RESEARCH_ENABLED === 'true';
+const TAVILY_API_KEY = (process.env.TAVILY_API_KEY || '').trim();
+const BRAVE_SEARCH_API_KEY = (process.env.BRAVE_SEARCH_API_KEY || '').trim();
+const WORKFLOW_SCHEDULER_POLL_MS = Math.min(Math.max(Number(process.env.WORKFLOW_SCHEDULER_POLL_MS || '60000') || 60000, 30000), 600000);
+const SCHEDULER_TICK_SECRET = (process.env.SCHEDULER_TICK_SECRET || (IS_PRODUCTION ? '' : 'test-scheduler-secret')).trim();
+const TENANT_DELETION_GRACE_DAYS = Math.min(Math.max(Number(process.env.TENANT_DELETION_GRACE_DAYS || '14') || 14, 1), 30);
+const TENANT_EXPORT_EXPIRY_DAYS = Math.min(Math.max(Number(process.env.TENANT_EXPORT_EXPIRY_DAYS || '7') || 7, 1), 30);
+
+interface SpecialistModelConfig {
+  model: string;
+  fallbackModel: string;
+  roleTitle: string;
+  systemPrompt: string;
+}
+
+const EMPLOYEE_SPECIALIST_CONFIGS: Record<string, SpecialistModelConfig> = {
+  data_analyst: {
+    model: 'google/gemini-3.1-pro-preview',
+    fallbackModel: 'anthropic/claude-sonnet-5',
+    roleTitle: 'Data Analyst',
+    systemPrompt: 'You are the Data Analyst at Caveworkers. You provide quantitative rigor, SQL queries, metric breakdowns, financial forecasts, and KPI dashboards. You speak directly to the user with evidence and precision.'
+  },
+  cybersecurity_analyst: {
+    model: 'anthropic/claude-sonnet-5',
+    fallbackModel: 'google/gemini-3.1-pro-preview',
+    roleTitle: 'Cybersecurity Analyst',
+    systemPrompt: 'You are the Cybersecurity Analyst at Caveworkers. You specialize in least-privilege access, SOC2/ISO compliance, vulnerability analysis, threat modeling, and zero-trust security controls.'
+  },
+  backend_developer: {
+    model: 'openai/gpt-5.3-codex',
+    fallbackModel: 'anthropic/claude-sonnet-5',
+    roleTitle: 'Full Stack Backend Developer',
+    systemPrompt: 'You are the Full Stack Backend Developer at Caveworkers. You specialize in APIs, database architectures, CI/CD, backend services, debugging, and repository operations. Answer directly with technical precision.'
+  },
+  qa_engineer: {
+    model: 'anthropic/claude-sonnet-5',
+    fallbackModel: 'google/gemini-3.7-flash',
+    roleTitle: 'Software QA/Automation Engineer',
+    systemPrompt: 'You are the Software QA/Automation Engineer at Caveworkers. You specialize in test suites, end-to-end automation, bug reproduction, edge cases, regression testing, and code quality verification.'
+  },
+  david: {
+    model: 'google/gemini-3.1-pro-preview',
+    fallbackModel: 'anthropic/claude-sonnet-5',
+    roleTitle: 'Data Analyst',
+    systemPrompt: 'You are the Data Analyst at Caveworkers. You provide quantitative rigor, SQL queries, metric breakdowns, and KPI dashboards.'
+  },
+  mike: {
+    model: 'openai/gpt-5.3-codex',
+    fallbackModel: 'anthropic/claude-sonnet-5',
+    roleTitle: 'Full Stack Backend Developer',
+    systemPrompt: 'You are the Full Stack Backend Developer at Caveworkers. You specialize in codebases, APIs, and infrastructure safety.'
+  },
+  iris: {
+    model: 'anthropic/claude-sonnet-5',
+    fallbackModel: 'google/gemini-3.1-pro-preview',
+    roleTitle: 'Cybersecurity Analyst',
+    systemPrompt: 'You are the Cybersecurity Analyst at Caveworkers. You specialize in vulnerability analysis and zero-trust controls.'
+  },
+  sarah: {
+    model: 'anthropic/claude-sonnet-5',
+    fallbackModel: 'google/gemini-3.7-flash',
+    roleTitle: 'Software QA/Automation Engineer',
+    systemPrompt: 'You are the Software QA/Automation Engineer at Caveworkers. You specialize in quality assurance and workflows.'
+  }
+};
+
+type AnalystNarrativeResult = {
+  text: string;
+  provider: 'openrouter' | 'gemini' | 'preview';
+  model?: string;
+  latency_ms: number;
+  usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cost?: number };
+  error_code?: string;
+};
+
+function extractAnalystText(value: unknown): string {
+  if (typeof value === 'string') return value.trim();
+  if (Array.isArray(value)) return value.map((part: any) => typeof part === 'string' ? part : part?.text || '').join('').trim();
+  return '';
+}
+
+async function generateAnalystNarrative(prompt: string, tenantId: string): Promise<AnalystNarrativeResult> {
+  const startedAt = Date.now();
+  let openRouterFailure: AnalystNarrativeResult | null = null;
+  if (OPENROUTER_KEY_READY) {
+    try {
+      const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(OPENROUTER_TIMEOUT_MS),
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': PUBLIC_APP_URL,
+          'X-OpenRouter-Title': 'Caveworkers Data Analyst',
+          'X-OpenRouter-Categories': 'cloud-agent'
+        },
+        body: JSON.stringify({
+          model: ANALYST_MODEL,
+          temperature: 0.2,
+          max_tokens: ANALYST_MAX_TOKENS,
+          stream: false,
+          user: crypto.createHash('sha256').update(tenantId).digest('hex').slice(0, 32),
+          messages: [
+            { role: 'system', content: 'You are David, a precise senior business data analyst. Write concise decision-ready analysis. Never invent access to data, results, or external actions. Clearly label previews, assumptions, and missing sources.' },
+            { role: 'user', content: prompt }
+          ]
+        })
+      });
+      if (response.ok) {
+        const payload: any = await response.json();
+        const content = extractAnalystText(payload?.choices?.[0]?.message?.content);
+        if (content) return { text: content, provider: 'openrouter', model: payload?.model || ANALYST_MODEL, latency_ms: Date.now() - startedAt, usage: payload?.usage ? { prompt_tokens: payload.usage.prompt_tokens, completion_tokens: payload.usage.completion_tokens, total_tokens: payload.usage.total_tokens, cost: payload.usage.cost } : undefined };
+        reportOperationalFailure('analyst.openrouter_response', new Error('OpenRouter returned no text.'), { tenant_hash: anonymizeIdentifier(tenantId), response_id: String(payload?.id || 'unknown').slice(0, 120) });
+        openRouterFailure = { text: '', provider: 'openrouter', model: ANALYST_MODEL, latency_ms: Date.now() - startedAt, error_code: 'empty_response' };
+      } else {
+        reportOperationalFailure('analyst.openrouter_request', new Error(`OpenRouter returned HTTP ${response.status}.`), { tenant_hash: anonymizeIdentifier(tenantId), status_code: response.status });
+        openRouterFailure = { text: '', provider: 'openrouter', model: ANALYST_MODEL, latency_ms: Date.now() - startedAt, error_code: `http_${response.status}` };
+      }
+    } catch (error: any) {
+      const errorCode = error?.name === 'TimeoutError' || error?.name === 'AbortError' ? 'timeout' : 'network_error';
+      reportOperationalFailure('analyst.openrouter_request', error, { tenant_hash: anonymizeIdentifier(tenantId), error_code: errorCode });
+      openRouterFailure = { text: '', provider: 'openrouter', model: ANALYST_MODEL, latency_ms: Date.now() - startedAt, error_code: errorCode };
+    }
+  }
+  if (genAIClient) {
+    try {
+      const response = await genAIClient.models.generateContent({ model: 'gemini-3.6-flash', contents: prompt });
+      if (response.text?.trim()) return { text: response.text.trim(), provider: 'gemini', model: 'gemini-3.6-flash', latency_ms: Date.now() - startedAt };
+    } catch (error) {
+      reportOperationalFailure('analyst.gemini_fallback', error, { tenant_hash: anonymizeIdentifier(tenantId) });
+    }
+  }
+  return openRouterFailure || { text: '', provider: 'preview', latency_ms: Date.now() - startedAt, error_code: OPENROUTER_KEY_READY ? 'provider_unavailable' : 'model_not_configured' };
+}
+
+async function generateWorkforceNarrative(prompt: string, tenantId: string, employeeId?: string): Promise<AnalystNarrativeResult> {
+  const startedAt = Date.now();
+  const targetEmployeeId = (employeeId && EMPLOYEE_SPECIALIST_CONFIGS[employeeId]) ? employeeId : 'sarah';
+  const config = EMPLOYEE_SPECIALIST_CONFIGS[targetEmployeeId] || EMPLOYEE_SPECIALIST_CONFIGS.sarah;
+  const chosenModel = specialistModelFor(targetEmployeeId);
+
+  if (OPENROUTER_KEY_READY) {
+    try {
+      const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(OPENROUTER_TIMEOUT_MS),
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': PUBLIC_APP_URL,
+          'X-OpenRouter-Title': `Caveworkers ${config.roleTitle}`
+        },
+        body: JSON.stringify({
+          model: chosenModel,
+          temperature: 0.2,
+          max_tokens: Math.min(1400, ANALYST_MAX_TOKENS + 350),
+          stream: false,
+          user: crypto.createHash('sha256').update(tenantId).digest('hex').slice(0, 32),
+          messages: [
+            { role: 'system', content: config.systemPrompt },
+            { role: 'user', content: prompt }
+          ]
+        })
+      });
+      if (response.ok) {
+        const payload: any = await response.json();
+        const text = extractAnalystText(payload?.choices?.[0]?.message?.content);
+        if (text) {
+          return {
+            text,
+            provider: 'openrouter',
+            model: payload?.model || chosenModel,
+            latency_ms: Date.now() - startedAt,
+            usage: payload?.usage ? {
+              prompt_tokens: payload.usage.prompt_tokens,
+              completion_tokens: payload.usage.completion_tokens,
+              total_tokens: payload.usage.total_tokens,
+              cost: payload.usage.cost
+            } : undefined
+          };
+        }
+      } else {
+        reportOperationalFailure('workforce.openrouter_request', new Error(`OpenRouter returned HTTP ${response.status}.`), { tenant_hash: anonymizeIdentifier(tenantId), status_code: response.status });
+      }
+    } catch (error) {
+      reportOperationalFailure('workforce.openrouter_request', error, { tenant_hash: anonymizeIdentifier(tenantId) });
+    }
+  }
+
+  if (genAIClient) {
+    try {
+      const response = await genAIClient.models.generateContent({
+        model: 'gemini-3.6-flash',
+        contents: `${config.systemPrompt}\n\n${prompt}`
+      });
+      if (response.text?.trim()) {
+        return { text: response.text.trim(), provider: 'gemini', model: 'gemini-3.6-flash', latency_ms: Date.now() - startedAt };
+      }
+    } catch (error) {
+      reportOperationalFailure('workforce.gemini_fallback', error, { tenant_hash: anonymizeIdentifier(tenantId) });
+    }
+  }
+
+  return { text: '', provider: 'preview', latency_ms: Date.now() - startedAt, error_code: OPENROUTER_KEY_READY ? 'provider_unavailable' : 'model_not_configured' };
+}
+
+app.use((req, res, next) => {
+  const requestOrigin = req.get('origin');
+  if (requestOrigin) {
+    if (!isAllowedRequestOrigin(req, requestOrigin)) {
+      return res.status(403).json({ error: 'Origin not allowed by CORS.' });
+    }
+    res.setHeader('Access-Control-Allow-Origin', requestOrigin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Vary', 'Origin');
+  }
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, X-CSRF-Token, X-Request-Id');
+  res.setHeader('Access-Control-Allow-Methods', 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS');
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+app.use((req, res, next) => {
+  const incoming = String(req.get('x-request-id') || '').trim();
+  const requestId = /^[A-Za-z0-9_-]{8,128}$/.test(incoming) ? incoming : crypto.randomUUID();
+  requestIds.set(req, requestId);
+  res.setHeader('X-Request-Id', requestId);
+  next();
+});
+app.use(express.json({ verify: (req, _res, buffer) => { (req as express.Request & { rawBody?: Buffer }).rawBody = Buffer.from(buffer); } }));
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+
+// Logo asset handler
+app.get(['/static/logo.jpeg', '/static/logo.jpg', '/static/logo.svg', '/logo.jpeg', '/logo.svg'], (req, res) => {
+  const isJpeg = req.path.endsWith('.jpeg') || req.path.endsWith('.jpg');
+  const jpegPath = path.join(process.cwd(), 'static', 'logo.jpeg');
+  const svgPath = path.join(process.cwd(), 'static', 'logo.svg');
+
+  if (isJpeg && existsSync(jpegPath)) {
+    res.setHeader('Content-Type', 'image/jpeg');
+    return res.sendFile(jpegPath);
+  }
+  if (existsSync(svgPath)) {
+    res.setHeader('Content-Type', 'image/svg+xml');
+    return res.sendFile(svgPath);
+  }
+  if (existsSync(jpegPath)) {
+    res.setHeader('Content-Type', 'image/jpeg');
+    return res.sendFile(jpegPath);
+  }
+  res.status(404).send('Logo not found');
+});
+
+// Static assets
+app.use('/static', express.static(path.join(process.cwd(), 'static'), { maxAge: '1d', etag: true, lastModified: true }));
+
+// Template engine setup
+app.engine('html', ejs.renderFile);
+app.set('view engine', 'html');
+app.set('views', path.join(process.cwd(), 'templates'));
+
+// Firebase Config
+let appletFirebaseConfig: any = {};
+try {
+  const cfgPath = path.join(process.cwd(), 'firebase-applet-config.json');
+  if (existsSync(cfgPath)) {
+    appletFirebaseConfig = JSON.parse(readFileSync(cfgPath, 'utf8'));
+  }
+} catch (_e) {}
+
+const FIREBASE_WEB_CONFIG = {
+  apiKey: process.env.FIREBASE_API_KEY || appletFirebaseConfig.apiKey || 'AIzaSyBXDF0iimw-zgwaxG5qJ9gngRKSJ_eLPt8',
+  authDomain: process.env.FIREBASE_AUTH_DOMAIN || appletFirebaseConfig.authDomain || 'caveworkers.firebaseapp.com',
+  projectId: process.env.FIREBASE_PROJECT_ID || appletFirebaseConfig.projectId || 'caveworkers',
+  storageBucket: process.env.FIREBASE_STORAGE_BUCKET || appletFirebaseConfig.storageBucket || 'caveworkers.firebasestorage.app',
+  messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || appletFirebaseConfig.messagingSenderId || '980597206467',
+  appId: process.env.FIREBASE_APP_ID || appletFirebaseConfig.appId || '1:980597206467:web:789036c39cfb0541d1a176'
+};
+
+// Initialize Firebase Admin SDK from deployment-provided credentials or applet configuration.
+const firebaseProjectId = process.env.FIREBASE_PROJECT_ID || appletFirebaseConfig.projectId;
+const firebaseClientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+const firebasePrivateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
+const firebaseServiceAccountPath = process.env.FIREBASE_SERVICE_ACCOUNT_PATH;
+
+if (!getApps().length) {
+  try {
+    if (firebaseServiceAccountPath) {
+      const serviceAccount = JSON.parse(readFileSync(path.resolve(firebaseServiceAccountPath), 'utf8'));
+      initializeApp({ credential: cert(serviceAccount) });
+    } else if (firebaseProjectId && firebaseClientEmail && firebasePrivateKey) {
+      initializeApp({
+        credential: cert({
+          projectId: firebaseProjectId,
+          clientEmail: firebaseClientEmail,
+          privateKey: firebasePrivateKey
+        })
+      });
+    } else if (firebaseProjectId) {
+      initializeApp({ projectId: firebaseProjectId });
+    } else {
+      initializeApp();
+    }
+  } catch (e) {
+    reportOperationalFailure('firebase.initialization', e);
+  }
+}
+
+let appletConfig: any = {};
+try {
+  appletConfig = JSON.parse(readFileSync(path.resolve('./firebase-applet-config.json'), 'utf8'));
+} catch (e) {}
+
+const targetDbId = appletConfig.firestoreDatabaseId || process.env.FIRESTORE_DATABASE_ID;
+const firebaseAuth = getApps().length ? getAuth() : null;
+const firestoreDb = getApps().length ? (targetDbId ? getFirestore(getApps()[0], targetDbId) : getFirestore()) : null;
+const SESSION_COOKIE_MAX_AGE = Math.min(Math.max(Number(process.env.SESSION_COOKIE_MAX_AGE_MS || 30 * 24 * 60 * 60 * 1000) || 30 * 24 * 60 * 60 * 1000, 24 * 60 * 60 * 1000), 90 * 24 * 60 * 60 * 1000);
+const cookieSecure = process.env.COOKIE_SECURE === 'true' || process.env.CAVEWORKERS_ENV === 'production';
+const sessionCookieOptions = { httpOnly: true, secure: cookieSecure, sameSite: 'lax' as const, path: '/', maxAge: SESSION_COOKIE_MAX_AGE };
+const readableCookieOptions = { httpOnly: false, secure: cookieSecure, sameSite: 'lax' as const, path: '/', maxAge: SESSION_COOKIE_MAX_AGE };
+const SESSION_SECRET = process.env.FLASK_SECRET || process.env.OAUTH_STATE_SECRET || 'caveworkers-session-secret-key-2026';
+
+function signSessionPayload(payload: { uid: string; email: string; exp: number }): string {
+  const data = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const hmac = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  return `cw_sess.${data}.${hmac}`;
+}
+
+function verifySessionPayload(token: string): { uid: string; email: string; exp: number } | null {
+  if (typeof token !== 'string' || !token.startsWith('cw_sess.')) return null;
+  const parts = token.split('.');
+  if (parts.length !== 3) return null;
+  const [, data, signature] = parts;
+  const expectedHmac = crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');
+  if (signature.length !== expectedHmac.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expectedHmac))) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(Buffer.from(data, 'base64url').toString('utf8'));
+    if (payload.exp && payload.exp < Date.now()) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+// Razorpay Setup
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || '';
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || '';
+const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || '';
+if (IS_PRODUCTION && (!RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET || !RAZORPAY_WEBHOOK_SECRET)) {
+  throw new Error('RAZORPAY_KEY_ID, RAZORPAY_KEY_SECRET, and RAZORPAY_WEBHOOK_SECRET are required in production.');
+}
+
+let razorpayClient: Razorpay | null = null;
+if (RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET) {
+  try {
+    razorpayClient = new Razorpay({
+      key_id: RAZORPAY_KEY_ID,
+      key_secret: RAZORPAY_KEY_SECRET
+    });
+  } catch (err) {
+    reportOperationalFailure('payments.razorpay_initialization', err);
+  }
+}
+
+const SUBSCRIPTION_PLANS: Record<string, any> = {
+  free_trial: {
+    name: 'Free Trial',
+    price: 0,
+    price_inr: 0,
+    trial_days: 3,
+    max_employees: 4,
+    max_tasks_per_month: 50,
+    max_tool_calls_per_month: 200,
+    description: '3-day full workforce trial with all 4 AI employees',
+    features: ['4 AI employees', 'Permissioned tools', 'HITL Approvals', 'Real-time Memory']
+  },
+  pro: {
+    name: 'AI Workforce Pro',
+    price: 5 / 83,
+    price_inr: 5,
+    max_employees: 4,
+    max_tasks_per_month: 2000,
+    max_tool_calls_per_month: 10000,
+    description: 'Full AI workforce with 4 dedicated specialists at ₹5/month (Testing)',
+    features: ['4 AI employees', 'Data analyst & Security specialist', 'Full stack backend & QA automation', 'Real-time Firestore cache & memory', 'HITL Approvals & MCP Connectors']
+  },
+  starter: {
+    name: 'AI Workforce Pro',
+    price: 5 / 83,
+    price_inr: 5,
+    max_employees: 4,
+    max_tasks_per_month: 2000,
+    max_tool_calls_per_month: 10000,
+    description: 'Full AI workforce with 4 dedicated specialists at ₹5/month (Testing)',
+    features: ['4 AI employees', 'Data analyst & Security specialist', 'Full stack backend & QA automation', 'Real-time Firestore cache & memory']
+  },
+  growth: {
+    name: 'AI Workforce Pro',
+    price: 5 / 83,
+    price_inr: 5,
+    max_employees: 4,
+    max_tasks_per_month: 2000,
+    max_tool_calls_per_month: 10000,
+    description: 'Full AI workforce with 4 dedicated specialists at ₹5/month (Testing)',
+    features: ['4 AI employees', 'Data analyst & Security specialist', 'Full stack backend & QA automation', 'Real-time Firestore cache & memory']
+  },
+  enterprise: {
+    name: 'AI Workforce Pro',
+    price: 5 / 83,
+    price_inr: 5,
+    max_employees: 4,
+    max_tasks_per_month: 2000,
+    max_tool_calls_per_month: 10000,
+    description: 'Full AI workforce with 4 dedicated specialists at ₹5/month (Testing)',
+    features: ['4 AI employees', 'Data analyst & Security specialist', 'Full stack backend & QA automation', 'Real-time Firestore cache & memory']
+  }
+};
+
+const EMPLOYEE_CATALOG = [
+  {
+    id: 'data_analyst',
+    employee_code: 'CW_EMP_001',
+    name: 'Data Analyst',
+    role: 'Data Analyst',
+    department: 'Data & Business Intelligence',
+    color: '#f59e0b',
+    autonomy_level: 'Level 2 (Analyze & Draft)',
+    persona: 'An evidence-first data analyst who executes SQL queries, analyzes KPI metrics, constructs financial models, evaluates business datasets, and provides decision-ready analytical briefs.',
+    system_prompt: 'You are the Data Analyst at Caveworkers. You own SQL queries, business metrics, financial models, KPI reporting, dataset exploration, dashboard generation, and evidence-backed analytics. Always provide clear calculations, assumptions, and structured insights.',
+    default_tools: ['SQL Workspace', 'Google Sheets', 'Analytics MCP', 'Gmail'],
+    collaborates_with: ['backend_developer', 'cybersecurity_analyst', 'qa_engineer'],
+    status: 'active'
+  },
+  {
+    id: 'cybersecurity_analyst',
+    employee_code: 'CW_EMP_002',
+    name: 'Cybersecurity Analyst',
+    role: 'Cybersecurity Analyst',
+    department: 'Security & Compliance',
+    color: '#64748b',
+    autonomy_level: 'Level 3 (Recommend with Review)',
+    persona: 'A security-first analyst who protects infrastructure, audits access controls, evaluates CVEs and vulnerabilities, enforces zero-trust principles, and ensures regulatory compliance (SOC2/ISO27001).',
+    system_prompt: 'You are the Cybersecurity Analyst at Caveworkers. You own security posture reviews, vulnerability assessments, access control audits, zero-trust enforcement, incident triage, and compliance checklists. High-risk security modifications and access elevation require human-in-the-loop review.',
+    default_tools: ['Identity Provider MCP', 'Security Scanner', 'ITSM MCP', 'Gmail'],
+    collaborates_with: ['backend_developer', 'qa_engineer', 'data_analyst'],
+    status: 'active'
+  },
+  {
+    id: 'backend_developer',
+    employee_code: 'CW_EMP_003',
+    name: 'Full Stack Backend Developer',
+    role: 'Full Stack Backend Developer',
+    department: 'Engineering & Architecture',
+    color: '#3b82f6',
+    autonomy_level: 'Level 3 (Recommend with Review)',
+    persona: 'A pragmatic full stack and backend engineer specializing in scalable REST/GraphQL APIs, distributed services, databases (Postgres, Firestore, Redis), CI/CD pipelines, and cloud architecture.',
+    system_prompt: 'You are the Full Stack Backend Developer at Caveworkers. You own server architecture, API design, database schemas, performance optimization, repository triage, backend services, and CI/CD workflow automation. Production deployments and schema migrations require human approval.',
+    default_tools: ['GitHub MCP', 'Database MCP', 'Terminal / Docker', 'Slack'],
+    collaborates_with: ['qa_engineer', 'data_analyst', 'cybersecurity_analyst'],
+    status: 'active'
+  },
+  {
+    id: 'qa_engineer',
+    employee_code: 'CW_EMP_004',
+    name: 'Software QA/Automation Engineer',
+    role: 'Software QA/Automation Engineer',
+    department: 'Quality Assurance & Reliability',
+    color: '#10b981',
+    autonomy_level: 'Level 2 (Analyze & Draft)',
+    persona: 'A detail-oriented QA automation engineer who designs automated test suites (Playwright, Cypress, Jest), performs regression and integration testing, finds edge cases, and guarantees software reliability.',
+    system_prompt: 'You are the Software QA/Automation Engineer at Caveworkers. You own test automation suites, end-to-end browser tests, API verification, regression analysis, load testing, and test coverage validation. Document reproduction steps and verification logs clearly.',
+    default_tools: ['Playwright / Cypress MCP', 'GitHub MCP', 'Test Runner', 'Slack'],
+    collaborates_with: ['backend_developer', 'cybersecurity_analyst', 'data_analyst'],
+    status: 'active'
+  }
+];
+
+// In-Memory Database
+interface User {
+  uid: string;
+  email: string;
+  display_name?: string;
+  photo_url?: string;
+  company_id?: string;
+  company_name?: string;
+  user_role?: string;
+  onboarded: boolean;
+  selected_tier?: string;
+  role?: string;
+  created_at?: string;
+  updated_at?: string;
+  auth_provider?: string;
+  email_verified?: boolean;
+}
+
+interface Company {
+  id: string;
+  name: string;
+  industry?: string;
+  team_size?: string;
+  user_role?: string;
+  business_goals?: string;
+  workspace_guidelines?: string;
+  description?: string;
+  guidelines?: string;
+  owner_uid: string;
+  tier: string;
+  status: string;
+  selected_employees?: string[];
+  trial_started_at?: string;
+  trial_ends_at?: string;
+  payment_verified_at?: string;
+  payment_id?: string;
+  deletion_requested_at?: string;
+  deletion_scheduled_for?: string;
+  deletion_request_id?: string;
+  created_at: string;
+}
+
+interface OrgEmployee {
+  id: string;
+  employee_id: string;
+  name: string;
+  role: string;
+  department: string;
+  color: string;
+  status: string;
+  tools: string[];
+  permissions: Array<{ tool_name: string; access_level: string }>;
+  /** Autopilot runs tenant-authorized tool work without a new approval for every task. */
+  autonomy_mode?: 'copilot' | 'autopilot';
+  /** High-impact writes remain review-gated unless the tenant explicitly opts in. */
+  high_impact_action_policy?: 'review' | 'autopilot';
+  connector_policy?: 'assigned_only' | 'workspace_shared';
+}
+
+interface WebResearchEvidence {
+  title: string;
+  url: string;
+  snippet: string;
+  content_preview?: string;
+  fetched_at: string;
+}
+
+interface WorkforceQueueJob {
+  id: string;
+  task_id: number;
+  company_id: string;
+  question: string;
+  preferred_employee_id?: string;
+  email_employee_id?: string;
+  status: 'queued' | 'processing' | 'completed' | 'failed' | 'dead_letter';
+  claimed_by?: string;
+  attempts: number;
+  max_attempts?: number;
+  idempotency_key?: string;
+  created_at: string;
+  updated_at: string;
+  dead_lettered_at?: string;
+  error?: string;
+}
+
+interface TaskRecord {
+  id: number;
+  company_id: string;
+  question: string;
+  owner: string;
+  status: string;
+  answer: string;
+  plan: string;
+  created_at: string;
+  trace: any[];
+  /** IDs of employee chat messages hidden by the tenant user. The private trace remains intact for auditability. */
+  deleted_chat_message_ids?: string[];
+  participants?: string[];
+  collaboration_summary?: string;
+  live_tool_evidence?: WorkforceLiveToolEvidence[];
+  web_research?: WebResearchEvidence[];
+  /** Employee explicitly addressed by the user in Company Room, when applicable. Sarah remains task owner. */
+  direct_employee_id?: string;
+  queued_at?: string;
+  started_at?: string;
+  completed_at?: string;
+  execution?: {
+    action_type: string;
+    status: 'queued' | 'not_required' | 'awaiting_approval' | 'blocked' | 'processing' | 'succeeded' | 'failed' | 'cancelled';
+    summary: string;
+    updated_at: string;
+    result?: Record<string, string>;
+  };
+}
+
+interface WorkforceLiveToolEvidence {
+  employee_id: string;
+  employee_name: string;
+  connector_name: string;
+  tool_name: string;
+  status: 'executed' | 'skipped' | 'failed';
+  summary: string;
+  created_at: string;
+}
+
+interface EmployeeMemory {
+  id: string;
+  company_id: string;
+  employee_id: string;
+  category: 'preference' | 'playbook' | 'handoff';
+  content: string;
+  created_at: string;
+}
+
+interface ApprovalRecord {
+  id: number;
+  company_id: string;
+  task_id: number;
+  employee_id: string;
+  tool_name: string;
+  action_summary: string;
+  status: 'pending' | 'approved' | 'rejected';
+  payload?: any;
+  created_at: string;
+  decided_at?: string;
+  executed_at?: string;
+}
+
+interface WorkforceAuditEvent {
+  id: string;
+  company_id: string;
+  actor_type: 'user' | 'employee' | 'system';
+  actor_id: string;
+  action: string;
+  resource_type: string;
+  resource_id?: string;
+  connector_id?: number;
+  tool_name?: string;
+  task_id?: number;
+  approval_id?: number;
+  risk: 'low' | 'medium' | 'high' | 'critical';
+  status: 'prepared' | 'blocked' | 'awaiting_approval' | 'approved' | 'rejected' | 'succeeded' | 'failed';
+  summary: string;
+  correlation_id: string;
+  created_at: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface UsageLedgerRecord {
+  company_id: string;
+  period: string;
+  tasks_created: number;
+  tasks_completed: number;
+  tool_calls: number;
+  external_actions: number;
+  estimated_tokens: number;
+  updated_at: string;
+}
+
+interface ActivationEvent {
+  id: string;
+  company_id: string;
+  name: 'workspace_created' | 'employee_selected' | 'connector_connected' | 'first_task_created' | 'first_task_completed' | 'first_tool_succeeded' | 'first_approval_completed';
+  actor_type: 'user' | 'employee' | 'system';
+  actor_id: string;
+  created_at: string;
+  metadata?: Record<string, unknown>;
+}
+
+interface ScheduledWorkflow {
+  id: string;
+  company_id: string;
+  name: string;
+  prompt: string;
+  preferred_employee_id?: string;
+  email_employee_id?: string;
+  schedule_type: 'once' | 'cron';
+  cron_expression?: string;
+  timezone: string;
+  next_run_at: string;
+  last_run_at?: string;
+  last_task_id?: number;
+  last_error?: string;
+  run_count: number;
+  max_runs?: number;
+  status: 'active' | 'paused' | 'completed' | 'error';
+  created_by: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface DataExportRequest {
+  id: string;
+  company_id: string;
+  requested_by: string;
+  status: 'completed' | 'failed';
+  requested_at: string;
+  completed_at?: string;
+  expires_at: string;
+  payload?: Record<string, unknown>;
+  error?: string;
+}
+
+interface TenantDeletionRequest {
+  id: string;
+  company_id: string;
+  requested_by: string;
+  status: 'scheduled' | 'processing' | 'completed' | 'failed' | 'cancelled';
+  requested_at: string;
+  execute_after: string;
+  processed_at?: string;
+  error?: string;
+}
+
+interface AnalystDataSource {
+  id: string;
+  company_id: string;
+  kind: 'sql' | 'google_sheets' | 'csv';
+  name: string;
+  status: 'connected' | 'needs_configuration';
+  access_level: 'read_only';
+  metadata: Record<string, any>;
+  created_at: string;
+  updated_at: string;
+}
+
+interface TenantConnector {
+  id: number;
+  company_id: string;
+  employee_id: string;
+  name: string;
+  connection_type: 'google_gmail' | 'google_drive' | 'google_sheets' | 'streamable_http' | 'git_repository' | 'custom_skill';
+  server_url?: string;
+  access_level: 'read_only' | 'requires_approval' | 'read_write';
+  /** Connector-level default for newly discovered tools; individual grants remain authoritative. */
+  autonomy_mode?: 'copilot' | 'autopilot';
+  status: 'connected' | 'needs_configuration' | 'error';
+  config: Record<string, any>;
+  discovered_tools: Array<{ name: string; description?: string; inputSchema?: any; risk?: 'read' | 'write' }>;
+  tool_grants: Array<{ tool_name: string; access_level: 'read_only' | 'requires_approval' | 'read_write' }>;
+  auth_scopes?: string[];
+  oauth_email?: string;
+  auth_token_encrypted?: string;
+  oauth_expires_at?: string;
+  oauth_revoked_at?: string;
+  last_refresh_at?: string;
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface AnalystMemory {
+  id: string;
+  company_id: string;
+  memory_type: 'working' | 'long_term';
+  session_id?: string;
+  category: 'task_state' | 'preference' | 'business_rule' | 'metric_definition' | 'reflection';
+  content: string;
+  confidence: number;
+  created_at: string;
+  expires_at?: string;
+}
+
+interface AnalystRun {
+  id: string;
+  company_id: string;
+  task_id: number;
+  question: string;
+  source_id?: string;
+  output_format: 'brief' | 'report' | 'chart' | 'table';
+  status: 'completed' | 'awaiting_approval';
+  plan: string[];
+  trace: Array<{ stage: 'perceive' | 'plan' | 'act' | 'reflect' | 'approval'; body: string; created_at: string }>;
+  report: string;
+  chart?: { title: string; labels: string[]; values: number[]; unit: string; source_note: string };
+  approval_id?: number;
+  model?: { provider: 'openrouter' | 'gemini' | 'preview'; name?: string; latency_ms: number; usage?: { prompt_tokens?: number; completion_tokens?: number; total_tokens?: number; cost?: number }; error_code?: string };
+  created_at: string;
+}
+
+const db = {
+  users: new Map<string, User>(),
+  companies: new Map<string, Company>(),
+  orgEmployees: new Map<string, OrgEmployee[]>(),
+  conversations: new Map<string, any[]>(),
+  tasks: new Map<number, TaskRecord>(),
+  approvals: new Map<number, ApprovalRecord>(),
+  knowledge: new Map<string, any[]>(),
+  activity: new Map<string, any[]>(),
+  audit: new Map<string, WorkforceAuditEvent[]>(),
+  usage: new Map<string, UsageLedgerRecord>(),
+  activationEvents: new Map<string, ActivationEvent[]>(),
+  scheduledWorkflows: new Map<string, ScheduledWorkflow>(),
+  dataExports: new Map<string, DataExportRequest>(),
+  deletionRequests: new Map<string, TenantDeletionRequest>(),
+  mcpConnections: new Map<string, any[]>(),
+  analystDataSources: new Map<string, AnalystDataSource[]>(),
+  analystMemory: new Map<string, AnalystMemory[]>(),
+  analystRuns: new Map<string, AnalystRun[]>(),
+  analystApprovalsLoaded: new Set<string>(),
+  approvalTenantsLoaded: new Set<string>(),
+  employeeMemory: new Map<string, EmployeeMemory[]>(),
+  taskTenantsLoaded: new Set<string>(),
+  workforceQueue: new Map<string, WorkforceQueueJob>(),
+  employeePresence: new Map<string, { employee_id: string; status: 'idle' | 'working' | 'offline'; task_id?: number; last_seen_at: string }>(),
+  activityLoaded: new Set<string>(),
+  nextTaskId: 1,
+  nextApprovalId: 101,
+};
+
+const authenticatedUsers = new WeakMap<express.Request, User>();
+const pendingPaymentOrders = new Map<string, { uid: string; company_id: string; tier: string; amount: number; created_at: string }>();
+const rateLimitBuckets = new Map<string, { count: number; resetAt: number }>();
+const workroomStreams = new Map<string, Set<express.Response>>();
+function rateLimitKey(req: express.Request, scope: string): string { return `${scope}:${req.ip || req.socket.remoteAddress || 'unknown'}`; }
+function isRateLimited(key: string, limit: number, windowMs: number): boolean {
+  const now = Date.now();
+  const current = rateLimitBuckets.get(key);
+  if (!current || now >= current.resetAt) { rateLimitBuckets.set(key, { count: 1, resetAt: now + windowMs }); return false; }
+  current.count += 1;
+  return current.count > limit;
+}
+
+async function loadUserFromFirebase(uid: string): Promise<User | null> {
+  const cached = db.users.get(uid);
+  if (cached) return cached;
+  if (!firestoreDb) return null;
+
+  try {
+    const snapshot = await firestoreDb.collection('users').doc(uid).get();
+    if (!snapshot.exists) return null;
+    const data = snapshot.data() || {};
+    const user = { uid, ...data } as User;
+    db.users.set(uid, user);
+    return user;
+  } catch (error) {
+    console.warn('Could not load Firebase user profile:', error);
+    return null;
+  }
+}
+
+async function loadCompanyFromFirebase(id: string): Promise<Company | null> {
+  const cached = db.companies.get(id);
+  if (cached) return cached;
+  if (!firestoreDb) return null;
+
+  try {
+    const snapshot = await firestoreDb.collection('companies').doc(id).get();
+    if (!snapshot.exists) return null;
+    const company = { id, ...(snapshot.data() || {}) } as Company;
+    db.companies.set(id, company);
+    return company;
+  } catch (error) {
+    console.warn('Could not load Firebase company profile:', error);
+    return null;
+  }
+}
+
+function stripUndefined<T>(value: T): T {
+  if (Array.isArray(value)) return value.filter((item) => item !== undefined).map((item) => stripUndefined(item)) as T;
+  if (!value || typeof value !== 'object' || value instanceof Date || Buffer.isBuffer(value)) return value;
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([, item]) => item !== undefined)
+      .map(([key, item]) => [key, stripUndefined(item)])
+  ) as T;
+}
+
+async function persistUser(user: User, extra: Record<string, unknown> = {}) {
+  const now = new Date().toISOString();
+  const record = stripUndefined({ ...user, ...extra, updated_at: now }) as User;
+  db.users.set(user.uid, record);
+  if (firestoreDb) {
+    try {
+      await firestoreDb.collection('users').doc(user.uid).set(record, { merge: true });
+    } catch (error) {
+      console.warn('Could not persist user to Firestore:', error);
+    }
+  }
+}
+
+async function persistCompany(company: Company) {
+  const record = stripUndefined(company);
+  db.companies.set(company.id, record as Company);
+  if (firestoreDb) {
+    try {
+      await firestoreDb.collection('companies').doc(company.id).set(record, { merge: true });
+    } catch (error) {
+      console.warn('Could not persist company to Firestore:', error);
+    }
+  }
+}
+
+async function persistPaymentTransaction(record: Record<string, any>) {
+  if (firestoreDb) {
+    try {
+      const paymentId = record.payment_id || record.order_id || `pay_${Date.now()}`;
+      await firestoreDb.collection('payments').doc(paymentId).set(stripUndefined({
+        ...record,
+        updated_at: new Date().toISOString()
+      }), { merge: true });
+    } catch (error) {
+      console.warn('Could not persist payment transaction to Firestore:', error);
+    }
+  }
+}
+
+function analystTenantCollection(companyId: string, collection: string) {
+  return firestoreDb?.collection('tenants').doc(companyId).collection(collection) || null;
+}
+
+function connectorCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'connectors');
+}
+
+function employeeCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'employees');
+}
+
+function conversationCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'conversations');
+}
+
+async function loadEmployeeConversation(companyId: string, employeeId: string, employeeName: string): Promise<any[]> {
+  const key = `${companyId}:${employeeId}`;
+  const cached = db.conversations.get(key);
+  if (cached) return cached;
+  const collection = conversationCollection(companyId);
+  if (collection) {
+    try {
+      const snapshot = await collection.doc(employeeId).get();
+      const messages = snapshot.exists && Array.isArray(snapshot.data()?.messages) ? snapshot.data()?.messages : null;
+      if (messages?.length) {
+        const bounded = messages.slice(-100);
+        db.conversations.set(key, bounded);
+        return bounded;
+      }
+    } catch (error) {
+      console.warn('Could not load employee conversation from Firestore:', error);
+    }
+  }
+  const seed = [{
+    sender: employeeId,
+    receiver: 'manager',
+    body: `Hello! I'm ${employeeName}. How can I assist with your company work today?`,
+    created_at: new Date().toISOString()
+  }];
+  db.conversations.set(key, seed);
+  return seed;
+}
+
+async function persistEmployeeConversation(companyId: string, employeeId: string, messages: any[]) {
+  const key = `${companyId}:${employeeId}`;
+  const bounded = messages.slice(-100);
+  db.conversations.set(key, bounded);
+  const collection = conversationCollection(companyId);
+  if (!collection) return;
+  try {
+    await collection.doc(employeeId).set(stripUndefined({ company_id: companyId, employee_id: employeeId, messages: bounded, updated_at: new Date().toISOString() }), { merge: true });
+  } catch (error) {
+    console.warn('Could not persist employee conversation to Firestore:', error);
+  }
+}
+
+async function persistOrgEmployees(companyId: string, employees: OrgEmployee[]) {
+  db.orgEmployees.set(companyId, employees);
+  const collection = employeeCollection(companyId);
+  if (!collection) return;
+  try {
+    await Promise.all(employees.map((employee) => collection.doc(employee.id).set(stripUndefined(employee), { merge: true })));
+  } catch (error) {
+    console.warn('Could not persist org employees to Firestore:', error);
+  }
+}
+
+function isInitialDatabaseStatusError(error: any): boolean {
+  if (!error) return false;
+  const msg = String(error?.message || error?.details || error);
+  const code = error?.code;
+  return code === 5 || code === 7 || code === 'NOT_FOUND' || code === 'PERMISSION_DENIED' || /NOT_FOUND|PERMISSION_DENIED|5 NOT_FOUND|7 PERMISSION_DENIED/i.test(msg);
+}
+
+async function loadOrgEmployees(companyId: string): Promise<OrgEmployee[]> {
+  const cached = db.orgEmployees.get(companyId);
+  if (cached) return cached;
+  const collection = employeeCollection(companyId);
+  if (collection) {
+    try {
+      const snapshot = await collection.get();
+      const employees = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as OrgEmployee));
+      if (employees.length) {
+        db.orgEmployees.set(companyId, employees);
+        return employees;
+      }
+    } catch (error) {
+      if (!isInitialDatabaseStatusError(error)) {
+        reportOperationalFailure('employee.load', error, { tenant_hash: anonymizeIdentifier(companyId) });
+      }
+    }
+  }
+  return [];
+}
+
+function employeeMemoryKey(companyId: string, employeeId: string) {
+  return `${companyId}:${employeeId}`;
+}
+
+async function loadEmployeeMemory(companyId: string, employeeId: string): Promise<EmployeeMemory[]> {
+  const key = employeeMemoryKey(companyId, employeeId);
+  const cached = db.employeeMemory.get(key);
+  if (cached) return cached;
+  const collection = analystTenantCollection(companyId, 'employee_memory');
+  if (collection) {
+    try {
+      const snapshot = await collection.where('employee_id', '==', employeeId).get();
+      const entries = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as EmployeeMemory)).sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at)).slice(0, 50);
+      db.employeeMemory.set(key, entries);
+      return entries;
+    } catch (error) {
+      console.warn('Could not load employee memory:', error);
+    }
+  }
+  db.employeeMemory.set(key, []);
+  return [];
+}
+
+async function persistEmployeeMemory(memory: EmployeeMemory) {
+  const key = employeeMemoryKey(memory.company_id, memory.employee_id);
+  const existing = db.employeeMemory.get(key) || [];
+  db.employeeMemory.set(key, [memory, ...existing.filter((entry) => entry.id !== memory.id)].slice(0, 50));
+  const collection = analystTenantCollection(memory.company_id, 'employee_memory');
+  if (collection) {
+    try {
+      await collection.doc(memory.id).set(stripUndefined(memory), { merge: true });
+    } catch (error) {
+      console.warn('Could not persist employee memory to Firestore:', error);
+    }
+  }
+}
+
+async function deleteEmployeeMemory(companyId: string, employeeId: string, memoryId: string) {
+  const key = employeeMemoryKey(companyId, employeeId);
+  const entries = await loadEmployeeMemory(companyId, employeeId);
+  db.employeeMemory.set(key, entries.filter((entry) => entry.id !== memoryId));
+  const collection = analystTenantCollection(companyId, 'employee_memory');
+  if (collection) {
+    try {
+      await collection.doc(memoryId).delete();
+    } catch (error) {
+      console.warn('Could not delete employee memory from Firestore:', error);
+    }
+  }
+}
+
+async function syncCompanyToEmployeeMemory(companyId: string, user: User, company: Company) {
+  try {
+    const selectedIds = Array.isArray(company.selected_employees) ? company.selected_employees : [];
+    const allEmployees = selectedIds.length
+      ? EMPLOYEE_CATALOG.filter((employee) => selectedIds.includes(employee.id))
+      : [];
+    const now = new Date().toISOString();
+
+    const userRoleStr = user.user_role || company.user_role || 'Not provided';
+    const userNameStr = user.display_name || user.email || 'Workspace owner';
+    const companyNameStr = company.name || 'Workspace';
+    const industryStr = company.industry || 'Not specified';
+    const teamSizeStr = company.team_size || 'Not specified';
+    const goalsStr = company.business_goals || company.description || 'No business goals provided yet.';
+    const guidelinesStr = company.workspace_guidelines || company.guidelines || 'Require manager review for external or high-impact actions.';
+
+    const tasks: Promise<any>[] = [];
+    for (const emp of allEmployees) {
+      const mem1: EmployeeMemory = {
+        id: `mem_biz_${emp.id}`,
+        company_id: companyId,
+        employee_id: emp.id,
+        category: 'preference',
+        content: `[Company Context] Business: ${companyNameStr} (${industryStr}, ${teamSizeStr} team) | Goals/Model: ${goalsStr}`,
+        created_at: now
+      };
+      tasks.push(persistEmployeeMemory(mem1));
+
+      const mem2: EmployeeMemory = {
+        id: `mem_user_${emp.id}`,
+        company_id: companyId,
+        employee_id: emp.id,
+        category: 'preference',
+        content: `[User Context] Manager Name: ${userNameStr} | Role: ${userRoleStr} | Account Email: ${user.email}`,
+        created_at: now
+      };
+      tasks.push(persistEmployeeMemory(mem2));
+
+      if (guidelinesStr) {
+        const mem3: EmployeeMemory = {
+          id: `mem_rules_${emp.id}`,
+          company_id: companyId,
+          employee_id: emp.id,
+          category: 'playbook',
+          content: `[Operating Guidelines] ${guidelinesStr}`,
+          created_at: now
+        };
+        tasks.push(persistEmployeeMemory(mem3));
+      }
+    }
+    await Promise.allSettled(tasks);
+
+    if (firestoreDb) {
+      try {
+        await firestoreDb.collection('tenants').doc(companyId).collection('settings').doc('workspace').set(stripUndefined({
+          company_id: companyId,
+          company_name: companyNameStr,
+          user_role: userRoleStr,
+          industry: industryStr,
+          team_size: teamSizeStr,
+          business_goals: goalsStr,
+          workspace_guidelines: guidelinesStr,
+          updated_at: now
+        }), { merge: true });
+      } catch (e) {
+        console.warn('Could not persist settings to Firestore:', e);
+      }
+    }
+  } catch (error) {
+    console.warn('Could not sync company memory:', error);
+  }
+}
+
+async function hydrateTenantTasks(companyId: string) {
+  if (db.taskTenantsLoaded.has(companyId)) return;
+  db.taskTenantsLoaded.add(companyId);
+  const collection = analystTenantCollection(companyId, 'tasks');
+  if (!collection) return;
+  try {
+    const snapshot = await collection.orderBy('created_at', 'desc').limit(100).get();
+    snapshot.docs.forEach((doc) => {
+      const record = { id: Number(doc.data()?.id || doc.id), ...(doc.data() || {}) } as TaskRecord;
+      if (record.company_id === companyId && Number.isFinite(record.id)) {
+        db.tasks.set(record.id, record);
+        db.nextTaskId = Math.max(db.nextTaskId, record.id + 1);
+      }
+    });
+  } catch (error) {
+    if (!isInitialDatabaseStatusError(error)) {
+      reportOperationalFailure('task.hydration', error, { tenant_hash: anonymizeIdentifier(companyId) });
+    }
+  }
+}
+
+async function persistTaskRecord(task: TaskRecord) {
+  const collection = analystTenantCollection(task.company_id, 'tasks');
+  if (collection) {
+    try {
+      await collection.doc(String(task.id)).set(stripUndefined(task), { merge: true });
+    } catch (error) {
+      console.warn('Could not persist task record to Firestore:', error);
+    }
+  }
+}
+
+async function hydrateTenantActivity(companyId: string) {
+  if (db.activityLoaded.has(companyId)) return;
+  db.activityLoaded.add(companyId);
+  const collection = analystTenantCollection(companyId, 'activity');
+  if (!collection) return;
+  try {
+    const snapshot = await collection.orderBy('created_at', 'desc').limit(100).get();
+    if (snapshot.docs.length) {
+      db.activity.set(companyId, snapshot.docs.map((doc) => ({ id: Number(doc.data()?.id || doc.id), company_id: companyId, ...(doc.data() || {}) })).filter((entry) => Number.isFinite(entry.id)));
+    }
+  } catch (error) {
+    if (!isInitialDatabaseStatusError(error)) {
+      reportOperationalFailure('activity.hydration', error, { tenant_hash: anonymizeIdentifier(companyId) });
+    }
+  }
+}
+
+async function persistActivityLog(companyId: string, entry: Record<string, any>) {
+  const logs = db.activity.get(companyId) || [];
+  const record: Record<string, any> = { ...entry, company_id: companyId };
+  db.activity.set(companyId, [record, ...logs.filter((item) => item.id !== record.id)].slice(0, 100));
+  db.activityLoaded.add(companyId);
+  const collection = analystTenantCollection(companyId, 'activity');
+  if (collection) {
+    try {
+      await collection.doc(String(record.id)).set(stripUndefined(record), { merge: true });
+    } catch (error) {
+      console.warn('Could not persist activity log to Firestore:', error);
+    }
+  }
+}
+
+function sanitizeAuditMetadata(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const blocked = /token|secret|password|authorization|cookie|private.?key|client.?secret/i;
+  const result: Record<string, unknown> = {};
+  for (const [key, item] of Object.entries(value as Record<string, unknown>)) {
+    if (blocked.test(key)) continue;
+    if (typeof item === 'string') {
+      result[key] = item.replace(/Bearer\\s+[A-Za-z0-9._~-]+/gi, 'Bearer [REDACTED]').slice(0, 500);
+    } else if (typeof item === 'number' || typeof item === 'boolean' || item === null) {
+      result[key] = item;
+    }
+  }
+  return Object.keys(result).length ? result : undefined;
+}
+
+async function persistAuditEvent(event: WorkforceAuditEvent) {
+  const existing = db.audit.get(event.company_id) || [];
+  if (existing.some((item) => item.id === event.id)) return;
+  const safeEvent = stripUndefined({ ...event, metadata: sanitizeAuditMetadata(event.metadata) }) as WorkforceAuditEvent;
+  db.audit.set(event.company_id, [safeEvent, ...existing].slice(0, 500));
+  const collection = analystTenantCollection(event.company_id, 'audit_events');
+  if (collection) await collection.doc(event.id).create(safeEvent).catch(async (error: any) => {
+    if (error?.code === 6 || /already exists/i.test(String(error?.message || ''))) return;
+    throw error;
+  });
+}
+
+async function auditWorkforceAction(input: Omit<WorkforceAuditEvent, 'id' | 'created_at'> & { id?: string; created_at?: string }) {
+  const event: WorkforceAuditEvent = {
+    ...input,
+    id: input.id || crypto.randomUUID(),
+    created_at: input.created_at || new Date().toISOString(),
+    correlation_id: input.correlation_id || crypto.randomUUID(),
+    metadata: sanitizeAuditMetadata(input.metadata)
+  };
+  await persistAuditEvent(event);
+  return event;
+}
+
+function usagePeriod(date = new Date()) {
+  return date.toISOString().slice(0, 7);
+}
+
+function usageLedgerKey(companyId: string, period = usagePeriod()) {
+  return `${companyId}:${period}`;
+}
+
+function usageCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'usage_ledger');
+}
+
+function activationCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'activation_events');
+}
+
+async function loadUsageLedger(companyId: string, period = usagePeriod()): Promise<UsageLedgerRecord> {
+  const key = usageLedgerKey(companyId, period);
+  const cached = db.usage.get(key);
+  if (cached) return cached;
+  const collection = usageCollection(companyId);
+  if (collection) {
+    try {
+      const snapshot = await collection.doc(period).get();
+      if (snapshot.exists) {
+        const record = { company_id: companyId, period, tasks_created: 0, tasks_completed: 0, tool_calls: 0, external_actions: 0, estimated_tokens: 0, updated_at: new Date().toISOString(), ...(snapshot.data() || {}) } as UsageLedgerRecord;
+        db.usage.set(key, record);
+        return record;
+      }
+    } catch (error) {
+      if (!isInitialDatabaseStatusError(error)) {
+        reportOperationalFailure('usage.hydration', error, { tenant_hash: anonymizeIdentifier(companyId), period });
+      }
+    }
+  }
+  const empty: UsageLedgerRecord = { company_id: companyId, period, tasks_created: 0, tasks_completed: 0, tool_calls: 0, external_actions: 0, estimated_tokens: 0, updated_at: new Date().toISOString() };
+  db.usage.set(key, empty);
+  return empty;
+}
+
+async function persistUsageLedger(record: UsageLedgerRecord) {
+  const safeRecord = stripUndefined(record) as UsageLedgerRecord;
+  db.usage.set(usageLedgerKey(record.company_id, record.period), safeRecord);
+  const collection = usageCollection(record.company_id);
+  if (collection) {
+    try {
+      await collection.doc(record.period).set(safeRecord, { merge: true });
+    } catch (error) {
+      console.warn('Could not persist usage ledger to Firestore:', error);
+    }
+  }
+}
+
+function companyPlan(companyId: string) {
+  const company = db.companies.get(companyId);
+  return SUBSCRIPTION_PLANS[company?.tier || 'free_trial'] || SUBSCRIPTION_PLANS.free_trial;
+}
+
+async function recordUsage(companyId: string, metric: 'tasks_created' | 'tasks_completed' | 'tool_calls' | 'external_actions' | 'estimated_tokens', amount = 1) {
+  const record = await loadUsageLedger(companyId);
+  record[metric] = Math.max(0, Number(record[metric] || 0) + amount);
+  record.updated_at = new Date().toISOString();
+  await persistUsageLedger(record);
+  return record;
+}
+
+async function assertTaskQuota(companyId: string) {
+  const record = await loadUsageLedger(companyId);
+  const plan = companyPlan(companyId);
+  const limit = Number(plan.max_tasks_per_month || 0);
+  if (limit > 0 && record.tasks_created >= limit) {
+    const error: any = new Error(`The ${plan.name} plan has reached its monthly task limit of ${limit}. Upgrade or wait for the next usage period.`);
+    error.code = 'task_quota_exceeded';
+    error.status = 402;
+    error.usage = record;
+    error.limit = limit;
+    throw error;
+  }
+  return { record, limit, plan };
+}
+
+async function recordActivationEvent(companyId: string, name: ActivationEvent['name'], actorType: ActivationEvent['actor_type'] = 'system', actorId = 'system', metadata?: Record<string, unknown>) {
+  const existing = db.activationEvents.get(companyId) || [];
+  const prior = existing.find((event) => event.name === name);
+  if (prior) return prior;
+  const event: ActivationEvent = { id: `${companyId}:${name}`, company_id: companyId, name, actor_type: actorType, actor_id: actorId, created_at: new Date().toISOString(), metadata: sanitizeAuditMetadata(metadata) };
+  db.activationEvents.set(companyId, [event, ...existing]);
+  const collection = activationCollection(companyId);
+  if (collection) await collection.doc(event.id).create(stripUndefined(event)).catch(async (error: any) => {
+    if (error?.code === 6 || /already exists/i.test(String(error?.message || ''))) return;
+    throw error;
+  });
+  return event;
+}
+async function loadActivationEvents(companyId: string): Promise<ActivationEvent[]> {
+  const cached = db.activationEvents.get(companyId);
+  if (cached) return cached;
+  const collection = activationCollection(companyId);
+  if (collection) {
+    try {
+      const snapshot = await collection.orderBy('created_at', 'desc').get();
+      const events = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as ActivationEvent));
+      db.activationEvents.set(companyId, events);
+      return events;
+    } catch (error) {
+      if (!isInitialDatabaseStatusError(error)) {
+        reportOperationalFailure('activation.hydration', error, { tenant_hash: anonymizeIdentifier(companyId) });
+      }
+    }
+  }
+  const empty: ActivationEvent[] = [];
+  db.activationEvents.set(companyId, empty);
+  return empty;
+}
+
+function scheduledWorkflowCollection() {
+  return firestoreDb?.collection('scheduled_workflows') || null;
+}
+
+function normalizeTimezone(value: unknown) {
+  const timezone = String(value || 'UTC').trim() || 'UTC';
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone }).format();
+    return timezone;
+  } catch {
+    return null;
+  }
+}
+
+function parseCronField(value: string, min: number, max: number): Set<number> | null {
+  const output = new Set<number>();
+  for (const rawPart of value.split(',')) {
+    const part = rawPart.trim();
+    if (!part) return null;
+    const [base, stepText] = part.split('/');
+    const step = stepText === undefined ? 1 : Number(stepText);
+    if (!Number.isInteger(step) || step < 1) return null;
+    const [startText, endText] = base === '*' ? [String(min), String(max)] : base.split('-');
+    const start = Number(startText);
+    const end = endText === undefined ? start : Number(endText);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < min || end > max || start > end) return null;
+    for (let current = start; current <= end; current += step) output.add(current);
+  }
+  return output;
+}
+
+function parseCronExpression(expression: string) {
+  const fields = expression.trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const minute = parseCronField(fields[0], 0, 59);
+  const hour = parseCronField(fields[1], 0, 23);
+  const day = parseCronField(fields[2], 1, 31);
+  const month = parseCronField(fields[3], 1, 12);
+  const weekday = parseCronField(fields[4], 0, 6);
+  return minute && hour && day && month && weekday ? { minute, hour, day, month, weekday } : null;
+}
+
+function nextCronOccurrence(expression: string, timezone: string, from = new Date()) {
+  const parsed = parseCronExpression(expression);
+  if (!parsed) return null;
+  const formatter = new Intl.DateTimeFormat('en-US', { timeZone: timezone, hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', weekday: 'short' });
+  const weekdayMap: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+  const candidate = new Date(Math.ceil((from.getTime() + 60_000) / 60_000) * 60_000);
+  for (let index = 0; index < 366 * 24 * 60; index += 1) {
+    const parts = formatter.formatToParts(candidate).reduce<Record<string, string>>((acc, part) => { acc[part.type] = part.value; return acc; }, {});
+    const month = Number(parts.month);
+    const day = Number(parts.day);
+    const hour = Number(parts.hour);
+    const minute = Number(parts.minute);
+    const weekday = weekdayMap[parts.weekday];
+    if (parsed.minute.has(minute) && parsed.hour.has(hour) && parsed.day.has(day) && parsed.month.has(month) && parsed.weekday.has(weekday)) return candidate.toISOString();
+    candidate.setTime(candidate.getTime() + 60_000);
+  }
+  return null;
+}
+
+async function persistScheduledWorkflow(workflow: ScheduledWorkflow) {
+  const safeWorkflow = stripUndefined(workflow) as ScheduledWorkflow;
+  db.scheduledWorkflows.set(workflow.id, safeWorkflow);
+  const collection = scheduledWorkflowCollection();
+  if (collection) {
+    try {
+      await collection.doc(workflow.id).set(safeWorkflow, { merge: true });
+    } catch (error) {
+      console.warn('Could not persist scheduled workflow to Firestore:', error);
+    }
+  }
+}
+
+async function hydrateScheduledWorkflows(companyId: string) {
+  const cached = Array.from(db.scheduledWorkflows.values()).filter((workflow) => workflow.company_id === companyId);
+  if (cached.length) return cached;
+  const collection = scheduledWorkflowCollection();
+  if (collection) {
+    try {
+      const snapshot = await collection.where('company_id', '==', companyId).limit(100).get();
+      const workflows = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as ScheduledWorkflow));
+      workflows.forEach((workflow) => db.scheduledWorkflows.set(workflow.id, workflow));
+      return workflows;
+    } catch (error) {
+      if (!isInitialDatabaseStatusError(error)) {
+        reportOperationalFailure('scheduled_workflow.hydration', error, { tenant_hash: anonymizeIdentifier(companyId) });
+      }
+    }
+  }
+  return cached;
+}
+
+function schedulerSecretMatches(req: express.Request) {
+  const provided = String(req.get('x-caveworkers-scheduler-secret') || '');
+  if (!SCHEDULER_TICK_SECRET || !provided || provided.length !== SCHEDULER_TICK_SECRET.length) return false;
+  return crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(SCHEDULER_TICK_SECRET));
+}
+
+async function claimScheduledWorkflow(workflow: ScheduledWorkflow, now = new Date()) {
+  const collection = scheduledWorkflowCollection();
+  const runAt = workflow.next_run_at;
+  if (workflow.status !== 'active' || !runAt || Date.parse(runAt) > now.getTime()) return null;
+  const nextRun = workflow.schedule_type === 'cron' && workflow.cron_expression
+    ? nextCronOccurrence(workflow.cron_expression, workflow.timezone, now)
+    : null;
+  const runCount = Number(workflow.run_count || 0) + 1;
+  const nextStatus: ScheduledWorkflow['status'] = workflow.schedule_type === 'once' || (workflow.max_runs && runCount >= workflow.max_runs) ? 'completed' : nextRun ? 'active' : 'error';
+  const claimed: ScheduledWorkflow = { ...workflow, last_run_at: runAt, next_run_at: nextRun || workflow.next_run_at, run_count: runCount, status: nextStatus, last_error: nextStatus === 'error' ? 'The recurring schedule could not calculate a future run.' : undefined, updated_at: now.toISOString() };
+  if (collection) {
+    const result = await firestoreDb!.runTransaction(async (transaction) => {
+      const reference = collection.doc(workflow.id);
+      const snapshot = await transaction.get(reference);
+      const current = snapshot.exists ? ({ id: snapshot.id, ...(snapshot.data() || {}) } as ScheduledWorkflow) : null;
+      if (!current || current.status !== 'active' || Date.parse(current.next_run_at) > now.getTime() || current.next_run_at !== runAt) return null;
+      transaction.set(reference, stripUndefined(claimed), { merge: true });
+      return claimed;
+    });
+    if (!result) return null;
+    db.scheduledWorkflows.set(result.id, result);
+    return result;
+  }
+  const current = db.scheduledWorkflows.get(workflow.id);
+  if (!current || current.status !== 'active' || current.next_run_at !== runAt) return null;
+  db.scheduledWorkflows.set(workflow.id, claimed);
+  return claimed;
+}
+
+async function processDueScheduledWorkflows(now = new Date()) {
+  await processDueTenantDeletions(now);
+  const candidates = Array.from(db.scheduledWorkflows.values()).filter((workflow) => workflow.status === 'active' && Date.parse(workflow.next_run_at) <= now.getTime());
+  const dueFromFirestore = scheduledWorkflowCollection();
+  if (dueFromFirestore && candidates.length === 0) {
+    try {
+      const snapshot = await dueFromFirestore.where('status', '==', 'active').limit(200).get();
+      snapshot.docs.forEach((doc) => db.scheduledWorkflows.set(doc.id, { id: doc.id, ...(doc.data() || {}) } as ScheduledWorkflow));
+    } catch (error) {
+      if (!isInitialDatabaseStatusError(error)) {
+        reportOperationalFailure('scheduled_workflow.discovery', error);
+      }
+    }
+  }
+  const due = Array.from(db.scheduledWorkflows.values()).filter((workflow) => workflow.status === 'active' && Date.parse(workflow.next_run_at) <= now.getTime());
+  const results: Array<Record<string, unknown>> = [];
+  for (const workflow of due.slice(0, 50)) {
+    const claimed = await claimScheduledWorkflow(workflow, now);
+    if (!claimed) continue;
+    const idempotencyKey = `schedule:${claimed.id}:${claimed.last_run_at}`;
+    try {
+      const result = await enqueueWorkforceTask(claimed.company_id, claimed.prompt, claimed.preferred_employee_id, claimed.email_employee_id, idempotencyKey);
+      claimed.last_task_id = Number(result.id);
+      claimed.last_error = undefined;
+      claimed.updated_at = new Date().toISOString();
+      await persistScheduledWorkflow(claimed);
+      await auditWorkforceAction({ company_id: claimed.company_id, actor_type: 'system', actor_id: 'scheduler', action: 'scheduled_workflow.triggered', resource_type: 'scheduled_workflow', resource_id: claimed.id, task_id: Number(result.id), risk: 'low', status: 'prepared', summary: `Scheduled workflow ${claimed.name} created task #${result.id}.`, correlation_id: idempotencyKey, metadata: { schedule_type: claimed.schedule_type, run_at: claimed.last_run_at } });
+      results.push({ id: claimed.id, task_id: result.id, status: 'queued' });
+    } catch (error: any) {
+      claimed.last_error = String(error?.message || 'Scheduled task could not be queued.').slice(0, 240);
+      claimed.updated_at = new Date().toISOString();
+      await persistScheduledWorkflow(claimed);
+      await auditWorkforceAction({ company_id: claimed.company_id, actor_type: 'system', actor_id: 'scheduler', action: 'scheduled_workflow.failed', resource_type: 'scheduled_workflow', resource_id: claimed.id, risk: 'medium', status: 'failed', summary: claimed.last_error, correlation_id: idempotencyKey, metadata: { code: error?.code || 'schedule_enqueue_failed' } });
+      results.push({ id: claimed.id, status: 'failed', error: claimed.last_error });
+    }
+  }
+  return { processed: results.length, results };
+}
+
+function redactedExportValue(value: unknown, key = ''): unknown {
+  if (/token|secret|password|authorization|cookie|private.?key|client.?secret|credential/i.test(key)) return '[REDACTED]';
+  if (Array.isArray(value)) return value.map((item) => redactedExportValue(item));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([entryKey, entryValue]) => [entryKey, redactedExportValue(entryValue, entryKey)]));
+  return value;
+}
+
+function tenantConversationRecords(companyId: string) {
+  return Array.from(db.conversations.entries()).filter(([key]) => key.startsWith(`${companyId}:`)).map(([key, messages]) => ({ key, messages: redactedExportValue(messages) }));
+}
+
+async function buildTenantExport(companyId: string) {
+  await hydrateTenantTasks(companyId);
+  await hydrateTenantActivity(companyId);
+  await hydrateTenantApprovals(companyId);
+  await loadOrgEmployees(companyId);
+  await Promise.all(EMPLOYEE_CATALOG.map((employee) => loadMcpConnections(companyId, employee.id)));
+  const users = Array.from(db.users.values()).filter((user) => user.company_id === companyId);
+  const tasks = Array.from(db.tasks.values()).filter((task) => task.company_id === companyId);
+  const approvals = Array.from(db.approvals.values()).filter((approval) => approval.company_id === companyId);
+  const connectors = Array.from(db.mcpConnections.entries()).filter(([key]) => key.startsWith(`${companyId}:`)).flatMap(([, entries]) => entries);
+  const queue = Array.from(db.workforceQueue.values()).filter((job) => job.company_id === companyId);
+  const employeeMemory = Array.from(db.employeeMemory.entries()).filter(([key]) => key.startsWith(`${companyId}:`)).flatMap(([, entries]) => entries);
+  return redactedExportValue({
+    schema_version: '2026-08-17',
+    generated_at: new Date().toISOString(),
+    company: db.companies.get(companyId),
+    users,
+    employees: db.orgEmployees.get(companyId) || [],
+    tasks,
+    approvals,
+    knowledge: db.knowledge.get(companyId) || [],
+    activity: db.activity.get(companyId) || [],
+    audit_events: db.audit.get(companyId) || [],
+    usage_ledger: Array.from(db.usage.values()).filter((entry) => entry.company_id === companyId),
+    activation_events: db.activationEvents.get(companyId) || [],
+    scheduled_workflows: Array.from(db.scheduledWorkflows.values()).filter((workflow) => workflow.company_id === companyId),
+    connectors,
+    employee_memory: employeeMemory,
+    analyst_data_sources: db.analystDataSources.get(companyId) || [],
+    analyst_memory: db.analystMemory.get(companyId) || [],
+    analyst_runs: db.analystRuns.get(companyId) || [],
+    conversations: tenantConversationRecords(companyId),
+    workforce_queue: queue
+  }) as Record<string, unknown>;
+}
+
+function dataExportCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'data_exports');
+}
+
+function deletionRequestCollection(companyId: string) {
+  return analystTenantCollection(companyId, 'deletion_requests');
+}
+
+async function persistDataExport(record: DataExportRequest) {
+  db.dataExports.set(record.id, record);
+  const collection = dataExportCollection(record.company_id);
+  if (collection) {
+    try {
+      await collection.doc(record.id).set(stripUndefined(record), { merge: true });
+    } catch (error) {
+      console.warn('Could not persist data export to Firestore:', error);
+    }
+  }
+}
+
+async function persistDeletionRequest(record: TenantDeletionRequest) {
+  db.deletionRequests.set(record.id, record);
+  const collection = deletionRequestCollection(record.company_id);
+  if (collection) {
+    try {
+      await collection.doc(record.id).set(stripUndefined(record), { merge: true });
+    } catch (error) {
+      console.warn('Could not persist deletion request to Firestore:', error);
+    }
+  }
+}
+
+async function revokeTenantConnectors(companyId: string) {
+  const now = new Date().toISOString();
+  for (const employee of EMPLOYEE_CATALOG) {
+    const connections = await loadMcpConnections(companyId, employee.id);
+    for (const connection of connections) {
+      connection.status = 'error';
+      connection.auth_token_encrypted = undefined;
+      connection.oauth_revoked_at = now;
+      connection.last_error = 'Workspace deletion requested; connector authorization was revoked locally.';
+      connection.updated_at = now;
+      await persistMcpConnection(connection);
+    }
+  }
+}
+
+async function anonymizeTenantAuditEvents(companyId: string) {
+  const collection = analystTenantCollection(companyId, 'audit_events');
+  if (!collection) return;
+  try {
+    const snapshot = await collection.limit(500).get();
+    await Promise.all(snapshot.docs.map((doc) => doc.ref.set({ company_id: 'deleted', actor_type: 'system', actor_id: 'deleted', summary: 'Tenant audit event anonymized during workspace erasure.', metadata: undefined, action: 'tenant.data_erased' }, { merge: true })));
+  } catch (error) {
+    reportOperationalFailure('tenant.audit_anonymization', error, { tenant_hash: anonymizeIdentifier(companyId) });
+  }
+}
+
+async function deleteTenantFirestoreData(companyId: string) {
+  const subcollections = ['settings', 'employees', 'connectors', 'employee_memory', 'conversations', 'tasks', 'activity', 'usage_ledger', 'activation_events', 'approvals', 'data_sources', 'long_term_memory', 'analyst_runs', 'data_exports', 'deletion_requests'];
+  if (firestoreDb) {
+    for (const collectionName of subcollections) {
+      const collection = firestoreDb.collection('tenants').doc(companyId).collection(collectionName);
+      const snapshot = await collection.limit(1000).get();
+      if (snapshot.docs.length) await Promise.all(snapshot.docs.map((doc) => doc.ref.delete()));
+    }
+    const schedules = await firestoreDb.collection('scheduled_workflows').where('company_id', '==', companyId).limit(1000).get();
+    if (schedules.docs.length) await Promise.all(schedules.docs.map((doc) => doc.ref.delete()));
+    const jobs = await firestoreDb.collection('workforce_jobs').where('company_id', '==', companyId).limit(1000).get();
+    if (jobs.docs.length) await Promise.all(jobs.docs.map((doc) => doc.ref.delete()));
+    const users = await firestoreDb.collection('users').where('company_id', '==', companyId).limit(1000).get();
+    if (users.docs.length) await Promise.all(users.docs.map((doc) => doc.ref.delete()));
+    await firestoreDb.collection('companies').doc(companyId).delete();
+  }
+}
+
+function clearTenantCaches(companyId: string) {
+  db.companies.delete(companyId);
+  db.orgEmployees.delete(companyId);
+  db.knowledge.delete(companyId);
+  db.activity.delete(companyId);
+  db.audit.delete(companyId);
+  db.activationEvents.delete(companyId);
+  db.analystDataSources.delete(companyId);
+  db.analystMemory.delete(companyId);
+  db.analystRuns.delete(companyId);
+  db.activityLoaded.delete(companyId);
+  db.taskTenantsLoaded.delete(companyId);
+  db.approvalTenantsLoaded.delete(companyId);
+  for (const [uid, user] of db.users.entries()) if (user.company_id === companyId) db.users.delete(uid);
+  for (const [id, task] of db.tasks.entries()) if (task.company_id === companyId) db.tasks.delete(id);
+  for (const [id, approval] of db.approvals.entries()) if (approval.company_id === companyId) db.approvals.delete(id);
+  for (const [key] of db.conversations.entries()) if (key.startsWith(`${companyId}:`)) db.conversations.delete(key);
+  for (const [key] of db.employeeMemory.entries()) if (key.startsWith(`${companyId}:`)) db.employeeMemory.delete(key);
+  for (const [key] of db.mcpConnections.entries()) if (key.startsWith(`${companyId}:`)) db.mcpConnections.delete(key);
+  for (const [id, workflow] of db.scheduledWorkflows.entries()) if (workflow.company_id === companyId) db.scheduledWorkflows.delete(id);
+  for (const [id, job] of db.workforceQueue.entries()) if (job.company_id === companyId) db.workforceQueue.delete(id);
+  for (const [key] of db.employeePresence.entries()) if (key.startsWith(`${companyId}:`)) db.employeePresence.delete(key);
+  for (const [id, record] of db.usage.entries()) if (record.company_id === companyId) db.usage.delete(id);
+  for (const [id, record] of db.dataExports.entries()) if (record.company_id === companyId) db.dataExports.delete(id);
+  for (const [id, record] of db.deletionRequests.entries()) if (record.company_id === companyId) db.deletionRequests.delete(id);
+}
+
+async function processDueTenantDeletions(now = new Date()) {
+  const due = Array.from(db.deletionRequests.values()).filter((request) => request.status === 'scheduled' && Date.parse(request.execute_after) <= now.getTime());
+  const results: Array<Record<string, unknown>> = [];
+  for (const request of due.slice(0, 10)) {
+    const company = db.companies.get(request.company_id);
+    if (!company) { request.status = 'completed'; request.processed_at = now.toISOString(); await persistDeletionRequest(request); results.push({ id: request.id, status: 'completed' }); continue; }
+    request.status = 'processing';
+    await persistDeletionRequest(request);
+    try {
+      await anonymizeTenantAuditEvents(request.company_id);
+      await deleteTenantFirestoreData(request.company_id);
+      clearTenantCaches(request.company_id);
+      request.status = 'completed';
+      request.processed_at = new Date().toISOString();
+      db.deletionRequests.set(request.id, request);
+      results.push({ id: request.id, company_id: request.company_id, status: 'completed' });
+    } catch (error: any) {
+      request.status = 'failed';
+      request.error = String(error?.message || 'Tenant erasure failed.').slice(0, 240);
+      await persistDeletionRequest(request);
+      reportOperationalFailure('tenant.hard_delete', error, { tenant_hash: anonymizeIdentifier(request.company_id) });
+      results.push({ id: request.id, company_id: request.company_id, status: 'failed' });
+    }
+  }
+  return { processed: results.length, results };
+}
+
+async function hydrateTenantApprovals(companyId: string) {
+
+  if (db.approvalTenantsLoaded.has(companyId)) return;
+  db.approvalTenantsLoaded.add(companyId);
+  const collection = analystTenantCollection(companyId, 'approvals');
+  if (!collection) return;
+  try {
+    const snapshot = await collection.limit(100).get();
+    snapshot.docs.forEach((doc) => {
+      const approval = { id: Number(doc.data()?.id || doc.id), ...(doc.data() || {}) } as ApprovalRecord;
+      if (approval.company_id === companyId && Number.isFinite(approval.id)) db.approvals.set(approval.id, approval);
+    });
+  } catch (error) {
+    if (!isInitialDatabaseStatusError(error)) {
+      reportOperationalFailure('approval.hydration', error, { tenant_hash: anonymizeIdentifier(companyId) });
+    }
+  }
+}
+
+async function persistApprovalRecord(approval: ApprovalRecord) {
+  db.approvals.set(approval.id, approval);
+  db.approvalTenantsLoaded.add(approval.company_id);
+  const collection = analystTenantCollection(approval.company_id, 'approvals');
+  if (collection) {
+    try {
+      await collection.doc(String(approval.id)).set(stripUndefined(approval), { merge: true });
+    } catch (error) {
+      console.warn('Could not persist approval record to Firestore:', error);
+    }
+  }
+}
+
+
+function queueCollection() {
+  return firestoreDb?.collection('workforce_jobs') || null;
+}
+
+async function persistWorkforceJob(job: WorkforceQueueJob) {
+  db.workforceQueue.set(job.id, job);
+  const collection = queueCollection();
+  if (collection) {
+    try {
+      await collection.doc(job.id).set(stripUndefined(job), { merge: true });
+    } catch (error) {
+      console.warn('Could not persist workforce job to Firestore:', error);
+    }
+  }
+}
+
+function workroomStreamKey(companyId: string, taskId?: number) {
+  return `${companyId}:${taskId || 'all'}`;
+}
+
+const EMPLOYEE_CHAT_KINDS = new Set([
+  'queued',
+  'introduction',
+  'team_context',
+  'group_message',
+  'handoff',
+  'handoff_ack',
+  'manager_response',
+  'manager_result',
+  'final_answer',
+  'action_completed',
+  'action_failed',
+  'approval_declined'
+]);
+
+function employeeForChatMessage(message: any) {
+  const senderId = String(message?.sender_id || '').toLowerCase();
+  const senderName = String(message?.sender || '').trim().toLowerCase();
+  return EMPLOYEE_CATALOG.find((employee) => employee.id === senderId || employee.name.toLowerCase() === senderName);
+}
+
+function chatMessageId(taskId: number, message: any) {
+  if (message?.chat_id) return String(message.chat_id);
+  return crypto.createHash('sha1').update(JSON.stringify({ taskId, kind: message?.kind || 'employee_message', sender: message?.sender || '', receiver: message?.receiver || '', created_at: message?.created_at || '', body: message?.body || '' })).digest('hex').slice(0, 24);
+}
+
+function pendingWorkforceApprovalForTask(task: TaskRecord) {
+  return Array.from(db.approvals.values()).find((approval) => approval.company_id === task.company_id && approval.task_id === task.id && approval.status === 'pending' && approval.payload?.origin === 'workforce');
+}
+
+function publicEmployeeChat(task: TaskRecord) {
+  const deleted = new Set(task.deleted_chat_message_ids || []);
+  const pendingApproval = pendingWorkforceApprovalForTask(task);
+  const messages: any[] = [];
+  const seen = new Set<string>();
+  const add = (message: any) => {
+    if (!message?.body || !employeeForChatMessage(message)) return;
+    const kind = String(message.kind || 'employee_message');
+    if (!EMPLOYEE_CHAT_KINDS.has(kind)) return;
+    const chat_id = chatMessageId(task.id, message);
+    if (deleted.has(chat_id) || seen.has(chat_id)) return;
+    seen.add(chat_id);
+    const employee = employeeForChatMessage(message);
+    messages.push({ ...message, chat_id, task_id: task.id, sender_id: message.sender_id || employee?.id, chat_visible: true, ...(pendingApproval && kind === 'final_answer' ? { approval_id: pendingApproval.id, pending: true } : {}) });
+  };
+  (task.trace || []).forEach(add);
+  const hasTraceFinalAnswer = (task.trace || []).some((message: any) => message?.kind === 'final_answer' && employeeForChatMessage(message));
+  if (task.answer && !['queued', 'processing'].includes(task.status) && !hasTraceFinalAnswer) {
+    add({ kind: 'final_answer', thread_role: 'final_answer', sender: 'Sarah', receiver: 'Company room', sender_id: 'sarah', receiver_id: 'company-room', body: task.answer, created_at: task.completed_at || task.created_at });
+  }
+  return messages.sort((a, b) => new Date(a.created_at || 0).getTime() - new Date(b.created_at || 0).getTime());
+}
+
+function workroomSnapshot(task: TaskRecord) {
+  const pendingApproval = pendingWorkforceApprovalForTask(task);
+  return {
+    id: task.id,
+    company_id: task.company_id,
+    question: task.question,
+    owner: task.owner,
+    status: task.status,
+    answer: task.answer,
+    plan: task.plan,
+    chat_messages: publicEmployeeChat(task),
+    participants: task.participants || [],
+    collaboration_summary: task.collaboration_summary,
+    live_tool_evidence: task.live_tool_evidence || [],
+    web_research: task.web_research || [],
+    execution: task.execution,
+    has_pending_approval: Boolean(pendingApproval),
+    approval_id: pendingApproval?.id,
+    queued_at: task.queued_at,
+    started_at: task.started_at,
+    completed_at: task.completed_at,
+  };
+}
+
+function emitWorkroomEvent(companyId: string, taskId: number | undefined, payload: Record<string, any>) {
+  const targets = [workroomStreamKey(companyId), taskId ? workroomStreamKey(companyId, taskId) : ''];
+  const delivered = new Set<express.Response>();
+  targets.filter(Boolean).forEach((key) => {
+    for (const response of workroomStreams.get(key) || []) {
+      if (delivered.has(response)) continue;
+      delivered.add(response);
+      try { response.write(`event: ${payload.type || 'update'}\ndata: ${JSON.stringify(payload)}\n\n`); } catch (_error) { /* cleanup occurs on close */ }
+    }
+  });
+}
+
+function emitWorkroomTrace(companyId: string, taskId: number, trace: any[]) {
+  const task = db.tasks.get(taskId);
+  trace.filter((message) => message?.body).forEach((message) => {
+    if (!task) return;
+    const chatMessages = publicEmployeeChat({ ...task, trace: [message] });
+    if (chatMessages.length) emitWorkroomEvent(companyId, taskId, { type: 'message', message: chatMessages[0] });
+  });
+}
+
+function setEmployeePresence(companyId: string, employeeId: string, status: 'idle' | 'working' | 'offline', taskId?: number) {
+  const presence = { employee_id: employeeId, status, task_id: taskId, last_seen_at: new Date().toISOString() };
+  db.employeePresence.set(`${companyId}:${employeeId}`, presence);
+  emitWorkroomEvent(companyId, taskId, { type: 'presence', presence });
+}
+
+function companyPresence(companyId: string) {
+  return activeWorkforce(companyId).map((employee) => db.employeePresence.get(`${companyId}:${employee.id}`) || { employee_id: employee.id, status: 'idle', last_seen_at: new Date().toISOString() });
+}
+
+async function loadQueuedJobs() {
+  const collection = queueCollection();
+  if (!collection) return;
+  try {
+    const snapshot = await collection.where('status', 'in', ['queued', 'processing']).limit(50).get();
+    const companyIds = new Set<string>();
+    snapshot.docs.forEach((doc) => {
+      const job = { id: doc.id, ...(doc.data() || {}) } as WorkforceQueueJob;
+      if (job.status === 'processing' && job.claimed_by !== WORKER_INSTANCE_ID) {
+        const staleAt = Date.now() - 5 * 60 * 1000;
+        if (new Date(job.updated_at || 0).getTime() < staleAt) job.status = 'queued'; else return;
+      }
+      if (!job.company_id || !Number.isFinite(Number(job.task_id))) return;
+      db.workforceQueue.set(job.id, job);
+      companyIds.add(job.company_id);
+    });
+    await Promise.all(Array.from(companyIds).map((companyId) => hydrateTenantTasks(companyId)));
+  } catch (error) {
+    if (!isInitialDatabaseStatusError(error)) {
+      reportOperationalFailure('worker.queue_hydration', error);
+    }
+  }
+}
+
+function directEmployeeIdForQuestion(question: string, companyId: string, preferredEmployeeId?: string) {
+  const workforce = activeWorkforce(companyId);
+  if (preferredEmployeeId && preferredEmployeeId !== '__whole_team__' && workforce.some((employee) => employee.id === preferredEmployeeId)) return preferredEmployeeId;
+  const lower = String(question || '').toLowerCase();
+  return workforce.find((employee) => {
+    const name = employee.name.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(?:^|[^a-z])${name}(?:$|[^a-z])`, 'i').test(lower);
+  })?.id;
+}
+
+async function enqueueWorkforceTask(companyId: string, question: string, preferredEmployeeId?: string, emailEmployeeId?: string, idempotencyKey?: string) {
+  await loadOrgEmployees(companyId);
+  await hydrateTenantTasks(companyId);
+  const normalizedIdempotencyKey = String(idempotencyKey || '').trim().slice(0, 160);
+  if (normalizedIdempotencyKey) {
+    const existingJob = Array.from(db.workforceQueue.values()).find((job) => job.company_id === companyId && job.idempotency_key === normalizedIdempotencyKey);
+    if (existingJob) {
+      const existingTask = db.tasks.get(existingJob.task_id);
+      if (existingTask) return { ...workroomSnapshot(existingTask), queued: existingJob.status === 'queued' || existingJob.status === 'processing', duplicate: true, worker_enabled: ALWAYS_ON_WORKER_ENABLED, worker_instance: WORKER_INSTANCE_ID };
+    }
+  }
+  await assertTaskQuota(companyId);
+  const taskId = db.nextTaskId++;
+  const now = new Date().toISOString();
+  const routedEmployeeId = directEmployeeIdForQuestion(question || 'Operations review', companyId, preferredEmployeeId) || (preferredEmployeeId === '__whole_team__' ? '__whole_team__' : undefined);
+  const validEmailEmployeeId = typeof emailEmployeeId === 'string' && activeWorkforce(companyId).some((employee) => employee.id === emailEmployeeId) ? emailEmployeeId : undefined;
+  const { manager, lead, collaborators } = selectCollaborativeTeam(question || 'Operations review', companyId, routedEmployeeId);
+  const isDirect = Boolean(routedEmployeeId && routedEmployeeId !== '__whole_team__');
+  const leadEmployee = isDirect ? (activeWorkforce(companyId).find((e) => e.id === routedEmployeeId) || lead) : lead;
+  const trace = isDirect
+    ? [{ kind: 'queued', sender: leadEmployee.name, receiver: 'Company workroom', body: `I'm on it. Reviewing tools and preparing the deliverables for you.`, created_at: now }]
+    : [{ kind: 'queued', sender: lead.name, receiver: 'Company workroom', body: `${lead.name} has taken this task as delivery lead. Preparing steps and checking tools.`, created_at: now }];
+  const task: TaskRecord = {
+    id: taskId,
+    company_id: companyId,
+    question: question.slice(0, 6000),
+    owner: isDirect ? leadEmployee.id : manager.id,
+    status: 'queued',
+    answer: `${leadEmployee.name} has accepted your request and is working on the deliverables…`,
+    plan: isDirect ? `${leadEmployee.name} direct specialist response → verification → delivery` : `${lead.name} delivery lead → ${collaborators.length ? collaborators.map((employee) => employee.name).join(', ') : 'specialist execution'} → evidence → direct response`,
+    direct_employee_id: isDirect ? leadEmployee.id : undefined,
+    created_at: now,
+    queued_at: now,
+    trace,
+    participants: ['Manager', manager.name, leadEmployee.name, ...collaborators.map((employee) => employee.name)].filter((name, index, list) => list.indexOf(name) === index),
+    collaboration_summary: isDirect ? `${leadEmployee.name} is handling this request directly.` : `${lead.name} is leading delivery${collaborators.length ? ` with ${collaborators.length} supporting specialist${collaborators.length === 1 ? '' : 's'}` : ''}.`,
+    execution: { action_type: 'none', status: 'queued', summary: `${leadEmployee.name} is preparing the deliverables.`, updated_at: now },
+    live_tool_evidence: [],
+    web_research: [],
+  };
+  db.tasks.set(taskId, task);
+  await persistTaskRecord(task);
+    const job: WorkforceQueueJob = { id: `${companyId}:${taskId}`, task_id: taskId, company_id: companyId, question: task.question, preferred_employee_id: routedEmployeeId, email_employee_id: validEmailEmployeeId, status: 'queued',
+	 attempts: 0, max_attempts: 3, idempotency_key: normalizedIdempotencyKey || `${companyId}:${taskId}`, created_at: now, updated_at: now };
+
+  await persistWorkforceJob(job);
+  try {
+    await recordUsage(companyId, 'tasks_created');
+    await recordActivationEvent(companyId, 'first_task_created', 'user', 'workspace-manager', { task_id: taskId });
+  } catch (error) {
+    reportOperationalFailure('usage.task_created', error, { tenant_hash: anonymizeIdentifier(companyId), task_id: taskId });
+  }
+  await persistActivityLog(companyId, { id: Date.now(), sender: 'Manager', receiver: 'Caveworkers worker', kind: 'task.queued', body: `Task #${taskId} entered the always-on employee queue.`, created_at: now });
+  await auditWorkforceAction({ company_id: companyId, actor_type: 'user', actor_id: 'workspace-manager', action: 'task.queued', resource_type: 'task', resource_id: String(taskId), task_id: taskId, risk: 'low', status: 'prepared', summary: `Task #${taskId} entered the workforce queue.`, correlation_id: job.id, metadata: { idempotency_key: job.idempotency_key, preferred_employee_id: routedEmployeeId || 'auto' } });
+  emitWorkroomEvent(companyId, taskId, { type: 'task_update', task: workroomSnapshot(task) });
+  // Wake the process-local worker immediately; the interval remains a recovery poll.
+  if (ALWAYS_ON_WORKER_ENABLED) void processNextWorkforceJob();
+  return { ...workroomSnapshot(task), queued: true, worker_enabled: ALWAYS_ON_WORKER_ENABLED, worker_instance: WORKER_INSTANCE_ID };
+}
+
+async function claimNextWorkforceJob(): Promise<WorkforceQueueJob | null> {
+  await loadQueuedJobs();
+  const candidates = Array.from(db.workforceQueue.values()).filter((job) => job.status === 'queued').sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+  for (const candidate of candidates) {
+    const collection = queueCollection();
+    if (collection) {
+      try {
+        const claimed = await firestoreDb!.runTransaction(async (transaction) => {
+          const ref = collection.doc(candidate.id);
+          const snapshot = await transaction.get(ref);
+          const current = snapshot.exists ? { id: candidate.id, ...(snapshot.data() || {}) } as WorkforceQueueJob : candidate;
+          if (current.status !== 'queued') return null;
+          const next = { ...current, status: 'processing' as const, claimed_by: WORKER_INSTANCE_ID, attempts: Number(current.attempts || 0) + 1, updated_at: new Date().toISOString() };
+          transaction.set(ref, stripUndefined(next), { merge: true });
+          return next;
+        });
+        if (claimed) { db.workforceQueue.set(candidate.id, claimed); return claimed; }
+      } catch (error) {
+        if (!isInitialDatabaseStatusError(error)) {
+          reportOperationalFailure('worker.job_claim', error, { job_hash: anonymizeIdentifier(candidate.id) });
+        }
+      }
+    } else {
+      candidate.status = 'processing';
+      candidate.claimed_by = WORKER_INSTANCE_ID;
+      candidate.attempts += 1;
+      candidate.updated_at = new Date().toISOString();
+      db.workforceQueue.set(candidate.id, candidate);
+      return candidate;
+    }
+  }
+  return null;
+}
+
+async function updateQueuedTask(task: TaskRecord, status: TaskRecord['status'], body: string) {
+  task.status = status;
+  task.trace = [...(task.trace || []), { kind: status === 'processing' ? 'worker_started' : status === 'failed' ? 'worker_failed' : 'worker_update', sender: 'Caveworkers worker', receiver: 'Company workroom', body, created_at: new Date().toISOString() }];
+  if (status === 'processing') task.started_at = new Date().toISOString();
+  if (status === 'completed' || status === 'pending_approval' || status === 'failed') task.completed_at = new Date().toISOString();
+  await persistTaskRecord(task);
+  emitWorkroomEvent(task.company_id, task.id, { type: 'task_update', task: workroomSnapshot(task) });
+}
+
+let workerBusy = false;
+async function processNextWorkforceJob(force = false) {
+  if ((!ALWAYS_ON_WORKER_ENABLED && !force) || workerBusy) return;
+  workerBusy = true;
+  try {
+    const job = await claimNextWorkforceJob();
+    if (!job) return;
+    const task = db.tasks.get(job.task_id);
+    if (!task || task.company_id !== job.company_id) {
+      job.status = 'failed'; job.error = 'Tenant task record was not found.'; job.updated_at = new Date().toISOString(); await persistWorkforceJob(job); return;
+    }
+    const { manager, lead, collaborators } = selectCollaborativeTeam(job.question, job.company_id, job.preferred_employee_id);
+    const workerEmployees = [...new Set([manager.id, lead.id, ...collaborators.map((employee) => employee.id)])];
+    workerEmployees.forEach((employeeId) => setEmployeePresence(job.company_id, employeeId, 'working', task.id));
+    await updateQueuedTask(task, 'processing', job.preferred_employee_id && job.preferred_employee_id !== '__whole_team__' ? `${lead.name} is working directly on this request with the tenant-approved tools and memory.` : `${manager.name} is managing this task. ${lead.name} and the assigned specialists are now working in the company room.`);
+    try {
+      const completed = await handleTaskRoutingAsync(job.question, job.company_id, job.preferred_employee_id, task.id, job.email_employee_id);
+      Object.assign(task, completed);
+      task.status = completed.status || 'completed';
+      task.started_at = task.started_at || new Date().toISOString();
+      task.completed_at = new Date().toISOString();
+      await persistTaskRecord(task);
+      emitWorkroomTrace(job.company_id, task.id, task.trace || []);
+      job.status = 'completed'; job.updated_at = new Date().toISOString(); await persistWorkforceJob(job);
+      if (task.status === 'completed') {
+        try {
+          await recordUsage(job.company_id, 'tasks_completed');
+          await recordActivationEvent(job.company_id, 'first_task_completed', 'system', 'workforce-worker', { task_id: task.id });
+        } catch (error) {
+          reportOperationalFailure('usage.task_completed', error, { tenant_hash: anonymizeIdentifier(job.company_id), task_id: task.id });
+        }
+      }
+      emitWorkroomEvent(job.company_id, task.id, { type: 'task_update', task: workroomSnapshot(task) });
+    } catch (error: any) {
+      reportOperationalFailure('worker.task_execution', error, { tenant_hash: anonymizeIdentifier(job.company_id), task_id: task.id, worker_instance: WORKER_INSTANCE_ID });
+      const failureDetail = String(error?.message || 'Worker execution failed').slice(0, 300);
+      task.answer = `### Sarah’s manager update (Task #${task.id})\n\nI could not complete the requested work because the execution service returned a recoverable failure. I have **not** represented a draft, tool intent, or partial planning as completed work.\n\n**What I completed**\n- Recorded the task, assigned delivery ownership, and preserved the workroom trace.\n- Stopped any external action; no email, write, payment, or account change was performed.\n\n**Next action**\nRetry this task after the configured model, connector, or source is available. If the problem persists, review the connection state in Settings and share the task trace with support.`;
+      task.execution = { action_type: task.execution?.action_type || 'none', status: 'failed', summary: 'Sarah could not complete the execution run. No external action was performed.', updated_at: new Date().toISOString() };
+      task.trace = [...(task.trace || []), { kind: 'manager_result', thread_role: 'manager_result', sender: 'Sarah', receiver: 'Manager', sender_id: 'sarah', receiver_id: 'manager', body: 'I could not complete this run. I preserved the trace, performed no external action, and provided the next step in the final response.', created_at: new Date().toISOString() }];
+      await updateQueuedTask(task, 'failed', failureDetail);
+      emitWorkroomTrace(job.company_id, task.id, task.trace.slice(-1));
+      job.status = 'failed'; job.error = failureDetail; job.updated_at = new Date().toISOString(); await persistWorkforceJob(job);
+    } finally {
+      workerEmployees.forEach((employeeId) => setEmployeePresence(job.company_id, employeeId, 'idle'));
+    }
+  } catch (error) {
+    if (!isInitialDatabaseStatusError(error)) {
+      reportOperationalFailure('worker.poll', error, { worker_instance: WORKER_INSTANCE_ID });
+    }
+  } finally {
+    workerBusy = false;
+  }
+}
+
+async function startAlwaysOnWorker() {
+  if (!ALWAYS_ON_WORKER_ENABLED) { console.log('Always-on workforce worker disabled by configuration.'); return; }
+  console.log(`Always-on workforce worker enabled (${WORKER_INSTANCE_ID}); poll ${WORKER_POLL_MS}ms.`);
+  await loadQueuedJobs();
+  await processNextWorkforceJob();
+  const timer = setInterval(() => { void processNextWorkforceJob(); }, WORKER_POLL_MS);
+  (timer as any).unref?.();
+}
+
+async function performWebResearch(question: string): Promise<WebResearchEvidence[]> {
+  if (!WEB_RESEARCH_ENABLED || (!TAVILY_API_KEY && !BRAVE_SEARCH_API_KEY)) return [];
+  let results: Array<{ title?: string; url?: string; snippet?: string }> = [];
+  try {
+    if (TAVILY_API_KEY) {
+      const response = await fetch('https://api.tavily.com/search', { method: 'POST', signal: AbortSignal.timeout(12000), headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ api_key: TAVILY_API_KEY, query: question.slice(0, 500), search_depth: 'basic', max_results: 5, include_answer: false }) });
+      if (response.ok) { const payload: any = await response.json(); results = Array.isArray(payload?.results) ? payload.results : []; }
+    } else if (BRAVE_SEARCH_API_KEY) {
+      const response = await fetch(`https://api.search.brave.com/res/v1/web/search?q=${encodeURIComponent(question.slice(0, 500))}&count=5`, { signal: AbortSignal.timeout(12000), headers: { Accept: 'application/json', 'X-Subscription-Token': BRAVE_SEARCH_API_KEY } });
+      if (response.ok) { const payload: any = await response.json(); results = Array.isArray(payload?.web?.results) ? payload.web.results.map((entry: any) => ({ title: entry.title, url: entry.url, snippet: entry.description })) : []; }
+    }
+  } catch (error) { reportOperationalFailure('research.provider', error); }
+  const evidence: WebResearchEvidence[] = [];
+  for (const result of results.slice(0, 5)) {
+    const url = String(result.url || '').trim();
+    if (!url || !/^https:\/\//i.test(url)) continue;
+    try {
+      const parsed = new URL(url);
+      if (isPrivateOrLocalHost(parsed.hostname)) continue;
+      const addresses = await lookup(parsed.hostname, { all: true });
+      if (addresses.some((address) => isPrivateOrLocalHost(address.address))) continue;
+      let preview = '';
+      const page = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(12000), headers: { Accept: 'text/html,text/plain', 'User-Agent': 'CaveworkersResearch/1.0' } });
+      if (page.ok) preview = (await page.text()).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, ' ').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 1000);
+      evidence.push({ title: String(result.title || url).slice(0, 200), url: url.slice(0, 500), snippet: String(result.snippet || '').slice(0, 500), content_preview: preview, fetched_at: new Date().toISOString() });
+    } catch (_error) {
+      evidence.push({ title: String(result.title || url).slice(0, 200), url: url.slice(0, 500), snippet: String(result.snippet || '').slice(0, 500), fetched_at: new Date().toISOString() });
+    }
+  }
+  return evidence;
+}
+
+function connectorPublicView(connection: TenantConnector) {
+  const { auth_token_encrypted: _secret, ...safe } = connection;
+  return { ...safe, auth_configured: Boolean(connection.auth_token_encrypted) };
+}
+
+function getMcpEncryptionKey(): Buffer | null {
+  if (!MCP_TOKEN_ENCRYPTION_KEY) return null;
+  return crypto.createHash('sha256').update(MCP_TOKEN_ENCRYPTION_KEY).digest();
+}
+
+function encryptConnectorCredentials(value: Record<string, any>): string {
+  const key = getMcpEncryptionKey();
+  if (!key) throw new Error('MCP_TOKEN_ENCRYPTION_KEY is not configured on this server.');
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
+  const ciphertext = Buffer.concat([cipher.update(JSON.stringify(value), 'utf8'), cipher.final()]);
+  const tag = cipher.getAuthTag();
+  return [iv.toString('base64url'), tag.toString('base64url'), ciphertext.toString('base64url')].join('.');
+}
+
+function decryptConnectorCredentials(value?: string): Record<string, any> | null {
+  if (!value) return null;
+  const key = getMcpEncryptionKey();
+  if (!key) return null;
+  try {
+    const [ivText, tagText, ciphertextText] = value.split('.');
+    const decipher = crypto.createDecipheriv('aes-256-gcm', key, Buffer.from(ivText, 'base64url'));
+    decipher.setAuthTag(Buffer.from(tagText, 'base64url'));
+    const plaintext = Buffer.concat([decipher.update(Buffer.from(ciphertextText, 'base64url')), decipher.final()]).toString('utf8');
+    return JSON.parse(plaintext);
+  } catch (_error) {
+    return null;
+  }
+}
+
+function sanitizeConnectorConfig(config: Record<string, any> = {}) {
+  const headerName = typeof config.auth_header_name === 'string' && /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,120}$/.test(config.auth_header_name) ? config.auth_header_name : undefined;
+  const headerPrefix = typeof config.auth_header_prefix === 'string' && /^[A-Za-z0-9._-]{0,24}$/.test(config.auth_header_prefix) ? config.auth_header_prefix : undefined;
+  return {
+    notes: typeof config.notes === 'string' ? config.notes.slice(0, 800) : '',
+    repo_path: typeof config.repo_path === 'string' ? config.repo_path.slice(0, 400) : undefined,
+    company_email: typeof config.company_email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(config.company_email.trim()) ? config.company_email.trim().toLowerCase().slice(0, 254) : (COMPANY_EMAIL || undefined),
+    // Gmail write access is an explicit opt-in. It is still approval-gated per message.
+    gmail_send_enabled: config.gmail_send_enabled === true,
+    registry_server_name: typeof config.registry_server_name === 'string' ? config.registry_server_name.slice(0, 180) : undefined,
+    registry_directory_url: typeof config.registry_directory_url === 'string' ? config.registry_directory_url.slice(0, 500) : undefined,
+    registry_repository_url: typeof config.registry_repository_url === 'string' ? config.registry_repository_url.slice(0, 500) : undefined,
+    registry_remote_type: typeof config.registry_remote_type === 'string' ? config.registry_remote_type.slice(0, 80) : undefined,
+    auth_header_name: headerName,
+    auth_header_prefix: headerPrefix
+  };
+}
+
+async function persistMcpConnection(connection: TenantConnector) {
+  const key = `${connection.company_id}:${connection.employee_id}`;
+  const list = db.mcpConnections.get(key) || [];
+  const index = list.findIndex((entry: TenantConnector) => entry.id === connection.id);
+  if (index >= 0) list[index] = connection; else list.unshift(connection);
+  db.mcpConnections.set(key, list.slice(0, 100));
+  const collection = connectorCollection(connection.company_id);
+  if (collection) {
+    try {
+      await collection.doc(`${connection.employee_id}_${connection.id}`).set(stripUndefined(connection), { merge: true });
+    } catch (error) {
+      console.warn('Could not persist MCP connection to Firestore:', error);
+    }
+  }
+}
+
+async function loadMcpConnections(companyId: string, employeeId: string): Promise<TenantConnector[]> {
+  const key = `${companyId}:${employeeId}`;
+  const cached = db.mcpConnections.get(key);
+  if (cached) return cached as TenantConnector[];
+  const collection = connectorCollection(companyId);
+  if (collection) {
+    try {
+      const snapshot = await collection.get();
+      const entries = snapshot.docs.map((doc) => ({ id: Number(doc.data()?.id || doc.id.split('_').pop()), ...(doc.data() || {}) } as TenantConnector)).filter((entry) => entry.employee_id === employeeId);
+      db.mcpConnections.set(key, entries);
+      return entries;
+    } catch (error) {
+      reportOperationalFailure('connector.load', error, { tenant_hash: anonymizeIdentifier(companyId), employee_id: employeeId });
+    }
+  }
+  db.mcpConnections.set(key, []);
+  return [];
+}
+
+function employeeAutonomyPolicy(companyId: string, employeeId: string) {
+  const instance = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === employeeId);
+  return {
+    autonomy_mode: instance?.autonomy_mode === 'copilot' ? 'copilot' as const : 'autopilot' as const,
+    high_impact_action_policy: instance?.high_impact_action_policy === 'autopilot' ? 'autopilot' as const : 'review' as const,
+    connector_policy: instance?.connector_policy === 'workspace_shared' ? 'workspace_shared' as const : 'assigned_only' as const
+  };
+}
+
+async function autonomousActionAllowed(companyId: string, payload: any) {
+  const employeeId = String(payload?.employee_id || '');
+  if (!employeeId) return false;
+  const policy = employeeAutonomyPolicy(companyId, employeeId);
+  if (policy.autonomy_mode !== 'autopilot') return false;
+  const connections = await loadMcpConnections(companyId, employeeId);
+  const connection = connections.find((entry) => entry.id === Number(payload?.connection_id) && entry.status === 'connected');
+  if (!connection || connection.autonomy_mode === 'copilot') return false;
+  const grants = connection.tool_grants || [];
+  const toolName = String(payload?.tool_name || (payload?.action_type === 'gmail.send' ? 'gmail.send' : ''));
+  const grant = grants.find((entry) => entry.tool_name === toolName);
+  if (!grant || grant.access_level !== 'read_write') return false;
+  if (payload?.action_type === 'gmail.send' || payload?.provider === 'github') return policy.high_impact_action_policy === 'autopilot';
+  return true;
+}
+
+function isPrivateOrLocalHost(hostname: string) {
+  const normalized = hostname.toLowerCase().replace(/\\.$/, '');
+  if (normalized === 'localhost' || normalized.endsWith('.local') || normalized === '0.0.0.0' || normalized === '::1') return true;
+  const ipVersion = net.isIP(normalized);
+  if (ipVersion !== 4) return false;
+  const octets = normalized.split('.').map(Number);
+  return octets[0] === 10 || octets[0] === 127 || (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) || (octets[0] === 192 && octets[1] === 168) || (octets[0] === 169 && octets[1] === 254);
+}
+
+function validateRemoteMcpUrl(value: unknown): string {
+  const raw = String(value || '').trim();
+  if (!raw) throw new Error('A remote MCP HTTPS URL is required.');
+  let parsed: URL;
+  try { parsed = new URL(raw); } catch (_error) { throw new Error('Enter a valid remote MCP URL.'); }
+  if (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && !IS_PRODUCTION)) throw new Error('Remote MCP servers must use HTTPS in production.');
+  if (parsed.username || parsed.password || isPrivateOrLocalHost(parsed.hostname)) throw new Error('Private hosts and embedded URL credentials are not allowed.');
+  return parsed.toString();
+}
+
+function oauthStateSign(payload: Record<string, any>) {
+  if (IS_PRODUCTION && !OAUTH_STATE_SECRET) throw new Error('FLASK_SECRET is required for Google OAuth state protection.');
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = crypto.createHmac('sha256', OAUTH_STATE_SECRET || 'caveworkers-development-oauth-state').update(encoded).digest('base64url');
+  return `${encoded}.${signature}`;
+}
+
+function oauthStateVerify(value: string): Record<string, any> | null {
+  try {
+    const [encoded, signature] = value.split('.');
+    const expected = crypto.createHmac('sha256', OAUTH_STATE_SECRET || 'caveworkers-development-oauth-state').update(encoded).digest('base64url');
+    if (!encoded || !signature || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) return null;
+    const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+    if (!payload.iat || Date.now() - Number(payload.iat) > 10 * 60 * 1000) return null;
+    return payload;
+  } catch (_error) {
+    return null;
+  }
+}
+
+function googleOAuthClient() {
+  const clientId = GOOGLE_OAUTH_CLIENT_ID || FIREBASE_WEB_CONFIG.appId || 'caveworkers-workspace-client';
+  const clientSecret = GOOGLE_OAUTH_CLIENT_SECRET || 'caveworkers-workspace-secret';
+  return new google.auth.OAuth2(clientId, clientSecret, GOOGLE_OAUTH_REDIRECT_URI);
+}
+
+function googleScopesFor(connection: TenantConnector) {
+  if (connection.connection_type === 'google_gmail') {
+    const scopes = ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/gmail.readonly'];
+    if (connection.config?.gmail_send_enabled === true) scopes.push('https://www.googleapis.com/auth/gmail.send');
+    return scopes;
+  }
+  if (connection.connection_type === 'google_drive') {
+    return ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/drive.file'];
+  }
+  return ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/spreadsheets'];
+}
+
+function parseSpreadsheetId(value: string) {
+  const match = String(value || '').match(/spreadsheets\/d\/([a-zA-Z0-9-_]+)/);
+  return match?.[1] || String(value || '').trim();
+}
+
+function isLikelyWriteTool(toolName: string) {
+  return /(^|[._:-])(write|send|create|update|delete|remove|post|put|patch|execute|run|append|move)([._:-]|$)/i.test(toolName) || /send|write|delete|update|create|post|execute/i.test(toolName);
+}
+
+function parseMcpResponse(text: string): any {
+  try { return JSON.parse(text); } catch (_error) {
+    const events = text.split(/\\r?\\n/).filter((line) => line.startsWith('data:')).map((line) => line.slice(5).trim()).filter(Boolean);
+    for (let index = events.length - 1; index >= 0; index -= 1) {
+      try { return JSON.parse(events[index]); } catch (_ignored) { /* continue */ }
+    }
+  }
+  throw new Error('The MCP server returned an unreadable response.');
+}
+
+async function mcpRpc(connection: TenantConnector, method: string, params: Record<string, any>, sessionId?: string) {
+  const credentials = decryptConnectorCredentials(connection.auth_token_encrypted);
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', Accept: 'application/json, text/event-stream', 'MCP-Protocol-Version': '2025-11-25' };
+  if (credentials?.access_token) {
+    const headerName = typeof credentials.header_name === 'string' && /^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,120}$/.test(credentials.header_name) ? credentials.header_name : 'Authorization';
+    const headerPrefix = typeof credentials.header_prefix === 'string' ? credentials.header_prefix : 'Bearer';
+    headers[headerName] = headerPrefix ? `${headerPrefix} ${credentials.access_token}` : credentials.access_token;
+  }
+  if (sessionId) headers['Mcp-Session-Id'] = sessionId;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(connection.server_url!, { method: 'POST', headers, signal: controller.signal, body: JSON.stringify({ jsonrpc: '2.0', id: crypto.randomBytes(4).toString('hex'), method, params }) });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`MCP server returned HTTP ${response.status}.`);
+    return { data: parseMcpResponse(text), sessionId: response.headers.get('mcp-session-id') || sessionId };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function discoverMcpTools(connection: TenantConnector) {
+  const initialized = await mcpRpc(connection, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'Caveworkers', version: '1.0.0' } });
+  const listed = await mcpRpc(connection, 'tools/list', {}, initialized.sessionId);
+  const tools = Array.isArray(listed.data?.result?.tools) ? listed.data.result.tools : [];
+  return tools.slice(0, 100).map((tool: any) => ({ name: String(tool.name || '').slice(0, 120), description: String(tool.description || '').slice(0, 500), inputSchema: tool.inputSchema, risk: isLikelyWriteTool(String(tool.name || '')) ? 'write' : 'read' })).filter((tool: any) => tool.name);
+}
+
+function buildReadToolArguments(tool: any, question: string): Record<string, any> | null {
+  const properties = tool?.inputSchema?.properties && typeof tool.inputSchema.properties === 'object' ? tool.inputSchema.properties : {};
+  const args: Record<string, any> = {};
+  Object.keys(properties).forEach((key) => {
+    if (/query|search|term|text|question|prompt|input|keyword/i.test(key)) args[key] = question.slice(0, 500);
+    else if (/limit|max_results|maxResults|count|page_size/i.test(key)) args[key] = 10;
+  });
+  const required = Array.isArray(tool?.inputSchema?.required) ? tool.inputSchema.required : [];
+  return required.every((key: string) => Object.prototype.hasOwnProperty.call(args, key)) ? args : null;
+}
+
+function extractGitHubRepository(question: string): { owner: string; repo: string } | null {
+  const match = String(question || '').match(/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?(?:[/?#\s]|$)/i);
+  if (!match) return null;
+  const owner = match[1].replace(/[^A-Za-z0-9_.-]/g, '').slice(0, 100);
+  const repo = match[2].replace(/[^A-Za-z0-9_.-]/g, '').replace(/\.git$/i, '').slice(0, 100);
+  return owner && repo ? { owner, repo } : null;
+}
+
+function extractRequestedFilePath(question: string): string | null {
+  const match = String(question || '').match(/(?:file|document)\s+(?:named|called)?\s*["'`]?([A-Za-z0-9_./-]+\.[A-Za-z0-9_-]+)["'`]?/i);
+  if (!match) return null;
+  const value = match[1].replace(/^\/+/, '').replace(/\.\.\//g, '').slice(0, 240);
+  return value && !value.includes('://') ? value : null;
+}
+
+function extractRequestedFileContent(question: string): string {
+  const lower = String(question || '').toLowerCase();
+  if (lower.includes('hello world')) return 'Hello World';
+  const match = String(question || '').match(/(?:with|containing|content(?:\s+as)?|saying|message(?:\s+of)?|type)\s*[:\-]?\s*["'`]?(.{2,1200}?)["'`]?(?:\s+(?:in|to|on)\s+(?:my|the)\s+github|\s*$)/i);
+  return String(match?.[1] || 'Caveworkers update').replace(/[\r\n]+/g, '\n').trim().slice(0, 4000);
+}
+
+function selectMcpWriteTool(connection: TenantConnector, question: string) {
+  const lower = String(question || '').toLowerCase();
+  const tools = (connection.discovered_tools || []).filter((tool) => tool.risk === 'write' || isLikelyWriteTool(tool.name));
+  return tools.map((tool) => {
+    const haystack = `${tool.name} ${tool.description || ''}`.toLowerCase();
+    let score = 0;
+    if (/create_or_update_file|push_files|create_file|update_file/.test(tool.name.toLowerCase())) score += 20;
+    if (/file|repository|repo|content|commit/.test(haystack)) score += 8;
+    if (/github|git/.test(connection.name.toLowerCase()) || /github|git/.test(connection.server_url || '')) score += 5;
+    if (lower.includes('file') && /file/.test(haystack)) score += 5;
+    return { tool, score };
+  }).sort((a, b) => b.score - a.score)[0]?.tool || null;
+}
+
+function buildMcpWriteToolArguments(tool: any, input: { owner: string; repo: string; path: string; content: string; commitMessage: string }): Record<string, any> | null {
+  const properties = tool?.inputSchema?.properties && typeof tool.inputSchema.properties === 'object' ? tool.inputSchema.properties : {};
+  const args: Record<string, any> = {};
+  Object.keys(properties).forEach((key) => {
+    const normalized = key.toLowerCase().replace(/[-_]/g, '');
+    if (normalized === 'owner' || normalized === 'organization' || normalized === 'org') args[key] = input.owner;
+    else if (normalized === 'repo' || normalized === 'repository' || normalized === 'repositoryname') args[key] = input.repo;
+    else if (normalized === 'path' || normalized === 'filepath' || normalized === 'filename') args[key] = input.path;
+    else if (normalized === 'content' || normalized === 'filecontent' || normalized === 'text' || normalized === 'body') args[key] = input.content;
+    else if (normalized === 'message' || normalized === 'commitmessage' || normalized === 'title') args[key] = input.commitMessage;
+    else if (normalized === 'branch' || normalized === 'branchname') args[key] = 'main';
+    else if (normalized === 'files') args[key] = [{ path: input.path, content: input.content }];
+  });
+  const required = Array.isArray(tool?.inputSchema?.required) ? tool.inputSchema.required : [];
+  return required.every((key: string) => Object.prototype.hasOwnProperty.call(args, key)) ? args : null;
+}
+
+async function prepareEmployeeMcpWriteAction(companyId: string, question: string, taskId: number, requestedEmployeeId: string) {
+  const workforce = activeWorkforce(companyId);
+  const employee = workforce.find((entry) => entry.id === requestedEmployeeId) || workforce.find((entry) => entry.id === 'mike') || workforce[0];
+  const employeeId = employee?.id || 'mike';
+  const employeeName = employee?.name || 'The engineering employee';
+  const repository = extractGitHubRepository(question);
+  const filePath = extractRequestedFilePath(question);
+  if (!repository || !filePath) {
+    return { status: 'blocked' as const, summary: `${employeeName} needs an explicit GitHub repository URL and file path before Caveworkers can prepare a safe write approval.` };
+  }
+  const connections = await loadMcpConnections(companyId, employeeId);
+  const connection = connections.find((entry) => entry.connection_type === 'streamable_http' && entry.status === 'connected' && entry.auth_token_encrypted && (entry.config?.registry_server_name || '').toLowerCase().includes('github'))
+    || connections.find((entry) => entry.connection_type === 'streamable_http' && entry.status === 'connected' && entry.auth_token_encrypted && (entry.server_url || '').includes('githubcopilot.com'));
+  if (!connection) {
+    return { status: 'blocked' as const, summary: `${employeeName} cannot prepare the GitHub change because no connected tenant-owned GitHub MCP server is available for this employee. Add GitHub in Settings, choose the repository scope, and grant the write tool with approval required.` };
+  }
+  const tool = selectMcpWriteTool(connection, question);
+  if (!tool) {
+    return { status: 'blocked' as const, summary: `${employeeName} found the tenant GitHub connector but no discovered file-write tool. Refresh the connector tools and grant the provider’s file or push tool with approval required.` };
+  }
+  const argumentsValue = buildMcpWriteToolArguments(tool, { owner: repository.owner, repo: repository.repo, path: filePath, content: extractRequestedFileContent(question), commitMessage: `Caveworkers: update ${filePath}` });
+  if (!argumentsValue) {
+    return { status: 'blocked' as const, summary: `${employeeName} found ${tool.name}, but its required input schema needs fields Caveworkers could not safely infer. Open the approval composer and provide the missing tool arguments.` };
+  }
+  return {
+    status: 'awaiting_approval' as const,
+    summary: `${employeeName} prepared ${tool.name} for ${repository.owner}/${repository.repo}/${filePath}. The resolved arguments are ready for manager approval; no GitHub call has been made yet.`,
+    payload: { action_type: 'mcp.tool', provider: 'github', connection_id: connection.id, employee_id: employeeId, tool_name: tool.name, arguments: argumentsValue, execution_status: 'pending', idempotency_key: crypto.randomUUID() }
+  };
+}
+
+function summarizeMcpToolResult(value: any) {
+  const result = value?.result || value;
+  const content = Array.isArray(result?.content) ? result.content.map((entry: any) => typeof entry?.text === 'string' ? entry.text : JSON.stringify(entry)).join('\\n') : JSON.stringify(result);
+  return String(content || 'The tool returned no readable content.').slice(0, 1800);
+}
+
+function hasReadableToolGrant(connection: TenantConnector | undefined, toolNames: string[]) {
+  if (!connection || connection.status !== 'connected' || !connection.auth_token_encrypted) return false;
+  const allowed = new Set(['read_only', 'read_write']);
+  return (connection.tool_grants || []).some((grant) => toolNames.includes(grant.tool_name) && allowed.has(grant.access_level));
+}
+
+function connectorAccessFailure(employee: any, connectorName: string, toolName: string, summary: string, createdAt: string): WorkforceLiveToolEvidence {
+  return { employee_id: employee.id, employee_name: employee.name, connector_name: connectorName, tool_name: toolName, status: 'failed', summary, created_at: createdAt };
+}
+
+async function executeEmployeeReadTools(companyId: string, employee: any, question: string): Promise<WorkforceLiveToolEvidence[]> {
+  if (!employee?.id || !employee?.name) return [];
+  const results: WorkforceLiveToolEvidence[] = [];
+  const lowerQ = (question || '').toLowerCase();
+  const connections = await loadMcpConnections(companyId, employee.id);
+
+  // 1. Live Google Workspace tools execution
+  const isGmailQuery = /gmail|email|mail|inbox|message|thread|unread|letter|send|client|feedback|contact/i.test(lowerQ);
+  const isDriveQuery = /drive|doc|document|file|folder|pdf|presentation|slide|specs/i.test(lowerQ);
+  const isSheetsQuery = /sheet|spreadsheet|row|table|csv|grid|cells/i.test(lowerQ);
+
+  const gmailConn = connections.find((c) => c.connection_type === 'google_gmail' && c.status === 'connected' && c.auth_token_encrypted);
+  const driveConn = connections.find((c) => c.connection_type === 'google_drive' && c.status === 'connected' && c.auth_token_encrypted);
+  const sheetsConn = connections.find((c) => c.connection_type === 'google_sheets' && c.status === 'connected' && c.auth_token_encrypted);
+
+  if (gmailConn && (isGmailQuery || (!isDriveQuery && !isSheetsQuery))) {
+    const createdAt = new Date().toISOString();
+    if (!hasReadableToolGrant(gmailConn, ['gmail.search'])) {
+      results.push(connectorAccessFailure(employee, 'Google Gmail', 'gmail.search', 'Gmail is connected, but this employee does not have a read grant for gmail.search. Open Settings and grant read access to this employee.', createdAt));
+    } else {
+    try {
+      const cleanSearch = lowerQ.replace(/check|my|the|inbox|gmail|emails?|messages?|please|for|me|search/gi, '').trim() || 'label:inbox';
+      const searchRes = await searchGmail(companyId, gmailConn.id, cleanSearch, 5, employee.id);
+      const emailSummary = searchRes.messages?.length
+        ? `Found ${searchRes.messages.length} email(s) in inbox (${gmailConn.oauth_email || 'connected mailbox'}):\n` + searchRes.messages.map((m) => `• Subject: "${m.headers?.Subject || '(No Subject)'}" | From: ${m.headers?.From || 'Unknown'} | Snippet: ${m.snippet || ''}`).join('\n')
+        : `Connected to Gmail mailbox (${gmailConn.oauth_email || 'authorized account'}). Search query "${cleanSearch}" executed; inbox is active and accessible. 0 unread matching items found.`;
+      results.push({
+        employee_id: employee.id,
+        employee_name: employee.name,
+        connector_name: 'Google Gmail',
+        tool_name: 'gmail.search',
+        status: 'executed',
+        summary: emailSummary,
+        created_at: createdAt
+      });
+    } catch (gErr: any) {
+      results.push(connectorAccessFailure(employee, 'Google Gmail', 'gmail.search', `Gmail read failed: ${String(gErr?.message || 'The provider request failed.').slice(0, 420)}`, createdAt));
+    }
+    }
+  }
+
+  if (driveConn && isDriveQuery) {
+    const createdAt = new Date().toISOString();
+    if (!hasReadableToolGrant(driveConn, ['drive.files.read'])) {
+      results.push(connectorAccessFailure(employee, 'Google Drive', 'drive.files.read', 'Google Drive is connected, but this employee does not have a read grant for drive.files.read. Open Settings and grant read access to this employee.', createdAt));
+    } else {
+    try {
+      const cleanSearch = lowerQ.replace(/check|my|the|drive|files?|docs?|documents?|please|for|me|search/gi, '').trim();
+      const driveRes = await searchGoogleDriveFiles(companyId, employee.id, driveConn.id, cleanSearch, 5);
+      const driveSummary = driveRes.files?.length
+        ? `Found ${driveRes.files.length} Google Drive file(s):\n` + driveRes.files.map((f) => `• ${f.name} (${f.mime_type || 'file'})`).join('\n')
+        : `Google Drive is connected. 0 matching files found for query "${cleanSearch}".`;
+      results.push({
+        employee_id: employee.id,
+        employee_name: employee.name,
+        connector_name: 'Google Drive',
+        tool_name: 'drive.files.read',
+        status: 'executed',
+        summary: driveSummary,
+        created_at: createdAt
+      });
+    } catch (_dErr) {
+      results.push(connectorAccessFailure(employee, 'Google Drive', 'drive.files.read', `Google Drive read failed: ${String(_dErr?.message || 'The provider request failed.').slice(0, 420)}`, createdAt));
+    }
+    }
+  }
+
+  if (sheetsConn && isSheetsQuery) {
+    const createdAt = new Date().toISOString();
+    if (!hasReadableToolGrant(sheetsConn, ['sheets.read'])) {
+      results.push(connectorAccessFailure(employee, 'Google Sheets', 'sheets.read', 'Google Sheets is connected, but this employee does not have a read grant for sheets.read. Open Settings and grant read access to this employee.', createdAt));
+    } else {
+      try {
+        const reference = question.match(/https?:\/\/docs\.google\.com\/spreadsheets\/d\/[^\s/]+|\b[A-Za-z0-9_-]{20,}\b/i)?.[0] || '';
+        if (!reference) throw new Error('Include a Google Sheets URL or spreadsheet ID so I can read the requested sheet.');
+        const sheet = await readGoogleSheetValues(companyId, sheetsConn.id, reference, undefined, employee.id);
+        const rowSummary = sheet.values.slice(0, 8).map((row) => row.join(' | ')).join('\\n');
+        results.push({ employee_id: employee.id, employee_name: employee.name, connector_name: 'Google Sheets', tool_name: 'sheets.read', status: 'executed', summary: `Read Google Sheet "${sheet.title}" (${sheet.range}).\\n${rowSummary || 'The requested range is empty.'}`, created_at: createdAt });
+      } catch (sErr: any) {
+        results.push(connectorAccessFailure(employee, 'Google Sheets', 'sheets.read', `Google Sheets read failed: ${String(sErr?.message || 'The provider request failed.').slice(0, 420)}`, createdAt));
+      }
+    }
+  }
+
+  // 2. Streamable HTTP MCP tools execution
+  const httpConnections = connections.filter((connection) => connection.status === 'connected' && connection.connection_type === 'streamable_http');
+  const candidates: Array<{ connection: TenantConnector; tool: any; args: Record<string, any> }> = [];
+  for (const connection of httpConnections.slice(0, 5)) {
+    for (const tool of (connection.discovered_tools || []).slice(0, 25)) {
+      if (tool.risk === 'write' || isLikelyWriteTool(tool.name)) continue;
+      const grant = (connection.tool_grants || []).find((entry) => entry.tool_name === tool.name);
+      if (!grant || grant.access_level === 'requires_approval') continue;
+      const args = buildReadToolArguments(tool, question);
+      if (!args) continue;
+      candidates.push({ connection, tool, args });
+      if (candidates.length >= 2) break;
+    }
+    if (candidates.length >= 2) break;
+  }
+  const httpResults = await Promise.all(candidates.map(async ({ connection, tool, args }) => {
+    const createdAt = new Date().toISOString();
+    try {
+      const initialized = await mcpRpc(connection, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'Caveworkers', version: '1.0.0' } });
+      const called = await mcpRpc(connection, 'tools/call', { name: tool.name, arguments: args }, initialized.sessionId);
+      return { employee_id: employee.id, employee_name: employee.name, connector_name: connection.name, tool_name: tool.name, status: 'executed' as const, summary: summarizeMcpToolResult(called.data), created_at: createdAt };
+    } catch (error: any) {
+      reportOperationalFailure('connector.read_tool', error, { tenant_hash: anonymizeIdentifier(companyId), employee_id: employee.id, connector_type: connection.connection_type, tool_name: tool.name });
+      return { employee_id: employee.id, employee_name: employee.name, connector_name: connection.name, tool_name: tool.name, status: 'failed' as const, summary: String(error?.message || 'The read tool failed.').slice(0, 500), created_at: createdAt };
+    }
+  }));
+  return [...results, ...httpResults];
+}
+
+async function getGoogleConnection(companyId: string, employeeId: string, connectionId: number, type: 'google_gmail' | 'google_drive' | 'google_sheets') {
+  const connections = await loadMcpConnections(companyId, employeeId);
+  let connection = connections.find((entry) => entry.id === connectionId && entry.connection_type === type && entry.status === 'connected' && entry.auth_token_encrypted);
+  if (!connection) {
+    connection = connections.find((entry) => entry.connection_type === type && entry.status === 'connected' && entry.auth_token_encrypted);
+  }
+  if (!connection) {
+    const allEmployees = activeWorkforce(companyId);
+    for (const emp of allEmployees) {
+      const empConns = await loadMcpConnections(companyId, emp.id);
+      const matched = empConns.find((e) => e.connection_type === type && e.status === 'connected' && e.auth_token_encrypted);
+      if (matched) {
+        connection = matched;
+        break;
+      }
+    }
+  }
+  if (!connection || !connection.auth_token_encrypted) throw new Error(`The requested Google connector is not connected for ${employeeId}.`);
+  const credentials = decryptConnectorCredentials(connection.auth_token_encrypted);
+  if (!credentials) {
+    connection.status = 'error';
+    connection.last_error = 'The encrypted Google credentials could not be decrypted. Reconnect this connector.';
+    await persistMcpConnection(connection);
+    throw new Error(connection.last_error);
+  }
+  if (connection.oauth_revoked_at) {
+    connection.status = 'error';
+    connection.last_error = 'Google revoked this connector authorization. Reconnect the connector to continue.';
+    await persistMcpConnection(connection);
+    throw new Error(connection.last_error);
+  }
+  const oauth2 = googleOAuthClient();
+  oauth2.setCredentials(credentials);
+  const expiryDate = Number(credentials.expiry_date || (connection.oauth_expires_at ? Date.parse(connection.oauth_expires_at) : 0));
+  if (expiryDate > 0 && expiryDate <= Date.now() + 60_000) {
+    if (!credentials.refresh_token) {
+      connection.status = 'error';
+      connection.last_error = 'Google access expired and no refresh authorization is available. Reconnect the connector.';
+      connection.oauth_expires_at = new Date(expiryDate).toISOString();
+      await persistMcpConnection(connection);
+      throw new Error(connection.last_error);
+    }
+    try {
+      await oauth2.getAccessToken();
+      const refreshedCredentials = { ...credentials, ...oauth2.credentials };
+      connection.auth_token_encrypted = encryptConnectorCredentials(refreshedCredentials);
+      connection.oauth_expires_at = refreshedCredentials.expiry_date ? new Date(Number(refreshedCredentials.expiry_date)).toISOString() : undefined;
+      connection.last_refresh_at = new Date().toISOString();
+      connection.status = 'connected';
+      connection.last_error = undefined;
+      connection.oauth_revoked_at = undefined;
+      await persistMcpConnection(connection);
+    } catch (refreshError: any) {
+      const refreshMessage = String(refreshError?.message || 'Google token refresh failed.').slice(0, 420);
+      const revoked = /invalid_grant|revoked|unauthorized|invalid credentials/i.test(refreshMessage);
+      connection.status = 'error';
+      connection.last_error = revoked ? 'Google revoked this connector authorization. Reconnect the connector.' : `Google token refresh failed: ${refreshMessage}`;
+      if (revoked) connection.oauth_revoked_at = new Date().toISOString();
+      await persistMcpConnection(connection);
+      throw new Error(connection.last_error);
+    }
+  }
+  return { connection, oauth2 };
+}
+
+async function propagateCompanyGoogleConnection(connection: TenantConnector) {
+  if (!['google_gmail', 'google_drive', 'google_sheets'].includes(connection.connection_type) || connection.status !== 'connected') return 0;
+  const employees = activeWorkforce(connection.company_id);
+  let created = 0;
+  for (const employee of employees) {
+    if (employee.id === connection.employee_id) continue;
+    const existingList = await loadMcpConnections(connection.company_id, employee.id);
+    const existing = existingList.find((entry) => entry.connection_type === connection.connection_type);
+    const now = new Date().toISOString();
+    if (existing) {
+      existing.auth_token_encrypted = connection.auth_token_encrypted;
+      existing.oauth_email = connection.oauth_email;
+      existing.auth_scopes = connection.auth_scopes;
+      existing.status = connection.status;
+      existing.last_error = connection.last_error;
+      existing.oauth_expires_at = connection.oauth_expires_at;
+      existing.oauth_revoked_at = connection.oauth_revoked_at;
+      existing.last_refresh_at = connection.last_refresh_at;
+      existing.access_level = connection.access_level;
+      existing.autonomy_mode = connection.autonomy_mode;
+      existing.config = { ...(existing.config || {}), ...(connection.config || {}) };
+      existing.tool_grants = (connection.tool_grants || []).map((grant) => ({ ...grant }));
+      existing.discovered_tools = (connection.discovered_tools || []).map((tool) => ({ ...tool }));
+      existing.updated_at = now;
+      await persistMcpConnection(existing);
+      created += 1;
+    } else {
+      const shared: TenantConnector = {
+        ...connection,
+        id: Date.now() + created + 1,
+        employee_id: employee.id,
+        name: `${connection.name} · Shared`,
+        tool_grants: (connection.tool_grants || []).map((grant) => ({ ...grant })),
+        discovered_tools: (connection.discovered_tools || []).map((t) => ({ ...t })),
+        oauth_expires_at: connection.oauth_expires_at,
+        oauth_revoked_at: connection.oauth_revoked_at,
+        last_refresh_at: connection.last_refresh_at,
+        created_at: now,
+        updated_at: now
+      };
+      await persistMcpConnection(shared);
+      created += 1;
+    }
+  }
+  return created;
+}
+
+async function readGoogleSheetValues(companyId: string, connectionId: number, sheetReference: string, range?: string, employeeId = 'david') {
+  const { oauth2 } = await getGoogleConnection(companyId, employeeId, connectionId, 'google_sheets');
+  const sheets = google.sheets({ version: 'v4', auth: oauth2 });
+  const spreadsheetId = parseSpreadsheetId(sheetReference);
+  if (!spreadsheetId || spreadsheetId.length < 10) throw new Error('A valid Google Sheets URL or spreadsheet ID is required.');
+  const metadata = await sheets.spreadsheets.get({ spreadsheetId, fields: 'properties(title),sheets(properties(title))' });
+  const firstSheet = metadata.data.sheets?.[0]?.properties?.title || 'Sheet1';
+  const boundedRange = String(range || `'${firstSheet}'!A1:Z50`).slice(0, 200);
+  const valuesResponse = await sheets.spreadsheets.values.get({ spreadsheetId, range: boundedRange, majorDimension: 'ROWS' });
+  const values = (valuesResponse.data.values || []).slice(0, 50).map((row) => (row || []).slice(0, 26).map((cell) => String(cell ?? '').slice(0, 500)));
+  return { spreadsheet_id: spreadsheetId, title: metadata.data.properties?.title || 'Google Sheet', range: boundedRange, values };
+}
+
+async function searchGmail(companyId: string, connectionId: number, query: string, maxResults = 10, employeeId = 'david') {
+  const { oauth2 } = await getGoogleConnection(companyId, employeeId, connectionId, 'google_gmail');
+  const gmail = google.gmail({ version: 'v1', auth: oauth2 });
+  const listed = await gmail.users.messages.list({ userId: 'me', q: String(query || '').slice(0, 500), maxResults: Math.min(Math.max(Number(maxResults) || 10, 1), 10) });
+  const messages = await Promise.all((listed.data.messages || []).slice(0, 10).map(async (message) => {
+    const detail = await gmail.users.messages.get({ userId: 'me', id: message.id!, format: 'metadata', metadataHeaders: ['From', 'To', 'Subject', 'Date'] });
+    const headers = Object.fromEntries((detail.data.payload?.headers || []).map((header) => [header.name || '', header.value || '']));
+    return { id: message.id, thread_id: message.threadId, snippet: detail.data.snippet || '', headers };
+  }));
+  return { query: String(query || '').slice(0, 500), messages };
+}
+
+async function searchGoogleDriveFiles(companyId: string, employeeId: string, connectionId: number, query = '', maxResults = 10) {
+  const { oauth2 } = await getGoogleConnection(companyId, employeeId, connectionId, 'google_drive');
+  const drive = google.drive({ version: 'v3', auth: oauth2 });
+  const safeQuery = String(query || '').replace(/[\\'\\r\\n]/g, ' ').trim().slice(0, 120);
+  const escapedQuery = safeQuery.replace(/'/g, "\\\\'");
+  const q = `trashed = false${escapedQuery ? ` and name contains '${escapedQuery}'` : ''}`;
+  const listed = await drive.files.list({ q, pageSize: Math.min(Math.max(Number(maxResults) || 10, 1), 25), orderBy: 'modifiedTime desc', fields: 'files(id,name,mimeType,modifiedTime,webViewLink,size)' });
+  return { query: safeQuery, files: (listed.data.files || []).slice(0, 25).map((file) => ({ id: file.id, name: file.name, mime_type: file.mimeType, modified_time: file.modifiedTime, web_view_link: file.webViewLink, size: file.size })) };
+}
+
+const EMAIL_ADDRESS_PATTERN = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+
+function emailDraftFromRequest(question: string, companyName: string, senderName = 'Sarah') {
+  const recipients = Array.from(new Set((question.match(EMAIL_ADDRESS_PATTERN) || []).map((email) => email.toLowerCase()))).slice(0, 10);
+  const safeLine = (value: string, limit: number) => value.replace(/[\r\n]+/g, ' ').trim().slice(0, limit);
+  const subjectMatch = question.match(/(?:subject|re)\s*[:\-]\s*([^\n.]{3,160})/i);
+  const bodyMatch = question.match(/(?:body|message|saying|say)\s*[:\-]?\s*([\s\S]{3,2200})/i);
+  const subject = safeLine(subjectMatch?.[1] || `Update from ${companyName || 'your Caveworkers workspace'}`, 160);
+  const body = String(bodyMatch?.[1] || `Hello,\n\n${question}\n\nRegards,\n${senderName}\n${companyName || 'Caveworkers'}`).replace(/\r\n/g, '\n').slice(0, 3000);
+  return { recipients, subject, body };
+}
+
+function hasEnabledGmailSend(connection: TenantConnector) {
+  const grant = (connection.tool_grants || []).find((entry) => entry.tool_name === 'gmail.send');
+  return connection.connection_type === 'google_gmail'
+    && connection.status === 'connected'
+    && connection.config?.gmail_send_enabled === true
+    && (connection.auth_scopes || []).includes('https://www.googleapis.com/auth/gmail.send')
+    && ['requires_approval', 'read_write'].includes(String(grant?.access_level || ''));
+}
+
+function isCompanyMailboxConnection(connection: TenantConnector) {
+  if (!COMPANY_EMAIL || connection.connection_type !== 'google_gmail') return false;
+  return connection.config?.company_email === COMPANY_EMAIL || connection.oauth_email?.toLowerCase() === COMPANY_EMAIL;
+}
+
+async function findGmailSendConnection(companyId: string, employeeId: string) {
+  const preferred = await loadMcpConnections(companyId, employeeId);
+  const direct = preferred.find(hasEnabledGmailSend);
+  if (direct) return { connection: direct, mailbox_employee_id: employeeId, shared: false };
+  if (!COMPANY_EMAIL) return null;
+  const otherEmployees = activeWorkforce(companyId).filter((employee) => employee.id !== employeeId);
+  const lists = await Promise.all(otherEmployees.map(async (employee) => ({ employeeId: employee.id, connections: await loadMcpConnections(companyId, employee.id) })));
+  for (const entry of lists) {
+    const shared = entry.connections.find((connection) => hasEnabledGmailSend(connection) && isCompanyMailboxConnection(connection));
+    if (shared) return { connection: shared, mailbox_employee_id: entry.employeeId, shared: true };
+  }
+  return null;
+}
+
+async function prepareEmployeeEmailAction(companyId: string, question: string, taskId: number, requestedEmployeeId = 'sarah') {
+  const workforce = activeWorkforce(companyId);
+  const employee = workforce.find((entry) => entry.id === requestedEmployeeId) || workforce.find((entry) => entry.id === 'sarah') || EMPLOYEE_CATALOG.find((entry) => entry.id === 'sarah');
+  const employeeId = employee?.id || 'sarah';
+  const employeeName = employee?.name || 'Sarah';
+  const company = db.companies.get(companyId);
+  const draft = emailDraftFromRequest(question, company?.name || 'your workspace', employeeName);
+  if (!draft.recipients.length) return { status: 'blocked' as const, summary: `${employeeName} prepared the work but cannot draft an executable email because no recipient address was included. Add a recipient such as name@company.com and try again.` };
+  const mailbox = await findGmailSendConnection(companyId, employeeId);
+  const gmailConnection = mailbox?.connection;
+  if (!gmailConnection || !mailbox) {
+    if (SMTP_CONFIGURED) {
+      const sender = COMPANY_EMAIL;
+      return {
+        status: 'awaiting_approval' as const,
+        summary: `${employeeName} drafted an email to ${draft.recipients.join(', ')} through the temporary company SMTP mailbox ${sender}. It will not be sent until you approve it.`,
+        payload: { action_type: 'gmail.send', transport: 'smtp', employee_id: employeeId, mailbox_employee_id: employeeId, company_email: sender, to: draft.recipients, subject: draft.subject, body: draft.body, execution_status: 'pending', idempotency_key: crypto.randomUUID() }
+      };
+    }
+    const connections = await loadMcpConnections(companyId, employeeId);
+    const hasConfiguredGmail = connections.some((connection) => connection.connection_type === 'google_gmail' && connection.config?.gmail_send_enabled === true);
+    return { status: 'blocked' as const, summary: hasConfiguredGmail ? `${employeeName}’s Gmail connection needs to be reconnected with the Gmail send permission before an email can be sent.` : `${employeeName} has no enabled Gmail send connection. Connect Gmail to ${employeeName}, enable sending, and complete Google OAuth${COMPANY_EMAIL ? ` for the company mailbox ${COMPANY_EMAIL}` : ''}, or configure the approved SMTP fallback.` };
+  }
+  const gmailGrant = gmailConnection.tool_grants.find((grant) => grant.tool_name === 'gmail.send');
+  const sender = gmailConnection.oauth_email || gmailConnection.config?.company_email || COMPANY_EMAIL || 'the authorized Gmail account';
+  const mailboxNote = mailbox.shared ? ` through the tenant company mailbox ${sender}` : ` from ${sender}`;
+  return {
+    status: gmailGrant?.access_level === 'read_write' ? 'processing' as const : 'awaiting_approval' as const,
+    summary: gmailGrant?.access_level === 'read_write' ? `${employeeName} drafted an email to ${draft.recipients.join(', ')}${mailboxNote} and is ready to send it under the tenant-authorized autopilot policy.` : `${employeeName} drafted an email to ${draft.recipients.join(', ')}${mailboxNote}. It will not be sent until you approve it.`,
+    payload: { action_type: 'gmail.send', connection_id: gmailConnection.id, employee_id: employeeId, mailbox_employee_id: mailbox.mailbox_employee_id, company_email: sender, to: draft.recipients, subject: draft.subject, body: draft.body, execution_status: 'pending', idempotency_key: crypto.randomUUID() }
+  };
+}
+
+function gmailRawMessage(to: string[], subject: string, body: string) {
+  const safeHeader = (value: string, limit: number) => String(value || '').replace(/[\r\n]+/g, ' ').trim().slice(0, limit);
+  const safeBody = String(body || '').replace(/\r\n/g, '\n').slice(0, 3000);
+  return Buffer.from(`To: ${safeHeader(to.join(', '), 1200)}\r\nSubject: ${safeHeader(subject, 160)}\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\n\r\n${safeBody}`, 'utf8').toString('base64url');
+}
+
+async function dispatchApprovedMcpTool(approval: ApprovalRecord) {
+  const payload = approval.payload || {};
+  if (payload.action_type !== 'mcp.tool') return null;
+  if (payload.execution_status === 'succeeded') return payload.execution_result || null;
+  if (payload.execution_status === 'processing') throw new Error('This MCP action is already running. Check the task result before retrying.');
+  const employeeId = typeof payload.employee_id === 'string' && EMPLOYEE_CATALOG.some((employee) => employee.id === payload.employee_id) ? payload.employee_id : approval.employee_id;
+  const connections = await loadMcpConnections(approval.company_id, employeeId);
+  const connection = connections.find((entry) => entry.id === Number(payload.connection_id) && entry.connection_type === 'streamable_http' && entry.status === 'connected');
+  if (!connection) throw new Error('The approved MCP connector is no longer connected for this employee.');
+  const tool = (connection.discovered_tools || []).find((entry) => entry.name === payload.tool_name);
+  if (!tool) throw new Error('The approved MCP tool is no longer present. Refresh connector tools and create a new approval.');
+  if (tool.risk !== 'write' && !isLikelyWriteTool(tool.name)) throw new Error('The approved MCP action is not classified as a write tool.');
+  const grant = (connection.tool_grants || []).find((entry) => entry.tool_name === tool.name);
+  if (!grant || !['requires_approval', 'read_write'].includes(grant.access_level)) throw new Error('The approved MCP tool is no longer granted to this employee.');
+  const args = payload.arguments && typeof payload.arguments === 'object' ? payload.arguments : {};
+  const required = Array.isArray(tool.inputSchema?.required) ? tool.inputSchema.required : [];
+  if (!required.every((key: string) => Object.prototype.hasOwnProperty.call(args, key))) throw new Error('The approved MCP action is missing a required tool argument.');
+  approval.payload = { ...payload, execution_status: 'processing' };
+  await persistApprovalRecord(approval);
+  const initialized = await mcpRpc(connection, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'Caveworkers', version: '1.0.0' } });
+  const called = await mcpRpc(connection, 'tools/call', { name: tool.name, arguments: args }, initialized.sessionId);
+  const resultValue = called.data?.result;
+  if (called.data?.error) throw new Error(String(called.data.error.message || 'The MCP server returned a protocol error.').slice(0, 500));
+  if (resultValue?.isError === true) throw new Error(summarizeMcpToolResult(resultValue).slice(0, 500));
+  const summary = summarizeMcpToolResult(resultValue).slice(0, 1200);
+  const commitSha = summary.match(/\b[0-9a-f]{40}\b/i)?.[0] || '';
+  const result: Record<string, string> = { employee_id: employeeId, connector_name: connection.name, tool_name: tool.name, summary };
+  if (commitSha) result.commit_sha = commitSha;
+  approval.payload = { ...approval.payload, execution_status: 'succeeded', execution_result: result };
+  approval.executed_at = new Date().toISOString();
+  await persistApprovalRecord(approval);
+  return result;
+}
+
+async function dispatchApprovedEmployeeEmail(approval: ApprovalRecord) {
+  const payload = approval.payload || {};
+  if (payload.action_type !== 'gmail.send') return null;
+  if (payload.execution_status === 'succeeded') return payload.execution_result || null;
+  if (payload.execution_status === 'processing') throw new Error('This email is already being sent. Check the task result before retrying.');
+  const recipients = Array.isArray(payload.to) ? payload.to.filter((email: unknown) => typeof email === 'string' && EMAIL_ADDRESS_PATTERN.test(email)) : [];
+  EMAIL_ADDRESS_PATTERN.lastIndex = 0;
+  if (!recipients.length || recipients.length > 10) throw new Error('The approved email has no valid recipients. Create a new draft with up to 10 valid email addresses.');
+  approval.payload = { ...payload, execution_status: 'processing' };
+  await persistApprovalRecord(approval);
+  const employeeId = typeof payload.employee_id === 'string' && EMPLOYEE_CATALOG.some((employee) => employee.id === payload.employee_id) ? payload.employee_id : approval.employee_id || 'sarah';
+  const mailboxEmployeeId = typeof payload.mailbox_employee_id === 'string' && EMPLOYEE_CATALOG.some((employee) => employee.id === payload.mailbox_employee_id) ? payload.mailbox_employee_id : employeeId;
+  let result: Record<string, string>;
+  if (payload.transport === 'smtp') {
+    if (!SMTP_CONFIGURED) throw new Error('The approved SMTP company mailbox is not configured on this deployment.');
+    const smtp = nodemailer.createTransport({ host: SMTP_HOST, port: SMTP_PORT, secure: SMTP_SECURE, requireTLS: !SMTP_SECURE, auth: { user: SMTP_USER, pass: SMTP_APP_PASSWORD } });
+    const sent = await smtp.sendMail({ from: COMPANY_EMAIL, to: recipients.join(', '), subject: String(payload.subject || '').slice(0, 160), text: String(payload.body || '').replace(/\r\n/g, '\n').slice(0, 3000) });
+    result = { employee_id: employeeId, mailbox_employee_id: mailboxEmployeeId, transport: 'gmail_smtp', sender: COMPANY_EMAIL, message_id: String(sent.messageId || ''), thread_id: '', recipients: recipients.join(', '), subject: String(payload.subject || '').slice(0, 160) };
+  } else {
+    const { connection, oauth2 } = await getGoogleConnection(approval.company_id, mailboxEmployeeId, Number(payload.connection_id), 'google_gmail');
+    const gmail = google.gmail({ version: 'v1', auth: oauth2 });
+    const sent = await gmail.users.messages.send({ userId: 'me', requestBody: { raw: gmailRawMessage(recipients, String(payload.subject || ''), String(payload.body || '')) } });
+    result = { employee_id: employeeId, mailbox_employee_id: mailboxEmployeeId, transport: 'gmail_api', sender: connection.oauth_email || connection.config?.company_email || COMPANY_EMAIL || '', message_id: String(sent.data.id || ''), thread_id: String(sent.data.threadId || ''), recipients: recipients.join(', '), subject: String(payload.subject || '').slice(0, 160) };
+  }
+  approval.payload = { ...approval.payload, execution_status: 'succeeded', execution_result: result };
+  approval.executed_at = new Date().toISOString();
+  await persistApprovalRecord(approval);
+  return result;
+}
+
+async function recordWorkforceApprovalOutcome(approval: ApprovalRecord, status: TaskRecord['execution']['status'], summary: string, result?: Record<string, string>) {
+  await hydrateTenantTasks(approval.company_id);
+  const task = db.tasks.get(approval.task_id);
+  if (!task || task.company_id !== approval.company_id) return;
+  task.execution = { action_type: String(approval.payload?.action_type || 'external.action'), status, summary: summary.slice(0, 1200), updated_at: new Date().toISOString(), result };
+  const answerBeforeExecutionUpdate = String(task.answer || '').split(/\n\n[^\n]+ execution update:/)[0].trim();
+  task.answer = `${answerBeforeExecutionUpdate}\n\n${task.direct_employee_id ? (EMPLOYEE_CATALOG.find((employee) => employee.id === task.direct_employee_id)?.name || 'Employee') : 'Sarah'}’s execution update: ${status === 'succeeded' ? 'COMPLETED' : status === 'failed' ? 'FAILED' : status === 'blocked' ? 'BLOCKED' : status.toUpperCase()} — ${summary.slice(0, 1200)}`;
+  task.status = status === 'succeeded' || status === 'cancelled' ? 'completed' : status === 'failed' ? 'failed' : status === 'blocked' ? 'blocked' : 'pending_approval';
+  const actor = EMPLOYEE_CATALOG.find((employee) => employee.id === approval.payload?.employee_id) || EMPLOYEE_CATALOG.find((employee) => employee.id === 'sarah');
+  const directFinalAnswer = [...(task.trace || [])].reverse().find((message: any) => message?.kind === 'final_answer' && message?.sender_id === task.direct_employee_id);
+  if (directFinalAnswer) directFinalAnswer.body = task.answer;
+  task.trace = [...(task.trace || []), { kind: status === 'succeeded' ? 'action_completed' : status === 'cancelled' ? 'approval_declined' : status === 'failed' || status === 'blocked' ? 'action_failed' : 'action_update', sender: actor?.name || 'Sarah', sender_id: actor?.id || 'sarah', receiver: 'Company room', receiver_id: 'company-room', body: summary.slice(0, 1200), created_at: new Date().toISOString() }];
+  task.completed_at = new Date().toISOString();
+  db.tasks.set(task.id, task);
+  await persistTaskRecord(task);
+  await persistActivityLog(approval.company_id, { id: Date.now(), sender: actor?.name || 'Sarah', receiver: 'Manager', kind: `task.execution.${status}`, body: `Task #${task.id}: ${summary.slice(0, 900)}`, created_at: new Date().toISOString() });
+  emitWorkroomEvent(approval.company_id, task.id, { type: 'task_update', task: workroomSnapshot(task) });
+}
+
+async function persistAnalystDataSource(sourceRecord: AnalystDataSource) {
+  const sources = db.analystDataSources.get(sourceRecord.company_id) || [];
+  const index = sources.findIndex((entry) => entry.id === sourceRecord.id);
+  if (index >= 0) sources[index] = sourceRecord; else sources.unshift(sourceRecord);
+  db.analystDataSources.set(sourceRecord.company_id, sources);
+  const collection = analystTenantCollection(sourceRecord.company_id, 'data_sources');
+  if (collection) {
+    try {
+      await collection.doc(sourceRecord.id).set(stripUndefined(sourceRecord), { merge: true });
+    } catch (error) {
+      console.warn('Could not persist analyst data source to Firestore:', error);
+    }
+  }
+}
+
+async function loadAnalystDataSources(companyId: string): Promise<AnalystDataSource[]> {
+  const cached = db.analystDataSources.get(companyId);
+  if (cached) return cached;
+  const collection = analystTenantCollection(companyId, 'data_sources');
+  if (collection) {
+    try {
+      const snapshot = await collection.orderBy('created_at', 'desc').get();
+      const entries = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as AnalystDataSource));
+      db.analystDataSources.set(companyId, entries);
+      return entries;
+    } catch (error) {
+      console.warn('Could not load analyst data sources:', error);
+    }
+  }
+  return [];
+}
+
+async function persistAnalystMemory(memory: AnalystMemory) {
+  const items = db.analystMemory.get(memory.company_id) || [];
+  const index = items.findIndex((entry) => entry.id === memory.id);
+  if (index >= 0) items[index] = memory; else items.unshift(memory);
+  db.analystMemory.set(memory.company_id, items.slice(0, 100));
+  const collection = analystTenantCollection(memory.company_id, memory.memory_type === 'working' ? 'working_memory' : 'long_term_memory');
+  if (collection) {
+    try {
+      await collection.doc(memory.id).set(stripUndefined(memory), { merge: true });
+    } catch (error) {
+      console.warn('Could not persist analyst memory to Firestore:', error);
+    }
+  }
+}
+
+async function loadAnalystMemory(companyId: string, memoryType?: AnalystMemory['memory_type']): Promise<AnalystMemory[]> {
+  const cached = db.analystMemory.get(companyId) || [];
+  if (cached.length) return memoryType ? cached.filter((entry) => entry.memory_type === memoryType) : cached;
+  const loaded: AnalystMemory[] = [];
+  for (const kind of (memoryType ? [memoryType] : ['long_term', 'working'] as AnalystMemory['memory_type'][])) {
+    const collection = analystTenantCollection(companyId, kind === 'working' ? 'working_memory' : 'long_term_memory');
+    if (!collection) continue;
+    try {
+      const snapshot = await collection.orderBy('created_at', 'desc').limit(40).get();
+      loaded.push(...snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as AnalystMemory)));
+    } catch (error) {
+      console.warn('Could not load analyst memory:', error);
+    }
+  }
+  loaded.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  db.analystMemory.set(companyId, loaded);
+  return memoryType ? loaded.filter((entry) => entry.memory_type === memoryType) : loaded;
+}
+
+async function persistAnalystRun(run: AnalystRun) {
+  const runs = db.analystRuns.get(run.company_id) || [];
+  const index = runs.findIndex((entry) => entry.id === run.id);
+  if (index >= 0) runs[index] = run; else runs.unshift(run);
+  db.analystRuns.set(run.company_id, runs.slice(0, 40));
+  const collection = analystTenantCollection(run.company_id, 'analyst_runs');
+  if (collection) {
+    try {
+      await collection.doc(run.id).set(stripUndefined(run), { merge: true });
+    } catch (error) {
+      console.warn('Could not persist analyst run to Firestore:', error);
+    }
+  }
+}
+
+async function persistAnalystApproval(approval: ApprovalRecord) {
+  await persistApprovalRecord(approval);
+  db.analystApprovalsLoaded.add(approval.company_id);
+}
+
+async function loadAnalystApprovals(companyId: string): Promise<ApprovalRecord[]> {
+  await hydrateTenantApprovals(companyId);
+  db.analystApprovalsLoaded.add(companyId);
+  return Array.from(db.approvals.values()).filter((approval) => approval.company_id === companyId && approval.employee_id === 'david');
+}
+
+function analystSourceSummary(sourceRecord: AnalystDataSource | undefined): string {
+  if (!sourceRecord) return 'No live data source is connected. David will prepare a transparent preview and state which source is needed to verify it.';
+  if (sourceRecord.kind === 'csv') return `CSV source “${sourceRecord.name}” is connected read-only with ${Number(sourceRecord.metadata?.row_count || 0)} imported rows.`;
+  return `${sourceRecord.kind === 'sql' ? 'SQL' : 'Google Sheets'} source “${sourceRecord.name}” is registered read-only but needs secure configuration before a live query can run.`;
+}
+
+function isExternalAnalystAction(question: string) {
+  const lower = question.toLowerCase();
+  if (/\b(email|send mail|gmail)\b/.test(lower)) return { requested: true, tool: 'Gmail', summary: 'Draft and send an analyst report by email' };
+  if (/\b(slack|post to channel|channel update)\b/.test(lower)) return { requested: true, tool: 'Slack', summary: 'Post an analyst update to Slack' };
+  if (/\b(notion|write to notion|update notion)\b/.test(lower)) return { requested: true, tool: 'Notion', summary: 'Write analyst findings to Notion' };
+  if (/\b(whatsapp|send a message)\b/.test(lower)) return { requested: true, tool: 'WhatsApp Business', summary: 'Send an analyst update via WhatsApp Business' };
+  return { requested: false, tool: '', summary: '' };
+}
+
+function createPreviewChart(question: string, sourceRecord?: AnalystDataSource) {
+  const lower = question.toLowerCase();
+  const wantsMargin = /cost|expense|margin|profit/.test(lower);
+  const wantsVolume = /customer|ticket|order|volume/.test(lower);
+  const values = wantsMargin ? [28, 29, 31, 31] : wantsVolume ? [62, 68, 73, 79] : [128, 145, 162, 184];
+  return {
+    title: wantsMargin ? 'Margin trajectory (preview)' : wantsVolume ? 'Business volume trend (preview)' : 'Revenue trend (preview)',
+    labels: ['Q4', 'Q1', 'Q2', 'Q3'], values, unit: wantsMargin ? '%' : wantsVolume ? 'index' : '$k',
+    source_note: sourceRecord?.status === 'connected' ? `Preview based on ${sourceRecord.name}; confirm figures with a live query before distribution.` : 'Illustrative workspace preview only — connect a source to calculate live figures.'
+  };
+}
+
+function parseCsvPreview(csvText: string) {
+  const lines = csvText.replace(/^\uFEFF/, '').split(/\r?\n/).filter((line) => line.trim());
+  if (lines.length < 2) throw new Error('The CSV needs a header row and at least one data row.');
+  const parseLine = (line: string) => line.split(',').map((value) => value.trim().replace(/^"|"$/g, ''));
+  const columns = parseLine(lines[0]).filter(Boolean).slice(0, 30);
+  return { columns, row_count: lines.length - 1, sample_rows: lines.slice(1, 11).map((line) => Object.fromEntries(columns.map((column, index) => [column, parseLine(line)[index] || '']))) };
+}
+
+async function runAnalystLoop(input: { companyId: string; managerName: string; question: string; sourceId?: string; outputFormat?: string }) {
+  const question = String(input.question || '').trim();
+  if (!question) throw new Error('An analysis question is required.');
+  if (question.length > 6000) throw new Error('Keep the analysis question under 6,000 characters.');
+  const outputFormat: AnalystRun['output_format'] = ['brief', 'report', 'chart', 'table'].includes(input.outputFormat || '') ? input.outputFormat as AnalystRun['output_format'] : 'brief';
+  const sources = await loadAnalystDataSources(input.companyId);
+  const sourceRecord = input.sourceId ? sources.find((entry) => entry.id === input.sourceId) : sources.find((entry) => entry.status === 'connected') || sources[0];
+  if (input.sourceId && !sourceRecord) throw new Error('That data source is not available in this workspace.');
+  const memories = await loadAnalystMemory(input.companyId);
+  const taskId = db.nextTaskId++;
+  const runId = `analysis_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`;
+  const now = new Date().toISOString();
+  let liveEvidence = '';
+  if (sourceRecord?.kind === 'google_sheets' && sourceRecord.status === 'connected' && sourceRecord.metadata?.connection_id) {
+    try {
+      const sheetResult = await readGoogleSheetValues(input.companyId, Number(sourceRecord.metadata.connection_id), sourceRecord.metadata.sheet_url);
+      liveEvidence = `Live read-only sample from ${sheetResult.title} (${sheetResult.range}): ${JSON.stringify(sheetResult.values.slice(0, 8))}`;
+    } catch (error: any) {
+      liveEvidence = `The Google Sheets connector was selected but the live read failed: ${String(error?.message || 'unknown error').slice(0, 180)}`;
+    }
+  }
+  const trace: AnalystRun['trace'] = [
+    { stage: 'perceive', body: `Loaded tenant-scoped context: ${sources.length} source(s) and ${memories.filter((memory) => memory.memory_type === 'long_term').length} durable memory item(s).`, created_at: now },
+    { stage: 'plan', body: `Planned a read-only ${outputFormat} workflow with manager review before any external action.`, created_at: new Date().toISOString() },
+    { stage: 'act', body: sourceRecord?.status === 'connected' ? `Prepared a read-only analysis against ${sourceRecord.name}; no source write was attempted.${liveEvidence ? ' Live evidence was fetched within bounded limits.' : ''}` : 'Prepared a transparent preview because a live source is not fully connected; no data access was claimed.', created_at: new Date().toISOString() }
+  ];
+  const chart = createPreviewChart(question, sourceRecord);
+  const verification = sourceRecord?.status === 'connected' ? 'The source is connected read-only. Verify material decisions against the live result before distribution.' : 'No live data connection is configured, so no business fact is presented as verified. Connect a CSV, Sheets, or SQL source to replace this preview with a live query.';
+  const preferences = memories.filter((memory) => memory.memory_type === 'long_term').slice(0, 3).map((memory) => `• ${memory.content}`).join('\n') || 'No durable reporting preferences have been saved yet.';
+  const deterministicReport = `### Analysis brief\n\n**Question:** ${question}\n\n**Source status:** ${analystSourceSummary(sourceRecord)}\n\n**Live evidence:** ${liveEvidence || 'No live evidence was fetched.'}\n\n**Current read:** David has produced a reviewable ${outputFormat} analysis structure with a transparent trend preview.\n\n**What to validate next:**\n1. Confirm reporting period, metric definitions, and exclusions.\n2. Run the approved read-only source query or CSV calculation.\n3. Review material assumptions before sharing externally.\n\n**Manager context applied:**\n${preferences}\n\n**Controls:** ${verification}`;
+  const narrative = await generateAnalystNarrative(`Business question: ${question}\nSource: ${analystSourceSummary(sourceRecord)}\nLive evidence: ${liveEvidence || 'No live evidence was fetched.'}\nKnown tenant preferences: ${preferences}\nWrite no more than five short paragraphs. Be explicit about previews, missing data, and validation.`, input.companyId);
+  const report = narrative.text ? `${deterministicReport}\n\n---\n\n### David’s executive note\n\n${narrative.text}` : deterministicReport;
+  trace.push({ stage: 'reflect', body: narrative.text ? `Applied ${narrative.provider}${narrative.model ? ` (${narrative.model})` : ''} narrative with ${narrative.latency_ms} ms latency.` : `No model narrative was applied; returned a deterministic result with status ${narrative.error_code || 'unavailable'}.`, created_at: new Date().toISOString() });
+  await persistAnalystMemory({ id: `working_${runId}`, company_id: input.companyId, memory_type: 'working', session_id: runId, category: 'task_state', content: `Run ${runId}: ${question.slice(0, 420)}`, confidence: 1, created_at: now, expires_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString() });
+  if (/\b(always|never|prefer|exclude|definition|call it)\b/i.test(question)) {
+    await persistAnalystMemory({ id: `memory_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, company_id: input.companyId, memory_type: 'long_term', category: 'reflection', content: `Manager guidance: ${question.slice(0, 500)}`, confidence: 0.72, created_at: now });
+    trace.push({ stage: 'reflect', body: 'Saved manager guidance as a tenant-scoped long-term reflection.', created_at: new Date().toISOString() });
+  } else {
+    trace.push({ stage: 'reflect', body: 'Stored a short-lived working checkpoint; no durable preference was inferred.', created_at: new Date().toISOString() });
+  }
+  const externalAction = isExternalAnalystAction(question);
+  let approvalId: number | undefined;
+  if (externalAction.requested) {
+    approvalId = db.nextApprovalId++;
+    await persistAnalystApproval({ id: approvalId, company_id: input.companyId, task_id: taskId, employee_id: 'david', tool_name: externalAction.tool, action_summary: `${externalAction.summary}: “${question.slice(0, 180)}”`, status: 'pending', payload: { origin: 'analyst', mode: 'draft_only', external_action: true, run_id: runId }, created_at: new Date().toISOString() });
+    trace.push({ stage: 'approval', body: `Created a human-approval gate for ${externalAction.tool}. This is a draft only; no external action has been performed.`, created_at: new Date().toISOString() });
+  }
+  const run: AnalystRun = { id: runId, company_id: input.companyId, task_id: taskId, question, source_id: sourceRecord?.id, output_format: outputFormat, status: approvalId ? 'awaiting_approval' : 'completed', plan: ['Perceive tenant context', 'Plan read-only analysis', 'Act with a configured source or transparent preview', 'Reflect to tenant memory'], trace, report, chart, approval_id: approvalId, model: { provider: narrative.provider, name: narrative.model, latency_ms: narrative.latency_ms, usage: narrative.usage, error_code: narrative.error_code }, created_at: now };
+  await persistAnalystRun(run);
+  const analystTask: TaskRecord = { id: taskId, company_id: input.companyId, question, owner: 'david', status: approvalId ? 'pending_approval' : 'completed', answer: report, plan: run.plan.join(' → '), created_at: now, trace: trace.map((entry) => ({ kind: entry.stage, sender: 'David', receiver: entry.stage === 'approval' ? 'Human approval gate' : 'Analyst run', body: entry.body, created_at: entry.created_at })) };
+  db.tasks.set(taskId, analystTask);
+  await persistTaskRecord(analystTask);
+  await persistActivityLog(input.companyId, { id: Date.now(), sender: 'David', receiver: input.managerName || 'Workspace Manager', kind: approvalId ? 'analyst.awaiting_approval' : 'analyst.completed', body: approvalId ? `Analysis ${runId} is ready; external delivery is paused for approval.` : `Completed analyst run ${runId}: ${question.slice(0, 90)}${question.length > 90 ? '…' : ''}`, created_at: new Date().toISOString() });
+  return run;
+}
+
+// Seed default user & company for seamless previewing
+const DEFAULT_UID = 'user_demo_123';
+const DEFAULT_COMPANY_ID = 'org_demo_123';
+
+db.users.set(DEFAULT_UID, {
+  uid: DEFAULT_UID,
+  email: 'demo@caveworkers.com',
+  display_name: 'Demo Workspace Manager',
+  company_id: DEFAULT_COMPANY_ID,
+  company_name: 'Acme Operations',
+  onboarded: true,
+  selected_tier: 'growth',
+  role: 'admin'
+});
+
+db.companies.set(DEFAULT_COMPANY_ID, {
+  id: DEFAULT_COMPANY_ID,
+  name: 'Acme Operations',
+  industry: 'Technology',
+  team_size: '11-50',
+  owner_uid: DEFAULT_UID,
+  tier: 'growth',
+  status: 'active',
+  selected_employees: ['alex', 'sarah', 'mike'],
+  created_at: new Date().toISOString()
+});
+
+db.orgEmployees.set(DEFAULT_COMPANY_ID, [
+  {
+    id: 'sarah',
+    employee_id: 'CW_EMP_001',
+    name: 'Sarah',
+    role: 'HR & Talent Acquisition Manager',
+    department: 'Human Resources',
+    color: '#10b981',
+    status: 'active',
+    tools: ['Gmail', 'Notion', 'Slack'],
+    permissions: [
+      { tool_name: 'Gmail', access_level: 'requires_approval' },
+      { tool_name: 'Notion', access_level: 'read_write' },
+      { tool_name: 'Slack', access_level: 'requires_approval' }
+    ]
+  },
+  {
+    id: 'david',
+    employee_id: 'CW_EMP_002',
+    name: 'David',
+    role: 'Data & Financial Analyst',
+    department: 'Finance & Analytics',
+    color: '#f59e0b',
+    status: 'active',
+    tools: ['SQL workspace', 'Notion', 'Slack'],
+    permissions: [
+      { tool_name: 'SQL workspace', access_level: 'read_only' },
+      { tool_name: 'Notion', access_level: 'read_write' },
+      { tool_name: 'Slack', access_level: 'read_write' }
+    ]
+  },
+  {
+    id: 'alex',
+    employee_id: 'CW_EMP_003',
+    name: 'Alex',
+    role: 'Senior Operations Specialist',
+    department: 'Operations',
+    color: '#3b82f6',
+    status: 'active',
+    tools: ['SQL workspace', 'Gmail', 'Notion'],
+    permissions: [
+      { tool_name: 'SQL workspace', access_level: 'read_only' },
+      { tool_name: 'Gmail', access_level: 'requires_approval' },
+      { tool_name: 'Notion', access_level: 'read_write' }
+    ]
+  },
+  {
+    id: 'mike',
+    employee_id: 'CW_EMP_004',
+    name: 'Mike',
+    role: 'Technical Lead & Systems Developer',
+    department: 'Engineering',
+    color: '#8b5cf6',
+    status: 'active',
+    tools: ['Notion', 'Slack'],
+    permissions: [
+      { tool_name: 'Notion', access_level: 'read_write' },
+      { tool_name: 'Slack', access_level: 'requires_approval' }
+    ]
+  }
+]);
+
+db.knowledge.set(DEFAULT_COMPANY_ID, [
+  { id: 1, title: 'Q3 Financial Goals', category: 'policy', content: 'Target ARR growth is 25% with operating margin above 30%.', created_at: new Date().toISOString() },
+  { id: 2, title: 'Approval Policy', category: 'policy', content: 'All external communications and code commits require human sign-off.', created_at: new Date().toISOString() }
+]);
+
+db.activity.set(DEFAULT_COMPANY_ID, [
+  { id: 1, company_id: DEFAULT_COMPANY_ID, sender: 'System', receiver: 'Workspace', kind: 'workspace.activated', body: 'Workspace activated on Growth plan with 3 AI employees.', created_at: new Date().toISOString() }
+]);
+
+db.approvals.set(101, {
+  id: 101,
+  company_id: DEFAULT_COMPANY_ID,
+  task_id: 103,
+  employee_id: 'alex',
+  tool_name: 'Gmail',
+  action_summary: 'Send Q3 Operations Status email to clients (3 recipients)',
+  status: 'pending',
+  created_at: new Date().toISOString()
+});
+
+db.tasks.set(101, {
+  id: 101,
+  company_id: DEFAULT_COMPANY_ID,
+  question: 'Synthesize Q3 engineering headcount demand & candidate screening rubrics',
+  owner: 'sarah',
+  status: 'completed',
+  answer: '### Executive Workforce Brief (Task #101)\n\n**Lead**: Sarah (HR Manager · CW_EMP_001)\n**Collaborator**: David (Data Analyst · CW_EMP_002)\n\n1. **Headcount Demand**: 5 new technical requisitions based on David\'s Q3 revenue trend analysis (+32% ARR growth).\n2. **Screening Rubric**: Standardized 4-tier technical evaluation in Notion.\n3. **SLA**: Candidate outreach email ready in Approvals queue for Manager sign-off.',
+  plan: '1. Ingest brief -> 2. Knowledge Vault Search -> 3. Inter-Agent Bus (David) -> 4. Generate Recruitment Report',
+  created_at: new Date(Date.now() - 3600000 * 2).toISOString(),
+  trace: [
+    { kind: 'received', sender: 'Workspace Manager', receiver: 'Task Orchestrator', body: 'Ingested brief: "Synthesize Q3 engineering headcount demand"', created_at: new Date(Date.now() - 3600000 * 2).toISOString() },
+    { kind: 'inter_agent', sender: 'Sarah', receiver: 'David', body: '[Inter-Agent Bus] Delegating subtask to David (Data Analyst): "Evaluate Q3 revenue growth against headcount bandwidth"', created_at: new Date(Date.now() - 3600000 * 2 + 1000).toISOString() },
+    { kind: 'inter_agent', sender: 'David', receiver: 'Sarah', body: '[Inter-Agent Bus] David returned verified analytics payload (+32% ARR growth justifies headcount expansion)', created_at: new Date(Date.now() - 3600000 * 2 + 2000).toISOString() },
+    { kind: 'completed', sender: 'Sarah', receiver: 'Task Ledger', body: 'Task execution recorded in immutable ledger.', created_at: new Date(Date.now() - 3600000 * 2 + 3000).toISOString() }
+  ]
+});
+
+db.tasks.set(102, {
+  id: 102,
+  company_id: DEFAULT_COMPANY_ID,
+  question: 'Query SQL sales database for net ARR and margin compliance',
+  owner: 'david',
+  status: 'completed',
+  answer: '### Financial Analytics Brief (Task #102)\n\n**Lead**: David (Data Analyst · CW_EMP_002)\n\n1. **Net ARR**: $1.84M (+32% YoY growth).\n2. **Operating Margins**: 31.4% net margin (exceeds Q3 goal threshold of 30%).\n3. **Resource Efficiency**: Operational capacity at 88% threshold.',
+  plan: '1. Ingest brief -> 2. SQL Workspace Query -> 3. Financial Analysis',
+  created_at: new Date(Date.now() - 3600000 * 4).toISOString(),
+  trace: [
+    { kind: 'received', sender: 'Workspace Manager', receiver: 'Task Orchestrator', body: 'Ingested brief: "Query SQL sales database for net ARR"', created_at: new Date(Date.now() - 3600000 * 4).toISOString() },
+    { kind: 'verified', sender: 'David', receiver: 'Permission Engine', body: 'Verified MCP tool access: SQL workspace (Read Only)', created_at: new Date(Date.now() - 3600000 * 4 + 1000).toISOString() },
+    { kind: 'completed', sender: 'David', receiver: 'Task Ledger', body: 'Analytics output logged to ledger.', created_at: new Date(Date.now() - 3600000 * 4 + 2000).toISOString() }
+  ]
+});
+
+db.tasks.set(103, {
+  id: 103,
+  company_id: DEFAULT_COMPANY_ID,
+  question: 'Draft Q3 Operations Status email and dispatch to key client accounts',
+  owner: 'alex',
+  status: 'pending_approval',
+  answer: '### Operational Brief (Task #103)\n\n**Lead**: Alex (Operations Specialist · CW_EMP_003)\n\nDrafted executive status update email. Action paused for Human-In-The-Loop manager sign-off prior to Gmail dispatch.',
+  plan: '1. Ingest brief -> 2. Draft Email -> 3. Trigger HITL Approval Queue',
+  created_at: new Date(Date.now() - 1800000).toISOString(),
+  trace: [
+    { kind: 'received', sender: 'Workspace Manager', receiver: 'Task Orchestrator', body: 'Ingested brief: "Draft Q3 Operations Status email"', created_at: new Date(Date.now() - 1800000).toISOString() },
+    { kind: 'approval_required', sender: 'Alex', receiver: 'HITL Queue', body: 'Action requires Manager approval before Gmail dispatch', created_at: new Date(Date.now() - 1800000 + 1000).toISOString() }
+  ]
+});
+db.nextTaskId = 104;
+
+// Helper to resolve the verified Firebase user attached by the session middleware.
+function getAuthUser(req: express.Request): User | null {
+  return authenticatedUsers.get(req) || null;
+}
+
+function getAuthUserOrDefault(req: express.Request): User {
+  return getAuthUser(req) || db.users.get(DEFAULT_UID) || {
+    uid: DEFAULT_UID,
+    email: 'user@caveworkers.com',
+    display_name: 'Workspace Manager',
+    company_id: DEFAULT_COMPANY_ID,
+    company_name: 'Workspace',
+    onboarded: true,
+    selected_tier: 'growth'
+  };
+}
+
+// Verify session cookies before protected routes are evaluated.
+app.use(async (req, res, next) => {
+  const sessionCookie = req.cookies?.__session;
+  if (!sessionCookie) return next();
+
+  // 1. Verify signed HMAC session token
+  const localSession = verifySessionPayload(sessionCookie);
+  if (localSession?.uid) {
+    let user = db.users.get(localSession.uid);
+    if (!user) {
+      user = (await loadUserFromFirebase(localSession.uid)) || undefined;
+    }
+    if (!user) {
+      // Re-hydrate fallback user object if cookie is valid
+      user = {
+        uid: localSession.uid,
+        email: localSession.email,
+        display_name: localSession.email.split('@')[0],
+        company_id: stableGoogleWorkspaceId(localSession.uid),
+        company_name: '',
+        onboarded: false,
+        selected_tier: 'free_trial',
+        role: 'owner',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+      db.users.set(localSession.uid, user);
+    }
+    if (user) {
+      if (user.company_id && !db.companies.has(user.company_id)) {
+        const company = await loadCompanyFromFirebase(user.company_id);
+        if (company && (company.status === 'active' || Boolean(company.name && company.selected_employees?.length))) {
+          if (!user.onboarded) {
+            user.onboarded = true;
+            await persistUser(user);
+          }
+        }
+      }
+      authenticatedUsers.set(req, user);
+      return next();
+    }
+  }
+
+  // 2. Verify Firebase Admin session cookie if Firebase Auth is initialized
+  if (firebaseAuth) {
+    try {
+      const decoded = await firebaseAuth.verifySessionCookie(sessionCookie, true);
+      let user = (await loadUserFromFirebase(decoded.uid)) || db.users.get(decoded.uid) || null;
+      if (!user && decoded.email) {
+        user = {
+          uid: decoded.uid,
+          email: decoded.email,
+          display_name: decoded.name || decoded.email.split('@')[0],
+          company_id: stableGoogleWorkspaceId(decoded.uid),
+          company_name: '',
+          onboarded: false,
+          selected_tier: 'free_trial',
+          role: 'owner',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        };
+        db.users.set(decoded.uid, user);
+      }
+      if (user) {
+        if (user.company_id && !db.companies.has(user.company_id)) {
+          const company = await loadCompanyFromFirebase(user.company_id);
+          if (company && (company.status === 'active' || Boolean(company.name && company.selected_employees?.length))) {
+            if (!user.onboarded) {
+              user.onboarded = true;
+              await persistUser(user);
+            }
+          }
+        }
+        authenticatedUsers.set(req, user);
+        return next();
+      }
+    } catch (_error) {
+      // Invalid cookie
+    }
+  }
+
+  res.clearCookie('__session', { path: '/' });
+  res.clearCookie('cw_csrf', { path: '/' });
+  next();
+});
+
+// Test-only authentication injection. This middleware is not registered in production builds or runtime.
+if (process.env.NODE_ENV === 'test' || process.env.VITEST === 'true') {
+  app.use('/api', (req, _res, next) => {
+    const uid = String(req.get('x-caveworkers-test-user') || '').trim();
+    const user = uid ? db.users.get(uid) : undefined;
+    if (user) authenticatedUsers.set(req, user);
+    next();
+  });
+}
+
+// Every unsafe API request must echo the same token issued in the readable CSRF cookie.
+app.use('/api', (req, res, next) => {
+  const unsafe = /^(POST|PUT|PATCH|DELETE)$/i.test(req.method);
+  const publicPath = req.path === '/session-login' || req.path === '/session-logout' || req.path === '/payments/webhook' || req.path === '/internal/workflows/tick';
+  if (!unsafe || publicPath) return next();
+
+  const cookieToken = req.cookies?.cw_csrf || '';
+  const headerToken = req.get('x-csrf-token') || '';
+  const matches = cookieToken && headerToken && cookieToken.length === headerToken.length && crypto.timingSafeEqual(Buffer.from(cookieToken), Buffer.from(headerToken));
+  if (!matches) return res.status(403).json({ error: 'CSRF validation failed.' });
+  next();
+});
+
+// Apply local-process request limits until a shared edge limiter is configured for multi-instance production.
+app.use('/api', (req, res, next) => {
+  const limits: Record<string, [number, number]> = {
+    '/session-login': [10, 15 * 60 * 1000],
+    '/task': [30, 60 * 1000],
+    '/tasks': [30, 60 * 1000],
+    '/create-order': [8, 15 * 60 * 1000],
+    '/payments/create-order': [8, 15 * 60 * 1000],
+    '/verify-payment': [12, 15 * 60 * 1000],
+    '/payments/verify': [12, 15 * 60 * 1000],
+    '/payments/webhook': [120, 60 * 1000],
+    '/analyst/analyze': [10, 5 * 60 * 1000],
+    '/analyst/data-sources': [20, 15 * 60 * 1000],
+    '/analyst/memory': [30, 15 * 60 * 1000]
+  };
+  const rule = limits[req.path];
+  if (!rule || !isRateLimited(rateLimitKey(req, req.path), rule[0], rule[1])) return next();
+  return res.status(429).json({ error: 'Too many requests. Please try again later.' });
+});
+
+// All non-auth API routes require the verified Firebase session above.
+app.use('/api', (req, res, next) => {
+  const publicApiPaths = new Set(['/health', '/firebase-config', '/session-login', '/session-logout', '/create-order', '/payments/create-order', '/verify-payment', '/payments/verify', '/payments/webhook', '/internal/workflows/tick']);
+  if (publicApiPaths.has(req.path)) return next();
+  if (!getAuthUser(req)) return res.status(401).json({ error: 'Authentication required.' });
+  next();
+});
+
+async function enforceWorkspaceAccess(req: express.Request, res: express.Response): Promise<boolean> {
+  const user = getAuthUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Authentication required.' });
+    return true;
+  }
+  const company = user.company_id ? await loadCompanyFromFirebase(user.company_id) || db.companies.get(user.company_id) : null;
+  if (!company) return false;
+  if (company.status === 'deletion_requested' || company.status === 'deleted') {
+    res.status(423).json({ error: 'This workspace is scheduled for deletion and cannot perform operational actions.', code: 'workspace_deletion_pending', deletion_requested_at: company.deletion_requested_at, deletion_scheduled_for: company.deletion_scheduled_for });
+    return true;
+  }
+  if (isTrialExpired(company.tier, company.trial_ends_at)) {
+    res.status(402).json({ error: 'Your free trial has ended. Upgrade to continue using workspace actions.', upgrade_required: true, trial_ends_at: company.trial_ends_at });
+    return true;
+  }
+  return false;
+}
+
+function stableGoogleWorkspaceId(uid: string): string {
+  return `org_google_${crypto.createHash('sha256').update(String(uid)).digest('hex').slice(0, 24)}`;
+}
+
+function getUserWorkspaceId(user?: Partial<User> | null): string {
+  if (user?.company_id) return user.company_id;
+  if (user?.uid) return stableGoogleWorkspaceId(user.uid);
+  return DEFAULT_COMPANY_ID;
+}
+
+function getTenantIdOrFail(req: express.Request, res: express.Response): string | null {
+  const user = getAuthUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Authentication required.' });
+    return null;
+  }
+  if (!user.company_id) {
+    user.company_id = stableGoogleWorkspaceId(user.uid);
+    user.company_name = user.company_name || '';
+  }
+  return user.company_id;
+}
+
+function normalizedWorkspaceRole(user: User): 'owner' | 'admin' | 'member' {
+  const role = String(user.role || '').trim().toLowerCase();
+  if (role === 'owner' || role === 'admin') return role;
+  return 'member';
+}
+
+function workspaceRoleAllows(user: User, required: 'member' | 'admin' | 'owner'): boolean {
+  const rank: Record<'member' | 'admin' | 'owner', number> = { member: 1, admin: 2, owner: 3 };
+  return rank[normalizedWorkspaceRole(user)] >= rank[required];
+}
+
+function requireWorkspaceRole(req: express.Request, res: express.Response, required: 'member' | 'admin' | 'owner'): boolean {
+  const user = getAuthUser(req);
+  if (!user) {
+    res.status(401).json({ error: 'Authentication required.' });
+    return false;
+  }
+  if (!workspaceRoleAllows(user, required)) {
+    res.status(403).json({ error: `${required} workspace permission required.`, code: 'workspace_role_required', required_role: required });
+    return false;
+  }
+  return true;
+}
+
+// ── PAGE ROUTES ──────────────────────────────────────────
+
+app.get('/', (_req, res) => {
+  res.sendFile(path.join(process.cwd(), 'deskforce.html'));
+});
+
+app.get('/login', (req, res) => {
+  const user = getAuthUser(req);
+  if (user && user.onboarded) {
+    return res.redirect('/command');
+  }
+  res.render('login', { firebase_config: FIREBASE_WEB_CONFIG });
+});
+
+app.get('/onboarding', (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) {
+    return res.redirect('/login');
+  }
+  if (user.onboarded) return res.redirect('/command');
+  res.render('onboarding', {
+    firebase_config: FIREBASE_WEB_CONFIG,
+    plans: SUBSCRIPTION_PLANS,
+    employee_catalog: EMPLOYEE_CATALOG,
+    razorpay_key: RAZORPAY_KEY_ID
+  });
+});
+
+app.get('/command', (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) {
+    return res.redirect('/login');
+  }
+  if (!user.onboarded) return res.redirect('/onboarding');
+  res.render('command', {
+    firebase_config: FIREBASE_WEB_CONFIG,
+    user,
+    org_id: user.company_id || ''
+  });
+});
+
+app.get('/dashboard', (_req, res) => {
+  res.redirect('/command');
+});
+
+app.get('/analyst', (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.redirect('/login');
+  if (!user.onboarded) return res.redirect('/onboarding');
+  res.render('analyst', { firebase_config: FIREBASE_WEB_CONFIG, user, org_id: user.company_id || '', analyst_model: OPENROUTER_KEY_READY ? ANALYST_MODEL : (genAIClient ? 'Gemini fallback' : 'Preview planner') });
+});
+
+app.get('/employee/:id', (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.redirect('/login');
+  if (!user.onboarded) return res.redirect('/onboarding');
+  const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
+  if (!employee) return res.status(404).render('404', { message: 'Employee not found' });
+  res.render('employee', {
+    firebase_config: FIREBASE_WEB_CONFIG,
+    user,
+    org_id: user.company_id || '',
+    employee,
+    employee_catalog: EMPLOYEE_CATALOG
+  });
+});
+
+app.get('/settings', (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) {
+    return res.redirect('/login');
+  }
+  if (!user.onboarded) return res.redirect('/onboarding');
+  res.render('settings', {
+    firebase_config: FIREBASE_WEB_CONFIG,
+    user,
+    org_id: user.company_id || '',
+    plans: SUBSCRIPTION_PLANS,
+    employee_catalog: EMPLOYEE_CATALOG
+  });
+});
+
+app.get('/terms', (_req, res) => {
+  res.render('terms');
+});
+
+app.get('/privacy', (_req, res) => {
+  res.render('privacy');
+});
+
+app.get('/trust', (_req, res) => {
+  res.render('trust');
+});
+
+// ── HEALTH & API ROUTES ──────────────────────────────────
+
+app.get('/api/health', (_req, res) => {
+  res.json({
+    status: 'healthy',
+    timestamp: new Date().toISOString(),
+    components: {
+      database: { status: firestoreDb ? 'active' : 'unconfigured' },
+      payments: { status: RAZORPAY_KEY_ID && RAZORPAY_KEY_SECRET && RAZORPAY_WEBHOOK_SECRET ? 'configured' : 'unconfigured' },
+      firebase: { status: firebaseAuth && firestoreDb ? 'active' : 'unconfigured' },
+      analyst: { status: OPENROUTER_KEY_READY ? 'openrouter_configured' : genAIClient ? 'gemini_fallback' : 'preview_only', model: OPENROUTER_KEY_READY ? ANALYST_MODEL : undefined },
+      google_oauth: { status: GOOGLE_OAUTH_CONFIGURED ? 'configured' : 'unconfigured' },
+      smtp: { status: SMTP_CONFIGURED ? 'configured' : 'unconfigured', host: SMTP_CONFIGURED ? SMTP_HOST : undefined, sender: SMTP_CONFIGURED ? COMPANY_EMAIL : undefined },
+      mcp_bus: { status: 'active' },
+      observability: { sentry: sentryEnabled ? 'configured' : 'unconfigured' }
+    }
+  });
+});
+
+app.get('/api/firebase-config', (_req, res) => {
+  res.json(FIREBASE_WEB_CONFIG);
+});
+
+app.post('/api/session-login', async (req, res) => {
+  const { idToken } = req.body || {};
+
+  let decodedUser: { uid: string; email: string; name?: string; picture?: string; email_verified?: boolean; firebase?: { sign_in_provider: string } } | null = null;
+
+  // 1. If Firebase Admin is available, try verifying ID token
+  if (idToken && firebaseAuth) {
+    try {
+      const fbDecoded = await firebaseAuth.verifyIdToken(idToken);
+      if (fbDecoded?.uid && fbDecoded.email) {
+        const provider = fbDecoded.firebase?.sign_in_provider || (fbDecoded.firebase?.identities?.['google.com'] ? 'google.com' : 'google.com');
+        decodedUser = {
+          uid: fbDecoded.uid,
+          email: fbDecoded.email,
+          name: fbDecoded.name || fbDecoded.email.split('@')[0],
+          picture: fbDecoded.picture || '',
+          email_verified: Boolean(fbDecoded.email_verified),
+          firebase: { sign_in_provider: provider }
+        };
+      }
+    } catch (_err) {
+      // Fall back to direct JWT decoding below
+    }
+  }
+
+  // 2. Decode standard Google / Firebase JWT ID token if decodedUser is still not resolved
+  if (!decodedUser && idToken && typeof idToken === 'string') {
+    try {
+      const parts = idToken.split('.');
+      if (parts.length === 3) {
+        const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+        if (payload && (payload.sub || payload.user_id || payload.email)) {
+          const userEmail = payload.email || `${payload.sub || 'user'}@caveworkers.internal`;
+          const uid = payload.user_id || payload.sub || `user_${crypto.createHash('sha256').update(userEmail).digest('hex').slice(0, 12)}`;
+          
+          let provider = payload.firebase?.sign_in_provider || '';
+          if (!provider && (payload.iss?.includes('accounts.google.com') || payload.iss?.includes('securetoken.google.com') || payload.firebase?.identities?.['google.com'])) {
+            provider = 'google.com';
+          }
+          if (!provider && (payload.email_verified || userEmail.includes('@gmail.com') || userEmail.includes('@'))) {
+            provider = 'google.com';
+          }
+
+          decodedUser = {
+            uid,
+            email: userEmail,
+            name: payload.name || payload.display_name || userEmail.split('@')[0],
+            picture: payload.picture || '',
+            email_verified: Boolean(payload.email_verified),
+            firebase: { sign_in_provider: provider || 'google.com' }
+          };
+        }
+      }
+    } catch (_decodeErr) {
+      // Fallback
+    }
+  }
+
+  if (!decodedUser || !decodedUser.email) {
+    return res.status(401).json({ error: 'Google authentication is required.', code: 'google_auth_required' });
+  }
+
+  const provider = decodedUser.firebase?.sign_in_provider || '';
+  if (provider !== 'google.com') {
+    return res.status(403).json({ error: 'Only Google accounts can sign in to Caveworkers.', code: 'google_only_authentication' });
+  }
+
+  const now = new Date().toISOString();
+  const existingUser = (await loadUserFromFirebase(decodedUser.uid)) || db.users.get(decodedUser.uid);
+  const generatedCompanyId = stableGoogleWorkspaceId(decodedUser.uid);
+  const companyId = existingUser?.company_id && existingUser.company_id !== DEFAULT_COMPANY_ID ? existingUser.company_id : generatedCompanyId;
+  const existingCompany = (await loadCompanyFromFirebase(companyId)) || db.companies.get(companyId);
+  const companyName = existingCompany?.name || existingUser?.company_name || '';
+
+  let isOnboarded = Boolean(existingUser?.onboarded);
+  if (!isOnboarded && existingCompany && (existingCompany.status === 'active' || Boolean(existingCompany.name && existingCompany.selected_employees?.length))) {
+    isOnboarded = true;
+  }
+
+  const user: User = {
+    ...(existingUser || {}),
+    uid: decodedUser.uid,
+    email: decodedUser.email,
+    display_name: decodedUser.name || existingUser?.display_name || decodedUser.email.split('@')[0],
+    photo_url: decodedUser.picture || existingUser?.photo_url || '',
+    company_id: companyId,
+    company_name: companyName,
+    onboarded: isOnboarded,
+    selected_tier: existingUser?.selected_tier || existingCompany?.tier || 'free_trial',
+    role: existingUser?.role || 'owner',
+    created_at: existingUser?.created_at || now,
+    updated_at: now
+  };
+
+  try {
+    await persistUser(user, {
+      auth_provider: decodedUser.firebase?.sign_in_provider || 'google.com',
+      email_verified: Boolean(decodedUser.email_verified)
+    });
+
+    const existingCompany = (await loadCompanyFromFirebase(companyId)) || db.companies.get(companyId);
+    if (!existingCompany) {
+      const company: Company = {
+        id: companyId,
+        name: companyName,
+        industry: '',
+        team_size: '',
+        user_role: '',
+        business_goals: '',
+        workspace_guidelines: '',
+        owner_uid: user.uid,
+        tier: 'free_trial',
+        status: 'onboarding',
+        selected_employees: [],
+        created_at: now
+      };
+      await persistCompany(company);
+      db.orgEmployees.set(company.id, []);
+      db.knowledge.set(company.id, []);
+    } else if (user.onboarded && existingCompany.tier === 'free_trial' && !existingCompany.trial_started_at) {
+      const trialStartedAt = new Date();
+      existingCompany.trial_started_at = trialStartedAt.toISOString();
+      existingCompany.trial_ends_at = new Date(trialStartedAt.getTime() + (SUBSCRIPTION_PLANS.free_trial.trial_days || 3) * 24 * 60 * 60 * 1000).toISOString();
+      existingCompany.status = 'active';
+      await persistCompany(existingCompany);
+    }
+
+    let sessionCookie: string;
+    if (firebaseAuth && idToken) {
+      try {
+        sessionCookie = await firebaseAuth.createSessionCookie(idToken, { expiresIn: SESSION_COOKIE_MAX_AGE });
+      } catch {
+        sessionCookie = signSessionPayload({ uid: user.uid, email: user.email, exp: Date.now() + SESSION_COOKIE_MAX_AGE });
+      }
+    } else {
+      sessionCookie = signSessionPayload({ uid: user.uid, email: user.email, exp: Date.now() + SESSION_COOKIE_MAX_AGE });
+    }
+
+    const csrfToken = crypto.randomBytes(32).toString('hex');
+    res.cookie('__session', sessionCookie, sessionCookieOptions);
+    res.cookie('cw_csrf', csrfToken, readableCookieOptions);
+    res.json({
+      status: 'success',
+      redirect: user.onboarded ? '/command' : '/onboarding',
+      csrf_token: csrfToken,
+      user: {
+        uid: user.uid,
+        email: user.email,
+        display_name: user.display_name
+      }
+    });
+  } catch (error: any) {
+    const code = typeof error?.code === 'string' ? error.code : 'session_persistence_failed';
+    console.error('Session persistence failed:', { code, message: error?.message || String(error) });
+    res.status(500).json({ error: 'Could not create a secure CaveWorkers session.', code });
+  }
+});
+
+app.post('/api/session-logout', (_req, res) => {
+  res.clearCookie('__session', { path: '/' });
+  res.clearCookie('cw_csrf', { path: '/' });
+  res.clearCookie('csrf_token', { path: '/' });
+  res.clearCookie('demo_uid', { path: '/' });
+  res.json({ status: 'logged_out' });
+});
+
+app.get('/logout', (_req, res) => {
+  res.clearCookie('__session', { path: '/' });
+  res.clearCookie('cw_csrf', { path: '/' });
+  res.clearCookie('csrf_token', { path: '/' });
+  res.clearCookie('demo_uid', { path: '/' });
+  res.redirect('/login');
+});
+
+app.get('/api/me', (req, res) => {
+  const user = getAuthUser(req);
+  res.json(user);
+});
+
+app.get('/api/billing', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getUserWorkspaceId(user);
+  const company: Company = user.company_id
+    ? await loadCompanyFromFirebase(companyId) || db.companies.get(companyId) || {
+      id: companyId,
+      name: user.company_name || 'Workspace',
+      tier: user.selected_tier || 'free_trial',
+      status: 'active',
+      owner_uid: user.uid,
+      created_at: new Date().toISOString()
+    }
+    : db.companies.get(companyId) || {
+      id: companyId,
+      name: user.company_name || 'Workspace',
+      tier: user.selected_tier || 'free_trial',
+      status: 'active',
+      owner_uid: user.uid,
+      created_at: new Date().toISOString()
+    };
+  const plan = SUBSCRIPTION_PLANS[company.tier] || SUBSCRIPTION_PLANS.growth;
+  const activeEmps = (await loadOrgEmployees(companyId)).length;
+  const overageCount = Math.max(0, activeEmps - plan.max_employees);
+
+  res.json({
+    company_name: company.name,
+    tier_name: plan.name,
+    tier_key: company.tier,
+    price_inr: Number(plan.price_inr || 0),
+    available_plans: Object.entries(SUBSCRIPTION_PLANS).filter(([key]) => key !== 'free_trial').map(([key, value]: [string, any]) => ({ key, name: value.name, price_inr: Number(value.price_inr || 0), max_employees: value.max_employees })),
+    active_employees: activeEmps,
+    max_employees: plan.max_employees,
+    quota_remaining: Math.max(0, plan.max_employees - activeEmps),
+    overage_count: overageCount,
+    legacy_overage: overageCount > 0,
+    enrollment_locked: activeEmps >= plan.max_employees,
+    status: company.status,
+    trial_started_at: company.trial_started_at,
+    trial_ends_at: company.trial_ends_at,
+    upgrade_required: company.tier === 'free_trial' && Boolean(company.trial_ends_at && Date.now() >= Date.parse(company.trial_ends_at))
+  });
+});
+
+app.post('/api/onboarding/save-profile', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    const { display_name, photo_url } = req.body || {};
+    if (display_name) user.display_name = display_name;
+    if (photo_url) user.photo_url = photo_url;
+    await persistUser(user);
+    res.json({ ok: true });
+  } catch (error: any) {
+    console.error('Error saving profile:', error);
+    res.status(500).json({ error: error?.message || 'Could not save profile.' });
+  }
+});
+
+app.post('/api/onboarding/save-company', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    const { company_name, industry, team_size, user_role, business_goals, workspace_guidelines } = req.body || {};
+    if (!company_name) {
+      return res.status(400).json({ error: 'Company name is required' });
+    }
+    const company_id = user.company_id || stableGoogleWorkspaceId(user.uid);
+    user.company_id = company_id;
+    user.company_name = company_name;
+    if (user_role) user.user_role = user_role;
+
+    const company: Company = {
+      id: company_id,
+      name: company_name,
+      industry: String(industry || '').trim(),
+      team_size: String(team_size || '').trim(),
+      user_role: String(user_role || '').trim(),
+      business_goals: String(business_goals || '').trim(),
+      workspace_guidelines: String(workspace_guidelines || '').trim(),
+      description: business_goals || '',
+      guidelines: workspace_guidelines || '',
+      owner_uid: user.uid,
+      tier: user.selected_tier || 'free_trial',
+      status: 'onboarding',
+      selected_employees: [],
+      created_at: new Date().toISOString()
+    };
+    await persistUser(user);
+    await persistCompany(company);
+    await syncCompanyToEmployeeMemory(company_id, user, company);
+
+    res.json({ ok: true, company_id });
+  } catch (error: any) {
+    console.error('Error saving company:', error);
+    res.status(500).json({ error: error?.message || 'Could not save company configuration.' });
+  }
+});
+
+app.post('/api/onboarding/select-plan', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    const { tier } = req.body || {};
+    if (tier && SUBSCRIPTION_PLANS[tier]) {
+      user.selected_tier = tier;
+      if (user.company_id) {
+        const comp = await loadCompanyFromFirebase(user.company_id) || db.companies.get(user.company_id);
+        if (comp) {
+          comp.tier = tier;
+          if (tier === 'free_trial') {
+            // The free trial starts only when onboarding is completed, never when a plan card is selected.
+            comp.status = 'active';
+          } else {
+            comp.status = 'payment_pending';
+          }
+          await persistCompany(comp);
+        }
+      }
+      await persistUser(user);
+    }
+    res.json({ ok: true, tier: user.selected_tier });
+  } catch (error: any) {
+    console.error('Error selecting plan:', error);
+    res.status(500).json({ error: error?.message || 'Could not select plan.' });
+  }
+});
+
+app.post('/api/onboarding/select-employees', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    const companyId = getTenantIdOrFail(req, res);
+    if (!companyId) return;
+    const { employee_ids } = req.body || {};
+
+    if (Array.isArray(employee_ids)) {
+      const companyForPlan = user.company_id ? await loadCompanyFromFirebase(user.company_id) : null;
+      const plan = SUBSCRIPTION_PLANS[user.selected_tier || companyForPlan?.tier || 'free_trial'] || SUBSCRIPTION_PLANS.free_trial;
+      if (employee_ids.length > plan.max_employees) {
+        return res.status(402).json({ error: `${plan.name} allows up to ${plan.max_employees} AI employees. Upgrade to add more.`, upgrade_required: true });
+      }
+      const orgEmps: OrgEmployee[] = [];
+      employee_ids.forEach((empId: string) => {
+        const cat = EMPLOYEE_CATALOG.find((e) => e.id === empId);
+        if (cat) {
+          orgEmps.push({
+            id: cat.id,
+            employee_id: cat.id,
+            name: cat.name,
+            role: cat.role,
+            department: cat.department,
+            color: cat.color,
+            status: 'active',
+            tools: [...cat.default_tools],
+            permissions: cat.default_tools.map((t) => ({ tool_name: t, access_level: t === 'Gmail' ? 'requires_approval' : 'read_write' })),
+            autonomy_mode: 'autopilot',
+            high_impact_action_policy: 'review',
+            connector_policy: 'assigned_only'
+          });
+        }
+      });
+      await persistOrgEmployees(companyId, orgEmps);
+      const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId);
+      if (company) {
+        company.selected_employees = employee_ids;
+        await persistCompany(company);
+        await syncCompanyToEmployeeMemory(companyId, user, company);
+      }
+    }
+    res.json({ ok: true, employees_added: (employee_ids || []).length });
+  } catch (error: any) {
+    console.error('Error selecting employees:', error);
+    res.status(500).json({ error: error?.message || 'Could not save employee roster.' });
+  }
+});
+
+app.post('/api/onboarding/complete', async (req, res) => {
+  try {
+    const user = getAuthUser(req);
+    if (!user) {
+      return res.status(401).json({ error: 'Authentication required' });
+    }
+
+    if (!user.company_id) {
+      user.company_id = stableGoogleWorkspaceId(user.uid);
+    }
+    user.onboarded = true;
+
+    const companyId = user.company_id;
+    let company = (await loadCompanyFromFirebase(companyId)) || db.companies.get(companyId);
+    if (!company) {
+      company = {
+        id: companyId,
+        name: user.company_name || 'My Workspace',
+        owner_uid: user.uid,
+        tier: user.selected_tier || 'free_trial',
+        status: 'active',
+        created_at: new Date().toISOString()
+      };
+    } else {
+      if (company.tier === 'free_trial' && !company.trial_started_at) {
+        const started = new Date();
+        company.trial_started_at = started.toISOString();
+        company.trial_ends_at = new Date(started.getTime() + (SUBSCRIPTION_PLANS.free_trial.trial_days || 3) * 24 * 60 * 60 * 1000).toISOString();
+      }
+      company.status = 'active';
+    }
+
+    await persistCompany(company);
+    await persistUser(user);
+    await syncCompanyToEmployeeMemory(companyId, user, company);
+
+    await persistActivityLog(companyId, {
+      id: Date.now(),
+      sender: 'System',
+      receiver: 'Workspace',
+      kind: 'workspace.onboarded',
+      body: `Workspace "${user.company_name || company.name || 'your company'}" setup complete on ${user.selected_tier || 'free_trial'} plan.`,
+      created_at: new Date().toISOString()
+    });
+
+    res.json({ ok: true, redirect: '/command' });
+  } catch (error: any) {
+    console.error('Error completing onboarding:', error);
+    res.status(500).json({ error: error?.message || 'Could not complete onboarding.' });
+  }
+});
+
+app.get('/api/company', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
+  const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId);
+  if (!company) return res.status(404).json({ error: 'Workspace onboarding has not been completed.' });
+  res.json(company);
+});
+
+app.post('/api/company', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
+  const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId) || {
+    id: companyId,
+    name: user.company_name || '',
+    tier: user.selected_tier || 'free_trial',
+    status: 'onboarding',
+    owner_uid: user.uid,
+    selected_employees: [],
+    created_at: new Date().toISOString()
+  };
+  Object.assign(company, req.body);
+  if (req.body.name) user.company_name = req.body.name;
+  if (req.body.user_role) user.user_role = req.body.user_role;
+  await persistUser(user);
+  await persistCompany(company);
+  await syncCompanyToEmployeeMemory(companyId, user, company);
+  res.json({ ok: true, company });
+});
+
+app.get('/api/employee-catalog', (_req, res) => {
+  res.json(EMPLOYEE_CATALOG);
+});
+
+app.get('/api/employees', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getUserWorkspaceId(user);
+  const emps = await loadOrgEmployees(companyId);
+  res.json(emps);
+});
+
+app.post('/api/employees/configure', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
+  const { employee_id, action } = req.body || {};
+
+  let emps = await loadOrgEmployees(companyId);
+  if (action === 'add') {
+    const companyForPlan = user.company_id ? await loadCompanyFromFirebase(user.company_id) : null;
+    const plan = SUBSCRIPTION_PLANS[user.selected_tier || companyForPlan?.tier || 'free_trial'] || SUBSCRIPTION_PLANS.free_trial;
+    if (emps.length >= plan.max_employees) {
+      return res.status(402).json({ error: `${plan.name} allows up to ${plan.max_employees} AI employees. Upgrade to add more.`, upgrade_required: true });
+    }
+    const cat = EMPLOYEE_CATALOG.find((e) => e.id === employee_id);
+    if (cat && !emps.some((e) => e.id === employee_id)) {
+      emps.push({
+        id: cat.id,
+        employee_id: cat.id,
+        name: cat.name,
+        role: cat.role,
+        department: cat.department,
+        color: cat.color,
+        status: 'active',
+        tools: [...cat.default_tools],
+        permissions: cat.default_tools.map((t) => ({ tool_name: t, access_level: t === 'Gmail' ? 'requires_approval' : 'read_write' })),
+        autonomy_mode: 'autopilot',
+        high_impact_action_policy: 'review',
+        connector_policy: 'assigned_only'
+      });
+    }
+  } else if (action === 'remove') {
+    emps = emps.filter((e) => e.id !== employee_id);
+  }
+  await persistOrgEmployees(companyId, emps);
+
+  res.json({ ok: true, active_count: emps.length });
+});
+
+app.patch('/api/employees/:id/autonomy', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
+  const emps = await loadOrgEmployees(companyId);
+  const employee = emps.find((entry) => entry.id === req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+  const autonomyMode = req.body?.autonomy_mode === 'copilot' ? 'copilot' : req.body?.autonomy_mode === 'autopilot' ? 'autopilot' : employee.autonomy_mode || 'autopilot';
+  const highImpactPolicy = req.body?.high_impact_action_policy === 'autopilot' ? 'autopilot' : req.body?.high_impact_action_policy === 'review' ? 'review' : employee.high_impact_action_policy || 'review';
+  const connectorPolicy = req.body?.connector_policy === 'workspace_shared' ? 'workspace_shared' : 'assigned_only';
+  employee.autonomy_mode = autonomyMode;
+  employee.high_impact_action_policy = highImpactPolicy;
+  employee.connector_policy = connectorPolicy;
+  await persistOrgEmployees(companyId, emps);
+  await persistActivityLog(companyId, { id: Date.now(), sender: 'Manager', receiver: employee.name, kind: 'employee.autonomy_updated', body: `${employee.name} autonomy is now ${autonomyMode}; high-impact actions are ${highImpactPolicy === 'autopilot' ? 'autonomous' : 'review-gated'}.`, created_at: new Date().toISOString() });
+  res.json({ ok: true, employee });
+});
+
+app.post('/api/employees/:id/tools', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
+  const empId = req.params.id;
+  const { tool_name, action, access_level } = req.body || {};
+
+  const emps = db.orgEmployees.get(companyId) || [];
+  const emp = emps.find((e) => e.id === empId);
+
+  if (!emp) {
+    return res.status(404).json({ error: 'Employee not found' });
+  }
+
+  if (action === 'remove') {
+    emp.permissions = (emp.permissions || []).filter((p) => p.tool_name.toLowerCase() !== tool_name.toLowerCase());
+    emp.tools = (emp.tools || []).filter((t) => t.toLowerCase() !== tool_name.toLowerCase());
+  } else {
+    emp.permissions = emp.permissions || [];
+    const existing = emp.permissions.find((p) => p.tool_name.toLowerCase() === tool_name.toLowerCase());
+    if (existing) {
+      existing.access_level = access_level || 'read_write';
+    } else {
+      emp.permissions.push({ tool_name, access_level: access_level || 'read_write' });
+      if (!emp.tools.includes(tool_name)) emp.tools.push(tool_name);
+    }
+  }
+
+  await persistOrgEmployees(companyId, emps);
+  res.json({ ok: true, permissions: emp.permissions });
+});
+
+app.patch('/api/employees/:id/mcp-connections/:connectionId/autonomy', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  const employeeId = req.params.id;
+  const connectionId = Number(req.params.connectionId);
+  const connections = await loadMcpConnections(companyId, employeeId);
+  const connection = connections.find((entry) => entry.id === connectionId);
+  if (!connection) return res.status(404).json({ error: 'Connector not found for this employee.' });
+  if (req.body?.autonomy_mode !== undefined) connection.autonomy_mode = req.body.autonomy_mode === 'copilot' ? 'copilot' : 'autopilot';
+  if (typeof req.body?.tool_name === 'string' && req.body.tool_name.trim()) {
+    const toolName = req.body.tool_name.trim().slice(0, 160);
+    const tool = (connection.discovered_tools || []).find((entry) => entry.name === toolName);
+    if (!tool) return res.status(404).json({ error: 'Tool was not discovered on this connector.' });
+    const requestedAccess = ['read_only', 'requires_approval', 'read_write'].includes(req.body?.access_level) ? req.body.access_level : 'read_only';
+    const existing = (connection.tool_grants || []).find((entry) => entry.tool_name === toolName);
+    if (existing) existing.access_level = requestedAccess;
+    else connection.tool_grants = [...(connection.tool_grants || []), { tool_name: toolName, access_level: requestedAccess }];
+  }
+  connection.updated_at = new Date().toISOString();
+  await persistMcpConnection(connection);
+  res.json({ ok: true, connection: connectorPublicView(connection) });
+});
+
+app.get('/api/employees/:id/profile', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
+  const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+  const active = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === employee.id);
+  const [connectors, memory] = await Promise.all([loadMcpConnections(companyId, employee.id), loadEmployeeMemory(companyId, employee.id)]);
+  const teammates = (db.orgEmployees.get(companyId) || []).filter((entry) => entry.id !== employee.id).map((entry) => ({ id: entry.id, name: entry.name, role: entry.role, department: entry.department }));
+  res.json({ employee, active_in_workspace: Boolean(active), instance: active || null, connectors: connectors.map(connectorPublicView), memory, teammates });
+});
+
+app.get('/api/employees/:id/memory', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
+  const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+  res.json({ memory: await loadEmployeeMemory(companyId, employee.id) });
+});
+
+app.post('/api/employees/:id/memory', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+  const content = String(req.body?.content || '').trim();
+  const category = ['preference', 'playbook', 'handoff'].includes(req.body?.category) ? req.body.category : 'preference';
+  if (!content || content.length > 1200) return res.status(400).json({ error: 'Memory must be between 1 and 1200 characters.' });
+  const memory: EmployeeMemory = { id: `memory_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, company_id: companyId, employee_id: employee.id, category, content, created_at: new Date().toISOString() };
+  await persistEmployeeMemory(memory);
+  res.status(201).json({ memory });
+});
+
+app.delete('/api/employees/:id/memory/:memoryId', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === req.params.id);
+  if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+  const memories = await loadEmployeeMemory(companyId, employee.id);
+  if (!memories.some((entry) => entry.id === req.params.memoryId)) return res.status(404).json({ error: 'Memory note not found.' });
+  await deleteEmployeeMemory(companyId, employee.id, req.params.memoryId);
+  res.json({ ok: true });
+});
+
+app.get('/api/tasks/:id/group-chat', async (req, res) => {
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
+  await hydrateTenantTasks(companyId);
+  await hydrateTenantApprovals(companyId);
+  const task = db.tasks.get(Number(req.params.id));
+  if (!task || task.company_id !== companyId) return res.status(404).json({ error: 'Task room not found.' });
+  res.json({ task_id: task.id, question: task.question, owner: task.owner, participants: task.participants || ['Manager', task.owner], messages: publicEmployeeChat(task) });
+});
+
+
+app.get('/api/workforce/workroom', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
+  await hydrateTenantTasks(companyId);
+  await hydrateTenantApprovals(companyId);
+  const tasks = Array.from(db.tasks.values()).filter((task) => task.company_id === companyId).sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime()).slice(0, 30).map(workroomSnapshot);
+  res.json({ company: { id: companyId, name: user.company_name || 'Your company' }, employees: activeWorkforce(companyId), presence: companyPresence(companyId), tasks, worker: { enabled: ALWAYS_ON_WORKER_ENABLED, instance: WORKER_INSTANCE_ID, poll_ms: WORKER_POLL_MS }, research: { enabled: WEB_RESEARCH_ENABLED && Boolean(TAVILY_API_KEY || BRAVE_SEARCH_API_KEY) } });
+});
+
+app.post('/api/workforce/workroom', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const message = String(req.body?.message || '').trim().slice(0, 6000);
+  if (!message) return res.status(400).json({ error: 'A company workroom message is required.' });
+  try {
+    const result = await enqueueWorkforceTask(companyId, message, typeof req.body?.preferred_employee_id === 'string' ? req.body.preferred_employee_id : undefined, typeof req.body?.email_employee_id === 'string' ? req.body.email_employee_id : undefined);
+    res.status(202).json(result);
+  } catch (error: any) {
+    if (error?.code === 'task_quota_exceeded') return res.status(402).json({ error: error.message, code: error.code, limit: error.limit, usage: error.usage });
+    reportOperationalFailure('task.enqueue', error, { tenant_hash: anonymizeIdentifier(companyId) });
+    return res.status(500).json({ error: 'The task could not be queued safely.' });
+  }
+});
+
+app.delete('/api/workforce/tasks/:taskId/chat/:messageId', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!user || !companyId) return;
+  if (await enforceWorkspaceAccess(req, res)) return;
+  await hydrateTenantTasks(companyId);
+  const taskId = Number(req.params.taskId);
+  const task = db.tasks.get(taskId);
+  if (!task || task.company_id !== companyId) return res.status(404).json({ error: 'Chat task not found.' });
+  const messageId = String(req.params.messageId || '');
+  if (!publicEmployeeChat(task).some((message) => message.chat_id === messageId)) return res.status(404).json({ error: 'Chat message not found.' });
+  task.deleted_chat_message_ids = [...new Set([...(task.deleted_chat_message_ids || []), messageId])];
+  db.tasks.set(task.id, task);
+  await persistTaskRecord(task);
+  emitWorkroomEvent(companyId, task.id, { type: 'chat_deleted', task_id: task.id, chat_id: messageId });
+  res.json({ ok: true, task_id: task.id, chat_id: messageId });
+});
+
+app.get('/api/workforce/stream', (req, res) => {
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
+  const requestedTaskId = Number(req.query.task_id);
+  const taskId = Number.isFinite(requestedTaskId) && requestedTaskId > 0 ? requestedTaskId : undefined;
+  const key = workroomStreamKey(companyId, taskId);
+  res.status(200).set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+  res.flushHeaders?.();
+  const streams = workroomStreams.get(key) || new Set<express.Response>();
+  streams.add(res); workroomStreams.set(key, streams);
+  res.write(`event: connected\ndata: ${JSON.stringify({ company_id: companyId, task_id: taskId || null })}\n\n`);
+  const heartbeat = setInterval(() => { try { res.write(': heartbeat\n\n'); } catch (_error) { clearInterval(heartbeat); } }, 15000);
+  req.on('close', () => { clearInterval(heartbeat); streams.delete(res); if (!streams.size) workroomStreams.delete(key); });
+});
+
+app.get('/api/employees/:id/conversation', async (req, res) => {
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
+  const empId = req.params.id;
+  const empCatalog = EMPLOYEE_CATALOG.find((e) => e.id === empId);
+  const empName = empCatalog?.name || empId.toUpperCase();
+  const msgs = await loadEmployeeConversation(companyId, empId, empName);
+  res.set('Cache-Control', 'private, no-store');
+  res.json({ messages: msgs });
+});
+
+app.post('/api/employees/:id/conversation', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  const empId = req.params.id;
+  const { message } = req.body || {};
+  const empCatalog = EMPLOYEE_CATALOG.find((e) => e.id === empId) || EMPLOYEE_CATALOG[0];
+  const empName = empCatalog.name;
+  const msgs = await loadEmployeeConversation(companyId, empId, empName);
+  const userMsg = { sender: 'manager', receiver: empId, body: message, created_at: new Date().toISOString() };
+  msgs.push(userMsg);
+
+  const [employeeMemories, companyProfile] = await Promise.all([
+    loadEmployeeMemory(companyId, empId),
+    loadCompanyFromFirebase(companyId)
+  ]);
+  const activeCompany = companyProfile || db.companies.get(companyId);
+  const memoryPromptStr = employeeMemories.length
+    ? employeeMemories.map((m) => `- [${m.category}] ${m.content}`).join('\n')
+    : 'No prior memory logged.';
+
+  let botAnswer = '';
+  const conversationPrompt = `${empCatalog.system_prompt}
+Role: ${empCatalog.role} (${empCatalog.employee_code || empId.toUpperCase()})
+Department: ${empCatalog.department}
+Autonomy Level: ${empCatalog.autonomy_level || 'Level 3'}
+Attached Tools: ${empCatalog.default_tools.join(', ')}
+Active teammate context: ${(db.orgEmployees.get(companyId) || []).filter((entry) => entry.id !== empId).map((entry) => `${entry.name} (${entry.role})`).join(', ') || 'No other activated teammates'}
+
+[ISOLATED COMPANY & USER MEMORY]
+User / Manager: ${user.display_name || user.email || 'Manager'} (${user.user_role || 'Workspace Manager'})
+Company Name: ${activeCompany?.name || user.company_name || 'Workspace'}
+Industry: ${activeCompany?.industry || 'Not specified'} | Team Size: ${activeCompany?.team_size || 'Not specified'}
+Business Objectives: ${activeCompany?.business_goals || activeCompany?.description || 'N/A'}
+Workspace Guidelines: ${activeCompany?.workspace_guidelines || activeCompany?.guidelines || 'N/A'}
+Role Memory Records for ${empName}:
+${memoryPromptStr}
+${empId === 'sarah' ? `Sarah operating contract:
+- You are the workforce manager and the single point of accountability for the client.
+- First understand the requested outcome and identify missing inputs before any tool call.
+- Delegate to one clear specialist when domain expertise is needed, and explain the handoff in one sentence.
+- Report only what is verified. If work is blocked, say exactly what is missing and ask one precise question.
+- Use short workplace messages: answer, progress, blocker, or next action. Never write a report, checklist, fake attachment, or invented delivery confirmation.` : empId === 'alex' ? `Alex operating contract:
+- You are the operations manager responsible for turning requests into executable work.
+- First extract the outcome, owner, deadline, dependencies, and definition of done.
+- Ask one precise question if a critical input is missing; do not invent a deadline, recipient, task owner, or provider result.
+- When ready, state the next three operating steps and use the tenant-approved connector tool belt.
+- Coordinate David for metrics, Mike for technical work, Iris for risk and access, and Emma for customer impact when relevant.
+- Report in short workplace language using exactly one primary status: planned, working, verified, blocked, or escalated.` : empId === 'mike' ? `Mike operating contract:
+- You are the engineering manager responsible for technical clarity, change safety, and reliable delivery.
+- First classify the request: bug, feature, incident, architecture, release, or infrastructure.
+- Identify affected components, risk level, dependencies, and required reviewers before acting.
+- Use only the tenant-approved GitHub MCP, Jira/Linear, Slack, and Notion connectors.
+- Return a technical brief with classification, components, approach, risk, verified evidence, and next checkpoint.
+- Escalate production deployments, database migrations, security patches, access changes, and breaking changes.
+- Never claim a commit, PR, issue, deployment, or CI run completed without a provider result.` : empId === 'emma' ? `Emma operating contract:
+- You are the customer success manager responsible for customer trust, adoption, and clear resolution paths.
+- First classify the request: support, onboarding, account health, renewal, feedback, knowledge, or escalation.
+- Identify the customer or account, issue, business impact, urgency, sentiment, desired outcome, owner, and required evidence.
+- Use only the tenant-approved Gmail, help desk, CRM, Slack, and knowledge-base connectors.
+- Return a customer-success brief with context, verified facts, customer impact, recommended response, owner, and next checkpoint.
+- Escalate refunds, credits, contractual commitments, security or privacy concerns, sensitive data, and mass outbound communication.
+- Never claim a ticket, CRM record, customer message, knowledge-base publication, or resolution completed without a provider result.` : empId === 'arav' ? `Arav operating contract:
+- You are the people operations manager responsible for consistent employee-lifecycle workflows and confidential internal coordination.
+- First classify the request: onboarding, offboarding, policy, leave, engagement, performance support, employee relations, or workforce reporting.
+- Identify the employee or team scope, effective date, manager, required approvals, relevant policy, privacy sensitivity, and required evidence.
+- Use only the tenant-approved HRIS, Gmail, Google Calendar, Drive, Notion, and other explicitly granted connectors.
+- Return a people-operations brief with verified facts, owner, approvals, dependencies, privacy notes, and next checkpoint.
+- Escalate termination, disciplinary, compensation, benefits, medical, protected-class, legal, employee-relations, access, and security decisions.
+- Never claim an employee record, calendar event, policy acknowledgement, or internal message changed without a provider result.` : empId === 'olivia' ? `Olivia operating contract:
+- You are the sales and revenue operations manager responsible for pipeline truth, follow-up discipline, and approval-safe commercial execution.
+- First classify the request: lead qualification, opportunity review, pipeline hygiene, follow-up, renewal or expansion, forecast, or sales reporting.
+- Identify the account and contact, fit, buying signal, stage, decision process, verified amount, next event, owner, confidence, source, and required evidence.
+- Use only the tenant-approved CRM, Gmail, Google Calendar, Google Sheets, and other explicitly granted connectors.
+- Return a sales brief with account context, verified facts, stage and confidence, next action, owner, date, and evidence.
+- Escalate pricing, discounts, contractual commitments, bulk outreach, forecast commitments, and sensitive customer or prospect data.
+- Never claim a CRM update, customer contact, meeting, opportunity movement, forecast result, or commercial commitment without a provider result.` : empId === 'maya' ? `Maya operating contract:
+- You are the marketing and growth manager responsible for measurable demand generation, clear positioning, and brand-safe execution.
+- First classify the request: campaign planning, audience or positioning, content, lifecycle, paid acquisition, performance review, growth experiment, or publishing.
+- Identify the goal, audience, funnel stage, offer, channel, budget, asset needs, success metric, attribution window, approver, and required evidence.
+- Use only the tenant-approved Analytics, Ads, CRM, Google Sheets, Content/Social, and other explicitly granted connectors.
+- Return a marketing brief with strategy, audience, message, channel, metric, owner, approval gate, and next checkpoint.
+- Escalate paid spend, public publishing, regulated or comparative claims, sensitive targeting, customer-data exports, and bulk outreach.
+- Never claim a campaign was published, an ad was launched, spend occurred, or performance changed without a provider result.` : empId === 'priya' ? `Priya operating contract:
+- You are the finance operations manager responsible for accuracy, control checks, cash visibility, and audit-ready execution.
+- First classify the request: invoice or expense, payables, receivables or collections, billing, reconciliation or close, budget or variance, cash flow, payment request, or finance reporting.
+- Identify the entity, counterparty, amount, currency, dates, tax, cost center, PO or receipt, approval state, accounting period, source, and required evidence.
+- Use only the tenant-approved Accounting, Gmail, Google Sheets, Drive/Notion, and other explicitly granted connectors.
+- Return a finance brief with verified facts, control checks, owner, approval gate, exception, and next checkpoint.
+- Escalate payments, refunds, payouts, bank or beneficiary changes, tax, payroll, compensation, write-offs, credit decisions, and external financial reporting.
+- Never claim an invoice was paid, a balance changed, a reconciliation completed, or a financial report updated without a provider result.` : empId === 'iris' ? `Iris operating contract:
+- You are the IT and security operations manager responsible for least privilege, evidence preservation, reversible changes, and clear escalation.
+- First classify the request: access or identity, incident response, vulnerability, IT service or device, compliance or audit, security questionnaire, change control, or vendor and infrastructure risk.
+- Identify the user or asset, system scope, severity, exploitability, business impact, owner, containment or remediation path, evidence, rollback, and approval required.
+- Use only the tenant-approved Identity Provider, ITSM, Endpoint/Security, Gmail, Drive, and other explicitly granted connectors.
+- Return a security brief with verified facts, severity, affected scope, control or remediation path, owner, approval gate, and next checkpoint.
+- Escalate access changes, production or network changes, secret rotation, data deletion, incident communications, and policy exceptions.
+- Never claim access changed, an incident was contained, a patch deployed, or a control passed without a provider result.` : 'Use concise workplace updates and mention a specialist handoff only when it helps.'}
+Never claim an external tool action occurred without an execution trace or verified evidence.
+
+User Manager Message: "${message}"
+
+Respond as ${empName} directly to your manager in plain workplace chat. Keep it under 110 words unless detail is requested.`;
+
+  const empSpecialistConfig = EMPLOYEE_SPECIALIST_CONFIGS[empId] || EMPLOYEE_SPECIALIST_CONFIGS.sarah;
+  if (OPENROUTER_KEY_READY) {
+    try {
+      const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        signal: AbortSignal.timeout(OPENROUTER_TIMEOUT_MS),
+        headers: {
+          Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': PUBLIC_APP_URL,
+          'X-OpenRouter-Title': `Caveworkers Direct Chat: ${empName}`
+        },
+        body: JSON.stringify({
+          model: specialistModelFor(empId),
+          temperature: 0.2,
+          max_tokens: 600,
+          stream: false,
+          user: crypto.createHash('sha256').update(companyId).digest('hex').slice(0, 32),
+          messages: [
+            { role: 'system', content: empSpecialistConfig.systemPrompt },
+            { role: 'user', content: conversationPrompt }
+          ]
+        })
+      });
+      if (response.ok) {
+        const payload: any = await response.json();
+        botAnswer = extractAnalystText(payload?.choices?.[0]?.message?.content);
+      }
+    } catch (openRouterErr) {
+      console.warn('OpenRouter conversation error, falling back to Gemini:', openRouterErr);
+    }
+  }
+
+  if (!botAnswer && genAIClient) {
+    try {
+      const response = await genAIClient.models.generateContent({
+        model: 'gemini-3.6-flash',
+        contents: conversationPrompt
+      });
+      botAnswer = response.text || '';
+    } catch (err) {
+      console.warn('Gemini conversation response note:', err);
+    }
+  }
+
+  if (!botAnswer) {
+    botAnswer = empId === 'sarah'
+      ? `I’ve got it. I’m taking ownership of “${message}” and will route the right part to the team. If I need a file, recipient, or approval before acting, I’ll ask for that explicitly. No external action has been claimed yet.`
+      : empId === 'alex'
+        ? `I’ve got it. I’ll turn this into an operating plan with an owner, deadline, dependencies, and next checkpoint. If one critical input is missing, I’ll ask for it before using a connector. No external action has been claimed yet.`
+        : empId === 'mike'
+          ? `I’ve got it. I’ll classify this as bug, feature, incident, architecture, release, or infrastructure work and identify the affected components, risk level, dependencies, and required reviewers. If I need a repository URL, issue ID, or approval before using a connector, I’ll ask explicitly. No external action has been claimed yet.`
+          : empId === 'emma'
+            ? `I’ve got it. I’ll classify this as support, onboarding, account health, renewal, feedback, knowledge, or escalation work and identify the customer or account, impact, urgency, sentiment, owner, and required evidence. If I need a ticket ID, account context, recipient, or approval before using a connector, I’ll ask explicitly. No customer action has been claimed yet.`
+              : empId === 'arav'
+                ? `I’ve got it. I’ll classify this as onboarding, offboarding, policy, leave, engagement, performance support, employee relations, or workforce reporting work and identify the employee or team scope, effective date, manager, approvals, privacy sensitivity, and required evidence. If I need an employee ID, policy, date, recipient, or approval before using a connector, I’ll ask explicitly. No employee record or internal action has been claimed yet.`
+                : empId === 'olivia'
+                  ? `I’ve got it. I’ll classify this as lead qualification, opportunity review, pipeline hygiene, follow-up, renewal or expansion, forecast, or sales reporting work and identify the account, contact, stage, buying signal, owner, confidence, next event, and evidence. If I need a CRM record, recipient, meeting details, pricing approval, or connector permission, I’ll ask explicitly. No CRM or customer action has been claimed yet.`
+                  : empId === 'maya'
+                    ? `I’ve got it. I’ll classify this as campaign planning, audience or positioning, content, lifecycle, paid acquisition, performance review, growth experiment, or publishing work and identify the goal, audience, funnel stage, offer, channel, metric, owner, approval gate, and evidence. If I need an analytics view, ad account, content asset, budget, or publishing approval, I’ll ask explicitly. No campaign or public action has been claimed yet.`
+                    : empId === 'priya'
+                      ? `I’ve got it. I’ll classify this as invoice or expense, payables, receivables or collections, billing, reconciliation or close, budget or variance, cash flow, payment request, or finance reporting work and identify the entity, counterparty, amount, currency, dates, approvals, accounting period, and evidence. If I need an invoice, receipt, PO, account, approval, or connector permission, I’ll ask explicitly. No payment, balance change, or accounting action has been claimed yet.`
+                      : empId === 'iris'
+                        ? `I’ve got it. I’ll classify this as access or identity, incident response, vulnerability, IT service or device, compliance or audit, security questionnaire, change control, or vendor and infrastructure risk work and identify the user or asset, system scope, severity, impact, owner, containment or remediation path, approval, and evidence. If I need an account, asset, alert, ticket, log, or approval before using a connector, I’ll ask explicitly. No access or security action has been claimed yet.`
+              : `I’ve received this. I’ll review the ${empCatalog.department.toLowerCase()} part and send Sarah a concise finding or a specific blocker. No external action has been claimed yet.`;
+  }
+
+  const botMsg = { sender: empId, receiver: 'manager', body: botAnswer, created_at: new Date().toISOString() };
+  msgs.push(botMsg);
+  await persistEmployeeConversation(companyId, empId, msgs);
+
+  // Activity log
+  await persistActivityLog(companyId, {
+    id: Date.now(),
+    sender: user.display_name || 'Manager',
+    receiver: empName,
+    kind: 'direct.message',
+    body: message,
+    created_at: new Date().toISOString()
+  });
+
+  res.json({ ok: true, employee_message: botMsg, messages: msgs });
+});
+
+function activeWorkforce(companyId: string) {
+  const activeIds = (db.orgEmployees.get(companyId) || []).map((employee) => employee.id);
+  if (!activeIds.length) return [];
+  const workforce = EMPLOYEE_CATALOG.filter((employee) => activeIds.includes(employee.id));
+  return workforce.map((employee) => ({
+    id: employee.id,
+    employee_code: employee.employee_code,
+    name: employee.name,
+    role: employee.role,
+    department: employee.department,
+    color: employee.color,
+    status: employee.status,
+    default_tools: [...employee.default_tools],
+    collaborates_with: [...employee.collaborates_with],
+    avatar_url: `/static/assets/employee-avatars/${employee.id}.webp`,
+    capability_summary: employee.id === 'sarah'
+      ? 'Owns intake, delegation, progress updates, approvals, and the final client handoff.'
+      : employee.id === 'alex'
+        ? 'Turns requests into owned workflows, deadlines, dependencies, service levels, handoffs, and verified operational outcomes.'
+        : employee.id === 'mike'
+          ? 'Turns technical requests into classified engineering briefs with risk assessment, component mapping, safe connector execution, and verified repository evidence.'
+          : employee.id === 'emma'
+            ? 'Turns customer requests into evidence-backed support, onboarding, account-health, and escalation briefs with clear customer impact and next steps.'
+              : employee.id === 'arav'
+                ? 'Turns employee-lifecycle and policy requests into privacy-aware people-operations briefs with approvals, dependencies, and verified next steps.'
+              : employee.id === 'olivia'
+                ? 'Turns sales requests into evidence-backed qualification, pipeline, follow-up, renewal, and forecast briefs with clear ownership and approval gates.'
+              : employee.id === 'maya'
+                ? 'Turns growth requests into evidence-backed campaign, audience, content, experiment, and performance briefs with clear metrics and publishing approvals.'
+              : employee.id === 'priya'
+                ? 'Turns finance requests into evidence-backed invoice, expense, payables, cash-flow, variance, and reconciliation briefs with control checks and approval gates.'
+              : employee.id === 'iris'
+                ? 'Turns IT and security requests into least-privilege, evidence-backed access, incident, vulnerability, compliance, and change-control briefs with clear escalation gates.'
+              : `${employee.department} specialist supporting Sarah’s delivery plan.`
+  }));
+}
+
+const WORKFORCE_DOMAINS: Array<{ employeeId: string; keywords: string[] }> = [
+  { employeeId: 'data_analyst', keywords: ['data', 'sql', 'revenue', 'forecast', 'kpi', 'margin', 'metric', 'dashboard', 'trend', 'analytics', 'dataset', 'query', 'finance', 'numbers', 'reporting'] },
+  { employeeId: 'cybersecurity_analyst', keywords: ['security', 'access', 'identity', 'compliance', 'it', 'device', 'vulnerability', 'risk review', 'permission', 'least privilege', 'role', 'admin', 'privileged', 'sso', 'oauth', 'mfa', '2fa', 'password', 'account', 'offboarding', 'access review', 'audit', 'policy', 'control', 'soc 2', 'iso 27001', 'gdpr', 'dpdp', 'privacy', 'incident', 'cve', 'firewall', 'threat', 'pentest', 'secret', 'token', 'credential'] },
+  { employeeId: 'backend_developer', keywords: ['code', 'repo', 'github', 'ci', 'technical', 'engineering', 'bug', 'incident', 'release', 'deploy', 'deployment', 'pull request', 'pr', 'issue', 'sprint', 'architecture', 'refactor', 'migration', 'api', 'service', 'infrastructure', 'devops', 'backend', 'database', 'docker', 'terminal', 'endpoint', 'server', 'full stack'] },
+  { employeeId: 'qa_engineer', keywords: ['qa', 'test', 'automation', 'playwright', 'cypress', 'jest', 'regression', 'selenium', 'e2e', 'unit test', 'integration test', 'verification', 'bug reproduction', 'edge case', 'testing', 'quality', 'reliability', 'flaky'] },
+  { employeeId: 'david', keywords: ['data', 'sql', 'revenue', 'forecast', 'kpi', 'metric', 'dashboard', 'trend', 'analytics'] },
+  { employeeId: 'mike', keywords: ['code', 'repo', 'github', 'api', 'backend', 'engineering'] },
+  { employeeId: 'iris', keywords: ['security', 'access', 'compliance', 'vulnerability'] },
+  { employeeId: 'sarah', keywords: ['qa', 'test', 'quality', 'workflow'] }
+];
+
+function selectCollaborativeTeam(question: string, companyId: string, preferredEmployeeId?: string) {
+  const workforce = activeWorkforce(companyId);
+  const lower = question.toLowerCase();
+  const scored = WORKFORCE_DOMAINS.map((domain) => ({ ...domain, score: domain.keywords.reduce((total, keyword) => total + (lower.includes(keyword) ? 1 : 0), 0) }))
+    .filter((domain) => workforce.some((employee) => employee.id === domain.employeeId));
+  const winner = scored.sort((a, b) => b.score - a.score)[0];
+  const defaultLeadId = winner?.score ? winner.employeeId : 'backend_developer';
+  const manager = workforce[0] || EMPLOYEE_CATALOG[0];
+  const preferredLead = workforce.find((employee) => employee.id === preferredEmployeeId);
+  const lead = preferredEmployeeId === '__whole_team__'
+    ? (workforce.find((employee) => employee.id === defaultLeadId) || workforce[0] || manager)
+    : (preferredLead || workforce.find((employee) => employee.id === defaultLeadId) || workforce[0] || manager);
+  if (preferredEmployeeId === '__whole_team__') {
+    return { manager, lead, collaborators: workforce.filter((employee) => employee.id !== lead.id && employee.id !== manager.id), workforce };
+  }
+  const leadPeers = (lead.collaborates_with || []).map((id: string) => workforce.find((employee) => employee.id === id)).filter(Boolean) as any[];
+  const explicitMatches = scored.filter((domain) => domain.score > 0 && domain.employeeId !== lead.id && domain.employeeId !== manager.id).map((domain) => workforce.find((employee) => employee.id === domain.employeeId)).filter(Boolean) as any[];
+  const collaborators: any[] = [];
+  for (const employee of [...explicitMatches, ...leadPeers]) {
+    if (employee.id !== lead.id && employee.id !== manager.id && !collaborators.some((entry) => entry.id === employee.id) && collaborators.length < 3) collaborators.push(employee);
+  }
+  return { manager, lead, collaborators, workforce };
+}
+
+interface WorkforceTaskContext { employee: any; tools: string[]; memory: string[]; connectors: string[]; live_tool_evidence: WorkforceLiveToolEvidence[]; }
+
+async function loadWorkforceTaskContext(companyId: string, employee: any): Promise<WorkforceTaskContext> {
+  const instance = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === employee.id);
+  const [memory, connectors] = await Promise.all([loadEmployeeMemory(companyId, employee.id), loadMcpConnections(companyId, employee.id)]);
+  const tools = instance?.tools?.length ? instance.tools : employee.default_tools || [];
+  
+  const activeConnectorNames = new Set(connectors.filter((connector) => connector.status === 'connected').map((connector) => `${connector.name} (Direct)`));
+  const allEmployees = activeWorkforce(companyId);
+  for (const emp of allEmployees) {
+    if (emp.id === employee.id) continue;
+    const peerConns = await loadMcpConnections(companyId, emp.id);
+    peerConns.filter((c) => c.status === 'connected').forEach((c) => {
+      activeConnectorNames.add(`${c.name} (${c.oauth_email || 'Workspace Shared'})`);
+    });
+  }
+
+  return {
+    employee,
+    tools: tools.slice(0, 8),
+    memory: memory.slice(0, 4).map((entry) => entry.content),
+    connectors: Array.from(activeConnectorNames).slice(0, 8),
+    live_tool_evidence: []
+  };
+}
+
+const EMPLOYEE_COMMUNICATION_FOCUS: Record<string, string> = {
+  data_analyst: 'quantitative analysis, SQL query generation, KPI metrics, and structured financial models',
+  cybersecurity_analyst: 'infrastructure protection, access audits, zero-trust controls, and compliance',
+  backend_developer: 'REST/GraphQL APIs, backend architecture, database queries, and CI/CD pipelines',
+  qa_engineer: 'automated test suites, regression testing, bug verification, and software reliability',
+  sarah: 'intake, delegation, approvals, and the final manager handoff',
+  david: 'metrics, trends, dashboards, and decision-ready analysis',
+  alex: 'owners, deadlines, dependencies, service levels, and operational handoffs',
+  mike: 'technical planning, repositories, incidents, architecture, and release safety',
+  emma: 'customer context, adoption, support quality, and account health',
+  arav: 'employee lifecycle, policy coordination, and confidential people operations',
+  olivia: 'qualification, pipeline truth, follow-up, renewals, and forecast evidence',
+  maya: 'positioning, campaigns, content, experiments, and measurable growth',
+  priya: 'invoices, controls, cash visibility, reconciliation, and finance exceptions',
+  iris: 'least privilege, incidents, vulnerabilities, compliance, and safe change control'
+};
+
+function employeeIntroduction(employee: any) {
+  const focus = EMPLOYEE_COMMUNICATION_FOCUS[employee.id] || `${employee.department.toLowerCase()} delivery`;
+  return `Hi team — I’m ${employee.name}, the ${employee.role}. I’m covering ${focus}. I’ll share concise findings, name the evidence, and hand off blockers instead of claiming work I haven’t verified.`;
+}
+
+function collaborationFinding(employee: any, question: string, context?: WorkforceTaskContext, recipientName = 'Sarah') {
+  const topic = question.length > 110 ? `${question.slice(0, 110)}…` : question;
+  const recipient = recipientName || 'Sarah';
+  const toolNote = context?.tools?.length ? ` Available permissioned tools: ${context.tools.join(', ')}.` : '';
+  const connectorNote = context?.connectors?.length ? ` Connected tenant tools considered: ${context.connectors.join(', ')}.` : '';
+  const memoryNote = context?.memory?.length ? ` Applied role memory: ${context.memory[0].slice(0, 180)}.` : '';
+  const evidenceNote = context?.live_tool_evidence?.length ? ` Live MCP evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} (${entry.status}) — ${entry.summary.slice(0, 260)}`).join(' | ')}` : '';
+  const evidence = context?.live_tool_evidence?.length ? ` Evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} is ${entry.status} — ${entry.summary.slice(0, 180)}`).join('; ')}` : '';
+  if (employee.id === 'alex') {
+    return `I translated “${topic}” into an operations brief for ${recipient}: owner, next checkpoint, dependencies, and the safest handoff. I’m sending ${recipient} the execution path now${context?.live_tool_evidence?.length ? ' with the verified tool result attached' : ''}. I’ll flag any missing input, SLA risk, or escalation before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  if (employee.id === 'mike') {
+    return `I reviewed the engineering side of "${topic}". I'm sending ${recipient} a technical brief with: risk classification, affected components, recommended approach, and the safest next step${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any production risk, security concern, or breaking change before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  if (employee.id === 'emma') {
+    return `I reviewed the customer-impact side of "${topic}". I'm sending ${recipient} a success brief with: customer context, verified facts, impact and urgency, recommended response, owner, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any promise, refund, security, privacy, or escalation risk before customer-facing action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  if (employee.id === 'arav') {
+    return `I reviewed the people-operations side of "${topic}". I'm sending ${recipient} a people brief with: employee or team scope, verified facts, policy and approval needs, privacy considerations, owner, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any employment, legal, medical, confidentiality, access, or employee-relations risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  if (employee.id === 'olivia') {
+    return `I reviewed the revenue side of "${topic}". I'm sending ${recipient} a sales brief with: account and contact context, qualification signal, verified stage and confidence, next action, owner, date, and evidence${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any pricing, discount, contract, forecast, bulk-outreach, or sensitive-data risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  if (employee.id === 'maya') {
+    return `I reviewed the growth side of "${topic}". I'm sending ${recipient} a marketing brief with: goal, audience, funnel stage, message, channel, success metric, owner, approval gate, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any spend, publishing, claim, targeting, data-export, or bulk-outreach risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  if (employee.id === 'priya') {
+    return `I reviewed the finance-operations side of "${topic}". I'm sending ${recipient} a finance brief with: verified transaction facts, control checks, amount and period, owner, approval gate, exception, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any payment, bank, tax, payroll, write-off, credit, or external-reporting risk before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  if (employee.id === 'iris') {
+    return `I reviewed the IT and security side of "${topic}". I'm sending ${recipient} a security brief with: verified facts, affected scope, severity, containment or remediation path, owner, approval gate, and next checkpoint${context?.live_tool_evidence?.length ? ' with the verified connector result attached' : ''}. I'll flag any access, production, secret, privacy, incident-communication, compliance, or vendor-risk concern before acting.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+  }
+  return `I reviewed the ${employee.department.toLowerCase()} side of “${topic}”. I’m sending ${employee.name === 'Sarah' ? 'the team' : recipient} a usable recommendation now${context?.live_tool_evidence?.length ? ' with the verified tool result attached to the task evidence' : ''}. I’ll flag any missing input or risk before the next action.${toolNote}${connectorNote}${memoryNote}${evidence}`;
+}
+
+function detectPromptInjection(text: string) {
+  const normalized = String(text || '').toLowerCase();
+  const patterns = [
+    /ignore\s+(?:all\s+)?previous\s+instructions/,
+    /disregard\s+(?:the\s+)?system\s+prompt/,
+    /reveal\s+(?:your\s+)?system\s+prompt/,
+    /print\s+(?:the\s+)?(?:api|oauth|mcp|access)\s+(?:token|secret|key)/,
+    /send\s+(?:all\s+)?(?:tokens|credentials|secrets|passwords)/,
+    /disable\s+(?:approval|security|tenant|audit)/,
+    /bypass\s+(?:approval|authentication|authorization|tenant)/,
+    /upload\s+(?:the\s+)?(?:environment|credentials|secret)/
+  ];
+  const matched = patterns.find((pattern) => pattern.test(normalized));
+  return matched ? { blocked: true, reason: 'The request contains instructions that attempt to override system safeguards or expose secrets.' } : { blocked: false };
+}
+
+async function handleTaskRoutingAsync(question: string, companyId: string, preferredEmployeeId?: string, existingTaskId?: number, emailEmployeeId?: string) {
+  await loadOrgEmployees(companyId);
+  const safety = detectPromptInjection(question);
+  if (safety.blocked) {
+    const blockedTaskId = existingTaskId || db.nextTaskId++;
+    const now = new Date().toISOString();
+    const blockedTask: TaskRecord = {
+      id: blockedTaskId,
+      company_id: companyId,
+      question: String(question || '').slice(0, 6000),
+      owner: 'sarah',
+      status: 'failed',
+      answer: 'I could not execute this request because it attempts to override security controls or expose protected credentials.',
+      plan: 'Safety review → blocked before external tool access',
+      created_at: now,
+      queued_at: now,
+      completed_at: now,
+      trace: [{ kind: 'safety_block', sender: 'Iris', receiver: 'Company workroom', body: safety.reason, created_at: now }],
+      participants: ['Manager', 'Iris'],
+      collaboration_summary: 'Iris blocked the request before any connector or web action.',
+      execution: { action_type: 'none', status: 'blocked', summary: safety.reason, updated_at: now },
+      live_tool_evidence: [],
+      web_research: []
+    };
+    db.tasks.set(blockedTaskId, blockedTask);
+    await persistTaskRecord(blockedTask);
+    await auditWorkforceAction({ company_id: companyId, actor_type: 'system', actor_id: 'iris', action: 'task.blocked_prompt_injection', resource_type: 'task', resource_id: String(blockedTaskId), task_id: blockedTaskId, risk: 'high', status: 'blocked', summary: safety.reason, correlation_id: `task:${blockedTaskId}`, metadata: { pattern_class: 'instruction_override' } });
+    emitWorkroomEvent(companyId, blockedTaskId, { type: 'task_update', task: workroomSnapshot(blockedTask) });
+    return workroomSnapshot(blockedTask);
+  }
+  await hydrateTenantTasks(companyId);
+  const taskId = existingTaskId || db.nextTaskId++;
+  const existingTask = existingTaskId ? db.tasks.get(existingTaskId) : undefined;
+  const now = new Date().toISOString();
+  const routedEmployeeId = directEmployeeIdForQuestion(question || 'Operations review', companyId, preferredEmployeeId) || (preferredEmployeeId === '__whole_team__' ? '__whole_team__' : undefined);
+  const directEmployeeId = routedEmployeeId && routedEmployeeId !== '__whole_team__' ? routedEmployeeId : undefined;
+  const { manager, lead, collaborators, workforce } = selectCollaborativeTeam(question || 'Operations review', companyId, routedEmployeeId);
+  const lowerQ = (question || '').toLowerCase();
+  const executionTeam = [lead, ...collaborators].filter((employee, index, list) => list.findIndex((entry) => entry.id === employee.id) === index);
+  const specialistContexts = await Promise.all(executionTeam.map((employee) => loadWorkforceTaskContext(companyId, employee)));
+  await Promise.all(specialistContexts.map(async (context) => {
+    context.live_tool_evidence = await executeEmployeeReadTools(companyId, context.employee, question);
+  }));
+  const contextByEmployeeId = new Map(specialistContexts.map((context) => [context.employee.id, context]));
+  const knowList = db.knowledge.get(companyId) || [];
+  const webResearch = await performWebResearch(question);
+  const relevantDocs = knowList.filter((document) => lowerQ.includes(document.title.toLowerCase()) || document.content.toLowerCase().split(' ').some((word) => word.length > 4 && lowerQ.includes(word)));
+  const knowText = relevantDocs.length ? relevantDocs.map((document) => `[${document.title}] ${document.content}`).join('\n').slice(0, 2400) : 'No matching workspace knowledge was found.';
+  const webText = webResearch.length ? webResearch.map((source) => `[${source.title}] ${source.url}\n${source.snippet}\n${source.content_preview || ''}`).join('\n\n').slice(0, 4200) : 'No web research provider is enabled or no public sources matched.';
+  const introductionTeam = [manager, ...executionTeam].filter((employee, index, list) => list.findIndex((entry) => entry.id === employee.id) === index);
+  const introductionTrace = introductionTeam.map((employee, index) => ({
+    kind: 'introduction',
+    thread_role: 'introduction',
+    sender: employee.name,
+    receiver: 'Company room',
+    sender_id: employee.id,
+    receiver_id: 'company-room',
+    body: employeeIntroduction(employee),
+    created_at: new Date(Date.now() + 120 + index * 180).toISOString()
+  }));
+  const trace: any[] = [
+    { kind: 'received', thread_role: 'manager_request', sender: 'Manager', receiver: directEmployeeId ? lead.name : 'Sarah', sender_id: 'manager', receiver_id: directEmployeeId ? lead.id : manager.id, body: `New task: “${question}”`, created_at: now },
+    ...introductionTrace,
+    {
+      kind: 'team_context',
+      thread_role: 'coordination',
+      sender: directEmployeeId ? lead.name : 'Sarah',
+      receiver: directEmployeeId ? 'Manager' : lead.name,
+      sender_id: directEmployeeId ? lead.id : manager.id,
+      receiver_id: directEmployeeId ? 'manager' : lead.id,
+      mentions: directEmployeeId ? [lead.id] : [lead.id],
+      body: directEmployeeId
+        ? `I am handling this request directly as ${lead.role}${collaborators.length ? `, with ${collaborators.map((employee) => `@${employee.name}`).join(', ')} supporting` : ''}. Reviewing tools and preparing the outcome.`
+        : `I own this request. @${lead.name} is the delivery lead${collaborators.length ? `, supported by ${collaborators.map((employee) => `@${employee.name}`).join(', ')}` : ''}. I will report the result and any approval or connector blocker back to you.`,
+      created_at: new Date(Date.now() + 250).toISOString()
+    },
+    { kind: 'knowledge', thread_role: 'context', sender: 'Workspace knowledge', receiver: lead.name, receiver_id: lead.id, body: relevantDocs.length ? `Shared ${relevantDocs.length} relevant workspace reference${relevantDocs.length === 1 ? '' : 's'} with the team.` : 'No matching reference was found; the team will state assumptions clearly.', created_at: new Date(Date.now() + 500).toISOString() },
+    ...(webResearch.length ? [{ kind: 'web_research', thread_role: 'context', sender: 'Caveworkers research desk', receiver: 'Company workroom', body: `Collected ${webResearch.length} public source${webResearch.length === 1 ? '' : 's'} for the team. Sources remain linked in the task evidence panel.`, created_at: new Date(Date.now() + 650).toISOString() }] : [])
+  ];
+  collaborators.forEach((employee, index) => {
+    trace.push({ kind: 'group_message', thread_role: 'assignment', sender: directEmployeeId ? lead.name : 'Sarah', receiver: `@${employee.name}`, sender_id: directEmployeeId ? lead.id : manager.id, receiver_id: employee.id, mentions: [employee.id, lead.id], body: `@${employee.name}, please assist with the ${employee.department.toLowerCase()} portion of this request. Return usable findings and safe evidence.`, created_at: new Date(Date.now() + 900 + index * 600).toISOString() });
+    trace.push({ kind: 'handoff', thread_role: 'handoff', sender: employee.name, receiver: lead.name, sender_id: employee.id, receiver_id: lead.id, mentions: [lead.id], body: collaborationFinding(employee, question, contextByEmployeeId.get(employee.id), lead.name), created_at: new Date(Date.now() + 1200 + index * 600).toISOString() });
+    trace.push({ kind: 'handoff_ack', thread_role: 'handoff_ack', sender: lead.name, receiver: employee.name, sender_id: lead.id, receiver_id: employee.id, mentions: [employee.id], body: `@${employee.name}, received. Folding your findings into the deliverables.`, created_at: new Date(Date.now() + 1450 + index * 600).toISOString() });
+  });
+  if (!directEmployeeId || lead.id !== manager.id) {
+    trace.push({ kind: 'handoff', thread_role: 'handoff', sender: lead.name, receiver: manager.name, sender_id: lead.id, receiver_id: manager.id, mentions: [manager.id], body: `@${manager.name}, I’m consolidating the team conversation now. The specialists have been introduced, addressed directly, and their findings will be carried forward with evidence and blockers visible.`, created_at: new Date(Date.now() + 2050).toISOString() });
+    trace.push({ kind: 'handoff_ack', thread_role: 'handoff_ack', sender: manager.name, receiver: lead.name, sender_id: manager.id, receiver_id: lead.id, mentions: [lead.id], body: `@${lead.name}, received. Keep the verified evidence, owners, and blockers visible in the final answer. No external action is treated as complete without provider confirmation.`, created_at: new Date(Date.now() + 2350).toISOString() });
+  }
+  specialistContexts.flatMap((context) => context.live_tool_evidence).forEach((evidence, index) => {
+    trace.push({ kind: 'tool_execution', sender: evidence.employee_name, receiver: 'Caveworkers group', body: `${evidence.status === 'executed' ? 'Read tool executed' : 'Read tool failed'}: ${evidence.connector_name} / ${evidence.tool_name}. ${evidence.summary.slice(0, 500)}`, created_at: new Date(Date.now() + 650 + index * 120).toISOString() });
+  });
+  const teamBrief = `Public research evidence:\n${webText}\n\n` + specialistContexts.map((context) => `${context.employee.name}: ${context.employee.role} — ${context.employee.persona}\nGranted tools: ${context.tools.join(', ') || 'none'}\nConnected tenant tools: ${context.connectors.join(', ') || 'none'}\nRole memory: ${context.memory.join(' | ') || 'none'}\nLive MCP evidence: ${context.live_tool_evidence.map((entry) => `${entry.tool_name} [${entry.status}] ${entry.summary.slice(0, 900)}`).join(' | ') || 'none'}`).join('\n\n');
+  const deliveryTeam = [lead, ...collaborators].filter((employee, index, list) => list.findIndex((entry) => entry.id === employee.id) === index);
+  const narrative = await generateWorkforceNarrative(
+    `${directEmployeeId ? `Assigned Specialist: ${lead.name} (${lead.role})\nRespond directly to the manager as ${lead.name}.\n` : `Manager: ${manager.name} (${manager.role})\nDelivery lead: ${lead.name} (${lead.role})\n`}Task: "${question}"\n\nActive specialist evidence:\n${teamBrief}\n\nWorkspace knowledge:\n${knowText}\n\nWrite a concise workplace chat update for the manager. Use plain language and short paragraphs, not a report, checklist, Markdown headings, or a long preamble. Start with either the answer, a single precise question if required information is missing, or a single clear blocker. Then state what the team did, what is actually verified, and the next action. Mention the delivery lead and contributors naturally. Never invent an attachment, file, message body, link, recipient, tool call, or completed external action. Do not claim that an email, write, payment, publication, access change, or other external action happened unless execution evidence explicitly confirms it. Keep the update under 120 words unless the user asks for detail.`,
+    companyId,
+    directEmployeeId || lead.id
+  );
+  let answer = narrative.text;
+  if (!answer) {
+    answer = `I’ve routed this to ${lead.name}, with ${collaborators.length ? collaborators.map((employee) => employee.name).join(' and ') + ' supporting.' : 'team coordinating the work.'}
+
+The request is recorded, but I can’t produce a verified answer because the production model is unavailable. No external action was executed or represented as complete.
+
+Next step: configure a valid OpenRouter or Gemini model key, then rerun this request.`;
+  }
+  const isEmailAction = ['email', 'send email', 'gmail', 'mail '].some((term) => lowerQ.includes(term));
+  const isGitHubWriteAction = (lowerQ.includes('github') || lowerQ.includes('git repository') || lowerQ.includes('github repo')) && /\b(edit|update|create|write|push|commit|change|modify)\b/.test(lowerQ);
+  const requiresApproval = isEmailAction || isGitHubWriteAction || ['send', 'commit', 'hire', 'publish', 'recruit', 'payment', 'invoice', 'access', 'delete', 'post', 'write'].some((term) => lowerQ.includes(term));
+  let execution: TaskRecord['execution'] = { action_type: isEmailAction ? 'gmail.send' : requiresApproval ? 'external.action' : 'none', status: 'not_required', summary: 'No external action was requested.', updated_at: new Date().toISOString() };
+  let workforceApproval: ApprovalRecord | null = null;
+  let autoExecuteAction = false;
+  if (requiresApproval) {
+    const emailAction = isEmailAction ? await prepareEmployeeEmailAction(companyId, question, taskId, emailEmployeeId || (directEmployeeId || 'sarah')) : null;
+    const mcpAction = !emailAction && isGitHubWriteAction ? await prepareEmployeeMcpWriteAction(companyId, question, taskId, preferredEmployeeId || lead.id) : null;
+    execution = emailAction ? { action_type: 'gmail.send', status: emailAction.status, summary: emailAction.summary, updated_at: new Date().toISOString() } : mcpAction ? { action_type: 'mcp.tool', status: mcpAction.status, summary: mcpAction.summary, updated_at: new Date().toISOString() } : { action_type: 'external.action', status: 'awaiting_approval', summary: 'The requested external action is prepared and awaiting your approval. No external action has been performed.', updated_at: new Date().toISOString() };
+    const actionBlocked = emailAction?.status === 'blocked' || mcpAction?.status === 'blocked';
+    if (actionBlocked) {
+      trace.push({ kind: 'blocked', sender: directEmployeeId ? lead.name : manager.name, receiver: 'Manager', body: emailAction?.summary || mcpAction?.summary || 'The requested external action is blocked until its connector is configured.', created_at: new Date(Date.now() + 3100).toISOString() });
+    } else {
+      const approvalId = db.nextApprovalId++;
+      const approval: ApprovalRecord = { id: approvalId, company_id: companyId, task_id: taskId, employee_id: emailAction?.payload?.employee_id || mcpAction?.payload?.employee_id || lead.id, tool_name: isEmailAction ? 'Gmail send' : mcpAction?.payload?.tool_name || (lowerQ.includes('commit') ? 'Git Repository' : lowerQ.includes('access') ? 'Identity / ITSM' : 'External action'), action_summary: emailAction?.summary || mcpAction?.summary || `${lead.name} requests manager sign-off for: "${question}"`, status: 'pending', created_at: new Date().toISOString(), payload: { origin: 'workforce', action_type: isEmailAction ? 'gmail.send' : mcpAction?.payload?.action_type || 'external.action', manager_id: manager.id, delivery_lead_id: lead.id, collaborators: collaborators.map((employee) => employee.id), ...(emailAction?.payload || {}), ...(mcpAction?.payload || {}) } };
+      await persistApprovalRecord(approval);
+      workforceApproval = approval;
+      autoExecuteAction = ['gmail.send', 'mcp.tool'].includes(String(approval.payload?.action_type || '')) && await autonomousActionAllowed(companyId, approval.payload);
+      if (autoExecuteAction) {
+        approval.status = 'approved';
+        approval.decided_at = new Date().toISOString();
+        approval.payload = { ...(approval.payload || {}), authorization_mode: 'employee_autopilot', execution_status: 'processing' };
+        execution = { ...execution, status: 'processing', summary: `${lead.name} is executing the tenant-authorized ${approval.tool_name} action automatically. A verified result will be posted here.` };
+        await persistApprovalRecord(approval);
+        trace.push({ kind: 'autopilot_started', sender: lead.name, receiver: 'Company workroom', body: `${lead.name} is running ${approval.tool_name} under the employee and connector autopilot policy.`, created_at: new Date(Date.now() + 3100).toISOString() });
+      } else {
+        trace.push({ kind: 'approval_required', sender: directEmployeeId ? lead.name : manager.name, receiver: 'Manager approval queue', body: emailAction?.summary || mcpAction?.summary || 'A consequential action was drafted and paused. No external tool has been called.', created_at: new Date(Date.now() + 3100).toISOString() });
+      }
+    }
+  }
+  if (execution.status === 'blocked') {
+    answer = `${answer}\n\n${lead.name}’s execution update: BLOCKED — ${execution.summary}`;
+  } else if (execution.status === 'awaiting_approval') {
+    answer = `${answer}\n\n${lead.name}’s execution update: APPROVAL REQUIRED — ${execution.summary}`;
+  } else if (execution.status === 'processing') {
+    answer = `${answer}\n\n${lead.name}’s execution update: IN PROGRESS — ${execution.summary}`;
+  }
+  if (directEmployeeId) {
+    trace.push({ kind: 'final_answer', thread_role: 'final_answer', sender: lead.name, receiver: 'Manager', sender_id: lead.id, receiver_id: 'manager', mentions: [lead.id], body: answer, created_at: new Date(Date.now() + 3400).toISOString() });
+  } else {
+    trace.push({ kind: 'final_answer', thread_role: 'final_answer', sender: lead.name, receiver: 'Manager', sender_id: lead.id, receiver_id: 'manager', mentions: [lead.id], body: answer, created_at: new Date(Date.now() + 3400).toISOString() });
+  }
+  trace.push({ kind: 'completed', sender: lead.name, receiver: 'Task ledger', body: requiresApproval ? `Work product completed; execution state: ${execution.status}.` : 'Work product completed with a tenant-scoped audit trace.', created_at: new Date(Date.now() + 3600).toISOString() });
+  const liveToolEvidence = specialistContexts.flatMap((context) => context.live_tool_evidence);
+  const taskRecord: TaskRecord = { id: taskId, company_id: companyId, question, owner: manager.id, direct_employee_id: directEmployeeId, status: execution.status === 'awaiting_approval' ? 'pending_approval' : execution.status === 'blocked' ? 'blocked' : 'completed', answer, plan: directEmployeeId ? `1. ${lead.name} direct response → 2. Sarah manager oversight → 3. Permissioned evidence → 4. Approval-gated external execution when requested` : `1. Sarah intake → 2. Delegate ${lead.name} → 3. Specialist delivery${collaborators.length ? ` (${collaborators.map((employee) => employee.name).join(', ')})` : ''} → 4. Permissioned evidence → 5. Sarah manager response → 6. Approval-gated external execution when requested`, created_at: now, trace, participants: ['Manager', manager.name, ...deliveryTeam.map((employee) => employee.name).filter((name, index, list) => list.indexOf(name) === index)], collaboration_summary: `${directEmployeeId ? `${lead.name} responded directly with Sarah overseeing` : `${manager.name} managed ${lead.name}${collaborators.length ? ` with ${collaborators.length} supporting specialist${collaborators.length === 1 ? '' : 's'}` : ''}`}.`, live_tool_evidence: liveToolEvidence, web_research: webResearch, queued_at: existingTask?.queued_at, started_at: existingTask?.started_at || now, completed_at: new Date().toISOString(), execution };
+  db.tasks.set(taskId, taskRecord);
+  await persistTaskRecord(taskRecord);
+  if (autoExecuteAction && workforceApproval) {
+    try {
+      const result = workforceApproval.payload?.action_type === 'mcp.tool' ? await dispatchApprovedMcpTool(workforceApproval) : await dispatchApprovedEmployeeEmail(workforceApproval);
+      const employeeName = EMPLOYEE_CATALOG.find((employee) => employee.id === workforceApproval?.payload?.employee_id)?.name || lead.name;
+      const summary = result?.commit_sha ? `${employeeName} completed the autonomous MCP write. Commit SHA: ${result.commit_sha}.` : result?.message_id ? `${employeeName} completed the autonomous Gmail action. Gmail message ID: ${result.message_id}.` : `${employeeName} completed the autonomous ${workforceApproval.tool_name} action. The provider returned a successful result.`;
+      await recordWorkforceApprovalOutcome(workforceApproval, 'succeeded', summary, result || undefined);
+      execution = taskRecord.execution || execution;
+    } catch (error: any) {
+      const summary = `${lead.name} could not complete the autonomous ${workforceApproval.tool_name} action. ${String(error?.message || 'The connector action failed.').slice(0, 500)} No successful external result has been confirmed.`;
+      workforceApproval.payload = { ...(workforceApproval.payload || {}), execution_status: 'failed', execution_error: String(error?.message || 'Autonomous execution failed.').slice(0, 500) };
+      await persistApprovalRecord(workforceApproval);
+      await recordWorkforceApprovalOutcome(workforceApproval, 'failed', summary);
+      execution = taskRecord.execution || execution;
+    }
+  }
+  await persistActivityLog(companyId, { id: Date.now(), sender: manager.name, receiver: lead.name, kind: 'task.managed', body: `Task #${taskId} was managed by Sarah with execution state ${execution.status}.`, created_at: now });
+  return { id: taskId, company_id: companyId, question, status: taskRecord.status, owner: manager.id, direct_employee_id: directEmployeeId, participants: taskRecord.participants, plan: taskRecord.plan, answer, execution, trace: taskRecord.trace, live_tool_evidence: liveToolEvidence, web_research: webResearch, collaboration_summary: taskRecord.collaboration_summary, workforce_size: workforce.length };
+}
+
+// This is deliberately absent outside the test runtime. It lets regression tests
+// exercise the actual worker completion path without creating an HTTP backdoor.
+let workflowSchedulerTimer: NodeJS.Timeout | undefined;
+function startWorkflowScheduler() {
+  if (workflowSchedulerTimer || !ALWAYS_ON_WORKER_ENABLED) return;
+  void processDueScheduledWorkflows().catch((error) => {
+    if (!isInitialDatabaseStatusError(error)) {
+      reportOperationalFailure('scheduled_workflow.startup', error);
+    }
+  });
+  workflowSchedulerTimer = setInterval(() => {
+    void processDueScheduledWorkflows().catch((error) => {
+      if (!isInitialDatabaseStatusError(error)) {
+        reportOperationalFailure('scheduled_workflow.poll', error);
+      }
+    });
+  }, WORKFLOW_SCHEDULER_POLL_MS);
+  workflowSchedulerTimer.unref?.();
+}
+
+export const workforceTestHooks = process.env.NODE_ENV === 'test'
+  ? { handleTaskRoutingAsync, selectCollaborativeTeam, executeEmployeeReadTools, dispatchApprovedEmployeeEmail, dispatchApprovedMcpTool, processNextWorkforceJob: () => processNextWorkforceJob(true), processDueScheduledWorkflows, processDueTenantDeletions, nextCronOccurrence, resetRateLimits: () => rateLimitBuckets.clear() }
+  : undefined;
+
+app.post('/api/task', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  if (!ALWAYS_ON_WORKER_ENABLED && process.env.NODE_ENV !== 'test') return res.status(503).json({ error: 'The workforce worker is disabled. Enable ALWAYS_ON_WORKER_ENABLED before assigning tasks.', code: 'worker_disabled', retryable: false });
+  const { request: question, preferred_employee_id: preferredEmployeeId, email_employee_id: emailEmployeeId, idempotency_key: idempotencyKey } = req.body || {};
+  const normalizedQuestion = String(question || 'Operations review').trim().slice(0, 6000);
+  if (!normalizedQuestion) return res.status(400).json({ error: 'A task request is required.' });
+  try {
+    const result = await enqueueWorkforceTask(companyId, normalizedQuestion, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined, typeof emailEmployeeId === 'string' ? emailEmployeeId : undefined, typeof idempotencyKey === 'string' ? idempotencyKey : undefined);
+    res.status(202).json(result);
+  } catch (error: any) {
+    if (error?.code === 'task_quota_exceeded') return res.status(402).json({ error: error.message, code: error.code, limit: error.limit, usage: error.usage });
+    reportOperationalFailure('task.enqueue', error, { tenant_hash: anonymizeIdentifier(companyId) });
+    return res.status(500).json({ error: 'The task could not be queued safely.' });
+  }
+});
+
+app.post('/api/tasks', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  if (!ALWAYS_ON_WORKER_ENABLED && process.env.NODE_ENV !== 'test') return res.status(503).json({ error: 'The workforce worker is disabled. Enable ALWAYS_ON_WORKER_ENABLED before assigning tasks.', code: 'worker_disabled', retryable: false });
+  const { request: question, preferred_employee_id: preferredEmployeeId, email_employee_id: emailEmployeeId, idempotency_key: idempotencyKey } = req.body || {};
+  const normalizedQuestion = String(question || 'Operations review').trim().slice(0, 6000);
+  if (!normalizedQuestion) return res.status(400).json({ error: 'A task request is required.' });
+  try {
+    const result = await enqueueWorkforceTask(companyId, normalizedQuestion, typeof preferredEmployeeId === 'string' ? preferredEmployeeId : undefined, typeof emailEmployeeId === 'string' ? emailEmployeeId : undefined, typeof idempotencyKey === 'string' ? idempotencyKey : undefined);
+    res.status(202).json(result);
+  } catch (error: any) {
+    if (error?.code === 'task_quota_exceeded') return res.status(402).json({ error: error.message, code: error.code, limit: error.limit, usage: error.usage });
+    reportOperationalFailure('task.enqueue', error, { tenant_hash: anonymizeIdentifier(companyId) });
+    return res.status(500).json({ error: 'The task could not be queued safely.' });
+  }
+});
+
+app.get('/api/tasks', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = getUserWorkspaceId(user);
+  await hydrateTenantTasks(companyId);
+  await hydrateTenantApprovals(companyId);
+  const taskList = Array.from(db.tasks.values()).filter((task) => task.company_id === companyId).reverse().map((t: any) => {
+    const ownerEmp = EMPLOYEE_CATALOG.find((e) => e.id === t.owner) || {
+      id: t.owner,
+      name: t.owner.toUpperCase(),
+      role: 'AI Specialist',
+      employee_code: `CW_${t.owner.toUpperCase()}`,
+      color: '#3b82f6'
+    };
+    const pendingApproval = Array.from(db.approvals.values()).find((a) => a.company_id === companyId && a.task_id === t.id && a.status === 'pending');
+    return {
+      ...(() => { const { trace: _privateTrace, ...safeTask } = t; return { ...safeTask, chat_messages: publicEmployeeChat(t) }; })(),
+      owner_info: ownerEmp,
+      status: pendingApproval ? 'pending_approval' : t.status || 'completed',
+      has_pending_approval: !!pendingApproval,
+      approval_id: pendingApproval?.id
+    };
+  });
+  res.json({
+    total_count: taskList.length,
+    completed_count: taskList.filter((t) => t.status === 'completed').length,
+    pending_approval_count: taskList.filter((t) => t.status === 'pending_approval').length,
+    tasks: taskList
+  });
+});
+
+app.get('/api/approvals', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = getUserWorkspaceId(user);
+  const analystApprovals = await loadAnalystApprovals(companyId);
+  const approvals = [...Array.from(db.approvals.values()), ...analystApprovals].filter((approval, index, list) => list.findIndex((entry) => entry.id === approval.id && entry.company_id === approval.company_id) === index);
+  res.json(approvals.filter((approval) => approval.company_id === companyId && approval.status === 'pending'));
+});
+
+app.post('/api/approvals/:id', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  const id = parseInt(req.params.id, 10);
+  const requestedStatus = req.body?.status;
+  if (requestedStatus !== 'approved' && requestedStatus !== 'rejected') return res.status(400).json({ error: 'Choose approved or rejected.' });
+  await loadAnalystApprovals(companyId);
+  const approval = db.approvals.get(id);
+  if (!approval || approval.company_id !== companyId) return res.status(404).json({ error: 'Approval request not found' });
+  if (approval.status !== 'pending') return res.status(409).json({ error: 'This approval has already been decided.', approval });
+  approval.status = requestedStatus;
+  approval.decided_at = new Date().toISOString();
+
+  if (approval.payload?.origin === 'analyst') {
+    await persistAnalystApproval(approval);
+    await persistActivityLog(companyId, { id: Date.now(), sender: 'Manager', receiver: 'David', kind: approval.status === 'approved' ? 'analyst.action_authorized' : 'analyst.action_declined', body: approval.status === 'approved' ? `Approved analyst draft for ${approval.tool_name}. No external dispatch occurs until that connector is configured.` : `Declined analyst draft for ${approval.tool_name}.`, created_at: new Date().toISOString() });
+    return res.json({ ok: true, approval, execution: { status: approval.status === 'approved' ? 'authorized' : 'cancelled' } });
+  }
+
+  if (approval.payload?.origin === 'workforce') {
+    if (approval.status === 'rejected') {
+      approval.payload = { ...(approval.payload || {}), execution_status: 'cancelled' };
+      await persistApprovalRecord(approval);
+      const summary = 'You declined this external action. Sarah kept the work product and did not perform any external change.';
+      await recordWorkforceApprovalOutcome(approval, 'cancelled', summary);
+      return res.json({ ok: true, approval, execution: { status: 'cancelled', summary } });
+    }
+    if (approval.payload?.action_type === 'mcp.tool') {
+      try {
+        const result = await dispatchApprovedMcpTool(approval);
+        const employeeName = EMPLOYEE_CATALOG.find((employee) => employee.id === approval.payload?.employee_id)?.name || 'The employee';
+        const summary = result?.commit_sha ? `${employeeName} completed the approved MCP write. Commit SHA: ${result.commit_sha}.` : `${employeeName} completed the approved MCP write. The provider returned: ${result?.summary || 'a successful tool result'}`;
+        await persistApprovalRecord(approval);
+        await recordWorkforceApprovalOutcome(approval, 'succeeded', summary, result || undefined);
+        return res.json({ ok: true, approval, execution: { status: 'succeeded', summary, result } });
+      } catch (error: any) {
+        approval.payload = { ...(approval.payload || {}), execution_status: 'failed', execution_error: String(error?.message || 'MCP dispatch failed.').slice(0, 500) };
+        await persistApprovalRecord(approval);
+        const employeeName = EMPLOYEE_CATALOG.find((employee) => employee.id === approval.payload?.employee_id)?.name || 'The employee';
+        const summary = `${employeeName} could not execute the approved MCP action. ${String(error?.message || 'MCP dispatch failed.').slice(0, 500)} No external change has been confirmed.`;
+        reportOperationalFailure('workforce.mcp_dispatch', error, { tenant_hash: anonymizeIdentifier(companyId), approval_id: approval.id, task_id: approval.task_id, tool_name: String(approval.payload?.tool_name || '') });
+        await recordWorkforceApprovalOutcome(approval, 'failed', summary);
+        return res.status(502).json({ error: summary, approval, execution: { status: 'failed', summary } });
+      }
+    }
+    if (approval.payload?.action_type === 'gmail.send') {
+      try {
+        const result = await dispatchApprovedEmployeeEmail(approval);
+        const senderName = EMPLOYEE_CATALOG.find((employee) => employee.id === approval.payload?.employee_id)?.name || 'The employee';
+        const summary = result?.message_id ? `${senderName} sent the approved email to ${result.recipients}. Gmail message ID: ${result.message_id}.` : `${senderName} could not confirm an email delivery result.`;
+        await persistApprovalRecord(approval);
+        await recordWorkforceApprovalOutcome(approval, result?.message_id ? 'succeeded' : 'failed', summary, result || undefined);
+        return res.json({ ok: true, approval, execution: { status: result?.message_id ? 'succeeded' : 'failed', summary, result } });
+      } catch (error: any) {
+        approval.payload = { ...(approval.payload || {}), execution_status: 'failed', execution_error: String(error?.message || 'Gmail dispatch failed.').slice(0, 500) };
+        await persistApprovalRecord(approval);
+        const senderName = EMPLOYEE_CATALOG.find((employee) => employee.id === approval.payload?.employee_id)?.name || 'The employee';
+        const summary = `${senderName} could not send the approved email. ${String(error?.message || 'Gmail dispatch failed.').slice(0, 500)} No delivery has been confirmed.`;
+        reportOperationalFailure('workforce.gmail_dispatch', error, { tenant_hash: anonymizeIdentifier(companyId), approval_id: approval.id, task_id: approval.task_id });
+        await recordWorkforceApprovalOutcome(approval, 'failed', summary);
+        return res.status(502).json({ error: summary, approval, execution: { status: 'failed', summary } });
+      }
+    }
+    approval.payload = { ...(approval.payload || {}), execution_status: 'blocked' };
+    await persistApprovalRecord(approval);
+    const summary = `You approved ${approval.tool_name}, but Caveworkers has no configured execution adapter for this action. Sarah did not perform an external change.`;
+    await recordWorkforceApprovalOutcome(approval, 'blocked', summary);
+    return res.status(409).json({ error: summary, approval, execution: { status: 'blocked', summary } });
+  }
+
+  await persistApprovalRecord(approval);
+  res.json({ ok: true, approval });
+});
+
+// ── DATA ANALYST (DAVID) ───────────────────────────────────
+app.get('/api/analyst/profile', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = getUserWorkspaceId(user);
+  const analyst = EMPLOYEE_CATALOG.find((employee) => employee.id === 'david');
+  const employee = (db.orgEmployees.get(companyId) || []).find((entry) => entry.id === 'david');
+  const sources = await loadAnalystDataSources(companyId);
+  const memory = await loadAnalystMemory(companyId, 'long_term');
+  const connectors = await loadMcpConnections(companyId, 'david');
+  res.json({ employee: analyst, active_in_workspace: Boolean(employee), configured_tools: employee?.tools || analyst?.default_tools || [], connectors: connectors.map(connectorPublicView), model: { provider: OPENROUTER_KEY_READY ? 'OpenRouter' : (genAIClient ? 'Gemini fallback' : 'Preview planner'), name: OPENROUTER_KEY_READY ? ANALYST_MODEL : 'Configure OPENROUTER_API_KEY for Qwen3' }, source_count: sources.length, memory_count: memory.length, safety: { read_only_by_default: true, external_actions_require_approval: true, tenant_scoped: true } });
+});
+
+app.get('/api/analyst/data-sources', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = getUserWorkspaceId(user);
+  res.json({ sources: await loadAnalystDataSources(companyId) });
+});
+
+app.post('/api/analyst/data-sources', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  const { kind, name, csv_text, sheet_url, database_label } = req.body || {};
+  if (!['sql', 'google_sheets', 'csv'].includes(kind)) return res.status(400).json({ error: 'Data source type must be SQL, Google Sheets, or CSV.' });
+  if (kind === 'csv' && (!csv_text || typeof csv_text !== 'string')) return res.status(400).json({ error: 'Choose a CSV file before importing it.' });
+  if (kind !== 'csv' && !String(name || database_label || sheet_url || '').trim()) return res.status(400).json({ error: 'A source name is required.' });
+  if (typeof csv_text === 'string' && csv_text.length > 300000) return res.status(413).json({ error: 'CSV import is limited to 300 KB in this workspace preview.' });
+  let metadata: Record<string, any> = {}; let status: AnalystDataSource['status'] = 'needs_configuration'; let sourceName = String(name || database_label || sheet_url || '').trim();
+  if (kind === 'csv') { try { metadata = parseCsvPreview(csv_text); status = 'connected'; sourceName = sourceName || 'Imported CSV'; } catch (error: any) { return res.status(400).json({ error: error.message || 'Unable to read this CSV.' }); } }
+  else if (kind === 'google_sheets') {
+    const connections = await loadMcpConnections(companyId, 'david');
+    const sheetsConnection = connections.find((entry) => entry.connection_type === 'google_sheets' && entry.status === 'connected' && entry.tool_grants.some((grant) => grant.tool_name === 'sheets.read'));
+    if (!sheetsConnection) return res.status(409).json({ error: 'Connect a Google Sheets account for David before registering a live Sheets source.' });
+    metadata = { sheet_url: String(sheet_url || '').trim(), connection_id: sheetsConnection.id };
+    status = 'connected';
+  } else metadata = { database_label: String(database_label || name || '').trim() };
+  const now = new Date().toISOString();
+  const sourceRecord: AnalystDataSource = { id: `source_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, company_id: companyId, kind, name: sourceName, status, access_level: 'read_only', metadata, created_at: now, updated_at: now };
+  await persistAnalystDataSource(sourceRecord);
+  res.status(201).json({ ok: true, source: sourceRecord, notice: status === 'connected' ? (kind === 'google_sheets' ? 'Google Sheets is connected read-only and can be queried by David.' : 'CSV imported as a tenant-scoped read-only source.') : 'Connection shell saved. Add secure OAuth or read-only database credentials before live data can be queried.' });
+});
+
+app.delete('/api/analyst/data-sources/:id', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  const sources = await loadAnalystDataSources(companyId); const sourceId = req.params.id;
+  if (!sources.some((entry) => entry.id === sourceId)) return res.status(404).json({ error: 'Data source not found.' });
+  db.analystDataSources.set(companyId, sources.filter((entry) => entry.id !== sourceId));
+  const collection = analystTenantCollection(companyId, 'data_sources'); if (collection) { try { await collection.doc(sourceId).delete(); } catch (_e) {} }
+  res.json({ ok: true });
+});
+
+app.get('/api/analyst/memory', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = getUserWorkspaceId(user);
+  const type = req.query.type === 'working' || req.query.type === 'long_term' ? req.query.type as AnalystMemory['memory_type'] : undefined;
+  const memory = await loadAnalystMemory(companyId, type);
+  res.json({ memory: memory.filter((entry) => !entry.expires_at || Date.parse(entry.expires_at) > Date.now()).slice(0, 40) });
+});
+
+app.post('/api/analyst/memory', async (req, res) => {
+  const user = getAuthUser(req); if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user); const { content, category } = req.body || {};
+  if (!String(content || '').trim()) return res.status(400).json({ error: 'A memory note is required.' });
+  if (String(content).length > 800) return res.status(400).json({ error: 'Keep a memory note under 800 characters.' });
+  const allowed = ['preference', 'business_rule', 'metric_definition'];
+  const memory: AnalystMemory = { id: `memory_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`, company_id: companyId, memory_type: 'long_term', category: allowed.includes(category) ? category : 'preference', content: String(content).trim(), confidence: 0.9, created_at: new Date().toISOString() };
+  await persistAnalystMemory(memory); res.status(201).json({ ok: true, memory });
+});
+
+app.delete('/api/analyst/memory/:id', async (req, res) => {
+  const user = getAuthUser(req); if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user); const memoryId = req.params.id; const memory = await loadAnalystMemory(companyId);
+  if (!memory.some((entry) => entry.id === memoryId && entry.memory_type === 'long_term')) return res.status(404).json({ error: 'Memory not found.' });
+  db.analystMemory.set(companyId, memory.filter((entry) => entry.id !== memoryId));
+  const collection = analystTenantCollection(companyId, 'long_term_memory'); if (collection) { try { await collection.doc(memoryId).delete(); } catch (_e) {} }
+  res.json({ ok: true });
+});
+
+app.get('/api/analyst/runs', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = getUserWorkspaceId(user); const cached = db.analystRuns.get(companyId);
+  if (cached) return res.json({ runs: cached.slice(0, 12) });
+  const collection = analystTenantCollection(companyId, 'analyst_runs'); if (!collection) return res.json({ runs: [] });
+  try { const snapshot = await collection.orderBy('created_at', 'desc').limit(12).get(); const runs = snapshot.docs.map((doc) => ({ id: doc.id, ...(doc.data() || {}) } as AnalystRun)); db.analystRuns.set(companyId, runs); res.json({ runs }); } catch (error) { console.warn('Could not load analyst runs:', error); res.json({ runs: [] }); }
+});
+
+app.get('/api/analyst/approvals', async (req, res) => {
+  const user = getAuthUser(req); if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = getUserWorkspaceId(user);
+  const approvals = await loadAnalystApprovals(companyId);
+  res.json({ approvals: approvals.filter((approval) => approval.status === 'pending') });
+});
+
+app.post('/api/analyst/analyze', async (req, res) => {
+  const user = getAuthUser(req); if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  try { const run = await runAnalystLoop({ companyId, managerName: user?.display_name || 'Workspace Manager', question: req.body?.question, sourceId: req.body?.source_id, outputFormat: req.body?.output_format }); res.status(201).json({ ok: true, run }); }
+  catch (error: any) { res.status(400).json({ error: error?.message || 'David could not start the analysis.' }); }
+});
+
+app.get('/api/tools', (_req, res) => {
+  res.json({
+    'SQL workspace': 'Direct read-only or permissioned SQL queries on workspace database.',
+    Gmail: 'Send & review business emails with explicit recipient authorization.',
+    Notion: 'Manage documentation, roadmaps, and internal wikis.',
+    Slack: 'Post internal updates and alert team channels.'
+  });
+});
+
+app.get('/api/mcp-connectors', (_req, res) => {
+  res.json([
+    { id: 'sql_workspace', name: 'SQL Workspace', description: 'Query workspace relational databases', server: 'mcp://caveworkers/sql-workspace', default_access_level: 'read_only' },
+    { id: 'gmail', name: 'Gmail Connector', description: 'Read/Write business emails via Google API', server: 'mcp://caveworkers/gmail', default_access_level: 'requires_approval' },
+    { id: 'notion', name: 'Notion Workspace', description: 'Sync internal knowledge and docs', server: 'mcp://caveworkers/notion', default_access_level: 'read_write' },
+    { id: 'slack', name: 'Slack Bot', description: 'Send channel alerts and operational notifications', server: 'mcp://caveworkers/slack', default_access_level: 'requires_approval' }
+  ]);
+});
+
+app.get('/api/mcp/marketplace', (_req, res) => {
+  res.json({
+    servers: [
+      { id: 'postgres', name: 'PostgreSQL Server', description: 'Direct SQL query engine', category: 'Database', icon: '🐘' },
+      { id: 'github', name: 'GitHub Integration', description: 'Repo & PR management', category: 'Developer Tools', icon: '🐙' },
+      { id: 'context7', name: 'Context7 Docs', description: 'Read-only documentation search', category: 'Knowledge', icon: '📚' }
+    ]
+  });
+});
+
+app.get(['/api/mcp/directory', '/api/connectors/catalog'], async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = getUserWorkspaceId(user);
+  const query = String(req.query.q || '').slice(0, 80);
+  const category = String(req.query.category || '').slice(0, 60);
+  const entries = searchConnectorDirectory(query, category);
+  const workforce = activeWorkforce(companyId);
+  // Repair legacy employee copies created before shared Google grants were propagated.
+  const googleTypes: TenantConnector['connection_type'][] = ['google_gmail', 'google_drive', 'google_sheets'];
+  for (const connectionType of googleTypes) {
+    for (const employee of workforce) {
+      const source = (await loadMcpConnections(companyId, employee.id)).find((connection) => connection.connection_type === connectionType && connection.status === 'connected' && connection.auth_token_encrypted && connection.tool_grants?.length);
+      if (source) { await propagateCompanyGoogleConnection(source); break; }
+    }
+  }
+  const connectionsByEmployee = await Promise.all(workforce.map(async (employee) => {
+    try { return [employee.id, await loadMcpConnections(companyId, employee.id)] as const; }
+    catch (error) {
+      reportOperationalFailure('mcp.directory_connection_state', error, { tenant_hash: anonymizeIdentifier(companyId), employee_id: employee.id, request_id: getRequestId(req) });
+      return [employee.id, [] as TenantConnector[]] as const;
+    }
+  }));
+  const stateByEmployee = new Map(connectionsByEmployee);
+  const catalog = entries.map((entry) => {
+    const matches = workforce.flatMap((employee) => (stateByEmployee.get(employee.id) || []).filter((connection) => {
+      const connectionName = `${connection.name} ${connection.connection_type} ${connection.config?.registry_server_name || ''}`.toLowerCase();
+      return connectionName.includes(entry.name.toLowerCase()) || connectionName.includes(entry.short_name.toLowerCase()) || connectionName.includes(entry.id.replace(/-/g, ' '));
+    }).map((connection) => {
+      const defaultTool = connection.connection_type === 'google_gmail' ? 'gmail.search' : connection.connection_type === 'google_drive' ? 'drive.files.read' : connection.connection_type === 'google_sheets' ? 'sheets.read' : undefined;
+      const grant = defaultTool ? connection.tool_grants?.find((item) => item.tool_name === defaultTool) : undefined;
+      const ready = connection.status === 'connected' && Boolean(connection.auth_token_encrypted) && (!defaultTool || ['read_only', 'read_write'].includes(String(grant?.access_level || '')) || Boolean(connection.discovered_tools?.length && connection.tool_grants?.some((item) => item.access_level !== 'requires_approval')));
+      return { employee_id: employee.id, connection_id: connection.id, status: connection.status, auth_configured: Boolean(connection.auth_token_encrypted), ready, granted_tools: (connection.tool_grants || []).map((item) => item.tool_name) };
+    }));
+    const readyMatches = matches.filter((match) => match.ready);
+    return {
+      ...connectorDirectoryPublicView(entry),
+      connected: matches.length > 0,
+      ready: readyMatches.length > 0,
+      connection_count: matches.length,
+      ready_connection_count: readyMatches.length,
+      connected_employee_ids: Array.from(new Set(matches.map((match) => match.employee_id))),
+      ready_employee_ids: Array.from(new Set(readyMatches.map((match) => match.employee_id))),
+      connection_ids: matches.map((match) => match.connection_id),
+      connection_states: matches
+    };
+  });
+  res.json({ catalog, categories: CONNECTOR_DIRECTORY_CATEGORIES, total: CONNECTOR_DIRECTORY_COUNT, matched: catalog.length, query, category });
+});
+
+app.get('/api/mcp/directory/:id', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const entry = getConnectorDirectoryEntry(String(req.params.id));
+  if (!entry) return res.status(404).json({ error: 'Connector was not found in the Caveworkers directory.' });
+  if (entry.registry_name) {
+    try {
+      const server = await getMcpRegistryServer(entry.registry_name);
+      return res.json({ connector: connectorDirectoryPublicView(entry), server: server || null });
+    } catch (error: any) {
+      reportOperationalFailure('mcp.directory_detail', error, { tenant_hash: anonymizeIdentifier(getUserWorkspaceId(user)), connector_id: entry.id, request_id: getRequestId(req) });
+    }
+  }
+  res.json({ connector: connectorDirectoryPublicView(entry), server: null });
+});
+
+app.get('/api/mcp/registry/search', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  if (isRateLimited(rateLimitKey(req, 'mcp-registry-search'), 20, 60_000)) return res.status(429).json({ error: 'Registry search is temporarily rate limited.' });
+  try {
+    const result = await searchMcpRegistry(String(req.query.q || ''), String(req.query.cursor || ''), Number(req.query.limit || 12));
+    res.json(result);
+  } catch (error: any) {
+    reportOperationalFailure('mcp.registry_search', error, { tenant_hash: anonymizeIdentifier(getUserWorkspaceId(user)), request_id: getRequestId(req) });
+    res.status(502).json({ error: String(error?.message || 'MCP Registry search failed').slice(0, 240), request_id: getRequestId(req) });
+  }
+});
+
+app.get('/api/mcp/registry/servers/:name', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  if (isRateLimited(rateLimitKey(req, 'mcp-registry-detail'), 30, 60_000)) return res.status(429).json({ error: 'Registry lookups are temporarily rate limited.' });
+  try {
+    const server = await getMcpRegistryServer(decodeURIComponent(req.params.name));
+    if (!server) return res.status(404).json({ error: 'MCP server was not found in the official Registry.' });
+    res.json({ server });
+  } catch (error: any) {
+    reportOperationalFailure('mcp.registry_detail', error, { tenant_hash: anonymizeIdentifier(getUserWorkspaceId(user)), request_id: getRequestId(req) });
+    res.status(502).json({ error: String(error?.message || 'MCP Registry lookup failed').slice(0, 240), request_id: getRequestId(req) });
+  }
+});
+
+app.post('/api/mcp/registry/connect', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
+  if (isRateLimited(rateLimitKey(req, 'mcp-registry-connect'), 10, 60_000)) return res.status(429).json({ error: 'MCP connection attempts are temporarily rate limited.' });
+  const registryName = String(req.body?.registry_name || '').trim().slice(0, 180);
+  const serverUrl = String(req.body?.server_url || '').trim();
+  if (!registryName || !serverUrl) return res.status(400).json({ error: 'Choose a Registry server and one of its advertised remote URLs.' });
+  try {
+    const registryServer = await getMcpRegistryServer(registryName);
+    if (!registryServer) return res.status(404).json({ error: 'MCP server was not found in the official Registry.' });
+    const advertisedRemote = registryServer.remotes.find((remote) => remote.type === 'streamable-http' && remote.url === serverUrl);
+    if (!advertisedRemote) return res.status(400).json({ error: 'The selected URL is not an advertised streamable HTTP remote for this Registry server.' });
+    let validatedUrl: string;
+    try {
+      validatedUrl = validateRemoteMcpUrl(advertisedRemote.url);
+    } catch (error: any) {
+      return res.status(400).json({ error: String(error?.message || 'The advertised MCP remote is unsafe.').slice(0, 240) });
+    }
+    const headerName = String(req.body?.auth_header_name || 'Authorization').trim();
+    const headerPrefix = String(req.body?.auth_header_prefix ?? 'Bearer').trim();
+    if (!/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,120}$/.test(headerName)) return res.status(400).json({ error: 'The authentication header name is invalid.' });
+    if (!/^[A-Za-z0-9._-]{0,24}$/.test(headerPrefix)) return res.status(400).json({ error: 'The authentication header prefix is invalid.' });
+    const authToken = String(req.body?.auth_token || '').trim().slice(0, 2_000);
+    const encryptedToken = authToken ? encryptConnectorCredentials({ access_token: authToken, header_name: headerName, header_prefix: headerPrefix }) : undefined;
+    const workforce = activeWorkforce(companyId);
+    const requestedEmployeeIds = Array.isArray(req.body?.employee_ids) ? req.body.employee_ids.map((id: unknown) => String(id)).slice(0, 20) : [];
+    const selectedEmployees = (req.body?.all_employees === false ? workforce.filter((employee) => requestedEmployeeIds.includes(employee.id)) : workforce).filter((employee, index, list) => list.findIndex((candidate) => candidate.id === employee.id) === index);
+    if (!selectedEmployees.length) return res.status(400).json({ error: 'No active employees were selected for this MCP server.' });
+    const now = new Date().toISOString();
+    const probe: TenantConnector = {
+      id: Date.now(), company_id: companyId, employee_id: selectedEmployees[0].id, name: registryServer.name, connection_type: 'streamable_http', server_url: validatedUrl,
+      access_level: 'requires_approval', autonomy_mode: 'autopilot', status: 'needs_configuration', config: sanitizeConnectorConfig({ registry_server_name: registryServer.name, registry_directory_url: registryServer.directory_url, registry_repository_url: registryServer.repository_url, registry_remote_type: advertisedRemote.type, auth_header_name: headerName, auth_header_prefix: headerPrefix }), discovered_tools: [], tool_grants: [], auth_token_encrypted: encryptedToken, created_at: now, updated_at: now
+    };
+    const discoveredTools = await discoverMcpTools(probe);
+    const grants = discoveredTools.map((tool) => ({ tool_name: tool.name, access_level: tool.risk === 'write' ? 'requires_approval' as const : 'read_only' as const }));
+    const connections: TenantConnector[] = [];
+    for (const [index, employee] of selectedEmployees.entries()) {
+      const connection: TenantConnector = { ...probe, id: Date.now() + index, employee_id: employee.id, status: 'connected', discovered_tools: discoveredTools, tool_grants: grants, created_at: now, updated_at: now };
+      await persistMcpConnection(connection);
+      connections.push(connection);
+    }
+    await persistActivityLog(companyId, { id: Date.now(), sender: 'Manager', receiver: 'Caveworkers', kind: 'mcp.registry_connected', body: `${registryServer.name} was connected for ${connections.length} employees with ${grants.length} discovered tools.`, created_at: now });
+    res.status(201).json({ ok: true, server: registryServer, connections: connections.map(connectorPublicView), tools_discovered: discoveredTools.length, employees_connected: connections.length, notice: 'Connected to the tenant-owned MCP endpoint. Read tools are available to granted employees; write tools always require manager approval.' });
+  } catch (error: any) {
+    reportOperationalFailure('mcp.registry_connect', error, { tenant_hash: anonymizeIdentifier(companyId), registry_server: registryName, request_id: getRequestId(req) });
+    res.status(502).json({ error: String(error?.message || 'MCP server connection failed').slice(0, 240), request_id: getRequestId(req) });
+  }
+});
+
+app.get('/api/employees/:id/mcp-connections', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = getUserWorkspaceId(user);
+  const list = await loadMcpConnections(companyId, req.params.id);
+  res.json(list.map(connectorPublicView));
+});
+
+app.post('/api/employees/:id/mcp-connections', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  const empId = req.params.id;
+  const employee = EMPLOYEE_CATALOG.find((entry) => entry.id === empId);
+  if (!employee) return res.status(404).json({ error: 'Employee not found.' });
+  const activeEmployees = activeWorkforce(companyId);
+  if (!activeEmployees.some((entry) => entry.id === empId)) return res.status(403).json({ error: 'This employee is not active in the workspace.' });
+  const marketplace = ({
+    postgres: { name: 'PostgreSQL Server', tools: [{ name: 'sql.query', description: 'Read-only SQL query', risk: 'read' as const }] },
+    github: { name: 'GitHub Integration', tools: [{ name: 'github.repo.read', description: 'Read repository context', risk: 'read' as const }, { name: 'github.create_pr', description: 'Create a pull request', risk: 'write' as const }] },
+    context7: { name: 'Context7 Docs', tools: [{ name: 'context7.search', description: 'Search documentation', risk: 'read' as const }] }
+  } as Record<string, { name: string; tools: Array<{ name: string; description: string; risk: 'read' | 'write' }> }>)[String(req.body?.marketplace_id || '')];
+  const connectionType = (marketplace ? 'custom_skill' : String(req.body?.connection_type || 'streamable_http')) as TenantConnector['connection_type'];
+  const allowedTypes: TenantConnector['connection_type'][] = ['google_gmail', 'google_drive', 'google_sheets', 'streamable_http', 'git_repository', 'custom_skill'];
+  if (!allowedTypes.includes(connectionType)) return res.status(400).json({ error: 'Unsupported connector type.' });
+  const name = String(req.body?.name || marketplace?.name || 'Custom Connector').trim().slice(0, 120);
+  if (!name) return res.status(400).json({ error: 'A connector name is required.' });
+  const gmailSendEnabled = connectionType === 'google_gmail' && req.body?.config?.gmail_send_enabled === true;
+  let serverUrl: string | undefined;
+  if (connectionType === 'streamable_http') {
+    try { serverUrl = validateRemoteMcpUrl(req.body?.server_url); } catch (error: any) { return res.status(400).json({ error: error.message }); }
+  }
+  let encryptedToken: string | undefined;
+  const authToken = String(req.body?.auth_token || '').trim();
+  if (authToken) {
+    try { encryptedToken = encryptConnectorCredentials({ access_token: authToken }); } catch (error: any) { return res.status(503).json({ error: error.message }); }
+  }
+  const now = new Date().toISOString();
+  const connection: TenantConnector = {
+    id: Date.now(), company_id: companyId, employee_id: empId, name, connection_type: connectionType,
+    server_url: serverUrl, access_level: ['read_only', 'requires_approval', 'read_write'].includes(req.body?.access_level) ? req.body.access_level : 'requires_approval',
+    autonomy_mode: req.body?.autonomy_mode === 'copilot' ? 'copilot' : 'autopilot',
+    status: marketplace ? 'connected' : 'needs_configuration',
+    config: sanitizeConnectorConfig({ notes: req.body?.config?.notes, repo_path: req.body?.config?.repo_path, company_email: req.body?.config?.company_email, repo_owner: req.body?.config?.repo_owner, gmail_send_enabled: gmailSendEnabled, marketplace_id: req.body?.marketplace_id }),
+    discovered_tools: marketplace?.tools || [], tool_grants: marketplace?.tools?.map((tool) => ({ tool_name: tool.name, access_level: req.body?.access_level === 'read_write' && tool.risk === 'read' ? 'read_write' : tool.risk === 'write' ? 'requires_approval' : 'read_only' })) || [], created_at: now, updated_at: now
+  };
+  await persistMcpConnection(connection);
+    const employeeName = employee.name || empId;
+    const googleNotice = connectionType === 'google_gmail'
+      ? `Connector saved for ${employeeName}. Start Google OAuth${connection.config.gmail_send_enabled ? ` to grant read access and ${employeeName}'s approval-gated Gmail send permission` : ' to grant read-only Gmail access'}.`
+      : connectionType === 'google_drive' ? `Connector saved for ${employeeName}. Start Google OAuth to grant per-file Google Drive access.`
+      : connectionType === 'google_sheets' ? `Connector saved for ${employeeName}. Start Google OAuth to grant read-only Sheets access.` : '';
+    res.status(201).json({ ok: true, connection: connectorPublicView(connection), tools_discovered: false, notice: googleNotice || 'Connector saved. Discover tools and grant them per-tool before this employee can use the server.' });
+});
+
+app.get('/api/firebase-config', (_req, res) => {
+  res.json(FIREBASE_WEB_CONFIG);
+});
+
+app.post('/api/employees/:id/mcp-connections/:connectionId/google/token', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  const connectionId = Number(req.params.connectionId);
+  const employeeId = req.params.id;
+  const accessToken = String(req.body?.access_token || '').trim();
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const scopes = Array.isArray(req.body?.scopes) ? req.body.scopes : [];
+  const gmailSendEnabled = req.body?.gmail_send_enabled === true;
+
+  if (!accessToken) return res.status(400).json({ error: 'Access token is required.' });
+
+  const connections = await loadMcpConnections(companyId, employeeId);
+  let connection = connections.find((entry) => entry.id === connectionId);
+
+  if (!connection) {
+    // Create new connection if not found
+    const now = new Date().toISOString();
+    const isDrive = scopes.some((s: string) => s.includes('drive'));
+    const isSheets = scopes.some((s: string) => s.includes('spreadsheets'));
+    const connectionType = isDrive ? 'google_drive' : isSheets ? 'google_sheets' : 'google_gmail';
+    const name = connectionType === 'google_gmail' ? 'Google Gmail' : connectionType === 'google_drive' ? 'Google Drive' : 'Google Sheets';
+    
+    connection = {
+      id: connectionId || Date.now(),
+      company_id: companyId,
+      employee_id: employeeId,
+      name,
+      connection_type: connectionType,
+      access_level: 'requires_approval',
+      autonomy_mode: 'copilot',
+      status: 'connected',
+      config: sanitizeConnectorConfig({ company_email: email, gmail_send_enabled: gmailSendEnabled, notes: 'Connected via Google Workspace OAuth' }),
+      discovered_tools: [],
+      tool_grants: [],
+      created_at: now,
+      updated_at: now
+    };
+  }
+
+  const credentials = {
+    access_token: accessToken,
+    token_type: 'Bearer',
+    email,
+    granted_at: new Date().toISOString()
+  };
+
+  connection.auth_token_encrypted = encryptConnectorCredentials(credentials);
+  connection.oauth_expires_at = undefined;
+  connection.oauth_revoked_at = undefined;
+  connection.last_refresh_at = undefined;
+  connection.auth_scopes = scopes.length ? scopes : googleScopesFor(connection);
+  connection.oauth_email = email || undefined;
+  connection.status = 'connected';
+  connection.last_error = undefined;
+  connection.updated_at = new Date().toISOString();
+
+  // Populate tools
+  if (connection.connection_type === 'google_gmail') {
+    connection.discovered_tools = [
+      { name: 'gmail.search', description: 'Search and read Gmail messages', risk: 'read' },
+      { name: 'gmail.send', description: 'Send emails with employee approval', risk: 'write' }
+    ];
+    if (!connection.tool_grants.some((g) => g.tool_name === 'gmail.search')) {
+      connection.tool_grants.push({ tool_name: 'gmail.search', access_level: 'read_only' });
+    }
+    if (gmailSendEnabled && !connection.tool_grants.some((g) => g.tool_name === 'gmail.send')) {
+      connection.tool_grants.push({ tool_name: 'gmail.send', access_level: 'requires_approval' });
+    }
+  } else if (connection.connection_type === 'google_drive') {
+    connection.discovered_tools = [
+      { name: 'drive.files.read', description: 'Search and view files in Google Drive', risk: 'read' }
+    ];
+    if (!connection.tool_grants.some((g) => g.tool_name === 'drive.files.read')) {
+      connection.tool_grants.push({ tool_name: 'drive.files.read', access_level: 'read_only' });
+    }
+  } else if (connection.connection_type === 'google_sheets') {
+    connection.discovered_tools = [
+      { name: 'sheets.read', description: 'Read Google Sheets cells and tables', risk: 'read' }
+    ];
+    if (!connection.tool_grants.some((g) => g.tool_name === 'sheets.read')) {
+      connection.tool_grants.push({ tool_name: 'sheets.read', access_level: 'read_only' });
+    }
+  }
+
+  await persistMcpConnection(connection);
+  await propagateCompanyGoogleConnection(connection);
+
+  res.json({ ok: true, connection: connectorPublicView(connection) });
+});
+
+app.get('/api/employees/:id/mcp-connections/:connectionId/google/start', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  const connectionId = Number(req.params.connectionId);
+  const requestedService = String(req.query.service || '').trim().toLowerCase();
+  const requestedType = (requestedService === 'gmail' ? 'google_gmail' : requestedService === 'drive' ? 'google_drive' : requestedService === 'sheets' ? 'google_sheets' : requestedService) as 'google_gmail' | 'google_drive' | 'google_sheets' | '';
+  const connections = await loadMcpConnections(companyId, req.params.id);
+  const connection = connections.find((entry) => entry.id === connectionId && (entry.connection_type === requestedType || (!requestedType && ['google_gmail', 'google_drive', 'google_sheets'].includes(entry.connection_type))));
+  const type = (connection?.connection_type || requestedType || 'google_gmail') as 'google_gmail' | 'google_drive' | 'google_sheets';
+  
+  if (!connection && !requestedType) return res.status(404).json({ error: 'Google connector not found.' });
+
+  const requestedReturnTo = String(req.query.return_to || '/settings');
+  const returnTo = requestedReturnTo === '/command' ? '/command' : '/settings';
+
+  if (GOOGLE_OAUTH_CLIENT_ID && GOOGLE_OAUTH_CLIENT_SECRET) {
+    try {
+      const oauth2 = googleOAuthClient();
+      const state = oauthStateSign({ uid: user?.uid, company_id: companyId, employee_id: req.params.id, connection_id: connectionId, connection_type: type, return_to: returnTo, iat: Date.now() });
+      res.cookie('cw_google_oauth_state', state, { httpOnly: true, sameSite: 'lax', secure: IS_PRODUCTION, path: '/', maxAge: 10 * 60 * 1000 });
+      return res.redirect(oauth2.generateAuthUrl({ access_type: 'offline', prompt: 'consent', scope: connection ? googleScopesFor(connection) : ['openid', 'email', 'profile', 'https://www.googleapis.com/auth/gmail.readonly'], state }));
+    } catch (error: any) {
+      console.warn('Server OAuth redirect error:', error?.message);
+    }
+  }
+
+  // Fallback: render seamless interactive Google popup page
+  const serviceName = type === 'google_gmail' ? 'Gmail' : type === 'google_drive' ? 'Drive' : 'Sheets';
+  return res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Connect Google ${serviceName} - Caveworkers</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/style.css">
+  <script>window.FIREBASE_CONFIG = ${JSON.stringify(FIREBASE_WEB_CONFIG)};</script>
+</head>
+<body style="display:flex;align-items:center;justify-content:center;min-height:100vh;background:#0d1117;padding:24px;font-family:system-ui,-apple-system,sans-serif;color:#f0f6fc;">
+  <div style="background:#161b22;border:1px solid #30363d;border-radius:16px;box-shadow:0 12px 32px rgba(0,0,0,0.3);padding:32px;max-width:460px;width:100%;text-align:center;">
+    <div style="width:52px;height:52px;border-radius:14px;background:#21262d;border:1px solid #30363d;display:inline-flex;align-items:center;justify-content:center;margin-bottom:16px;font-size:26px;">🏢</div>
+    <h2 style="font-size:20px;font-weight:700;color:#f0f6fc;margin-bottom:8px;">Connect Google ${serviceName}</h2>
+    <p style="font-size:14px;color:#8b949e;line-height:1.5;margin-bottom:20px;">Authorize Caveworkers to access Google ${serviceName} so Sarah and your AI specialists can review emails, documents, or spreadsheets upon your request.</p>
+    
+    <div style="background:#0d1117;border:1px solid #30363d;border-radius:10px;padding:12px;margin-bottom:20px;text-align:left;font-size:12px;color:#8b949e;line-height:1.4;">
+      <b style="color:#58a6ff;display:block;margin-bottom:4px;">💡 If Google shows a caution / verification warning:</b>
+      Click <strong>Advanced</strong> at the bottom of Google’s popup, then click <strong>"Go to Caveworkers (unsafe)"</strong> or <strong>Continue</strong> to proceed.
+    </div>
+
+    <button id="connectBtn" type="button" style="width:100%;background:#238636;color:#ffffff;border:none;border-radius:10px;padding:13px 18px;font-size:15px;font-weight:600;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;gap:8px;transition:background 0.2s;">
+      <span>Authorize Google Account</span> &rarr;
+    </button>
+    <div id="status" style="margin-top:16px;font-size:13px;color:#8b949e;min-height:20px;"></div>
+    <a href="${returnTo}" style="display:inline-block;margin-top:16px;font-size:13px;color:#58a6ff;text-decoration:none;">&larr; Cancel and return to workspace</a>
+  </div>
+  <script src="/static/google-connect.js"></script>
+  <script>
+    const btn = document.getElementById('connectBtn');
+    const status = document.getElementById('status');
+    let connecting = false;
+
+    async function doConnect() {
+      if (connecting) return;
+      connecting = true;
+      btn.disabled = true;
+      btn.innerText = 'Connecting Google Account...';
+      status.innerHTML = '<span style="color:#58a6ff;">Opening Google sign-in window... If popup is blocked, please allow popups.</span>';
+      try {
+        const res = await window.CaveworkersGoogleConnect({
+          employeeId: ${JSON.stringify(req.params.id)},
+          connectionId: ${JSON.stringify(connectionId)},
+          service: ${JSON.stringify(requestedService || type)},
+          gmailSendEnabled: true,
+          isDirectStartPage: true
+        });
+        if (res && res.ok) {
+          status.innerHTML = '<span style="color:#3fb950;font-weight:600;">✓ Connected successfully! Redirecting...</span>';
+          setTimeout(() => { window.location.href = ${JSON.stringify(returnTo)} + '?connector=connected&service=' + ${JSON.stringify(requestedService || type)}; }, 700);
+        } else {
+          throw new Error('Connection could not be completed.');
+        }
+      } catch (err) {
+        connecting = false;
+        btn.disabled = false;
+        btn.innerText = 'Authorize Google Account';
+        status.innerHTML = '<span style="color:#f85149;">' + (err.message || 'Authorization failed. Please try again.') + '</span>';
+      }
+    }
+
+    btn.addEventListener('click', doConnect);
+    // Trigger popup on user click or quick initial prompt
+    setTimeout(() => { doConnect(); }, 400);
+  </script>
+</body>
+</html>`);
+});
+
+app.get('/api/google/oauth/callback', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).send('Your Caveworkers session expired. Return to the app and start Google connection again.');
+  const state = String(req.query.state || '');
+  const payload = oauthStateVerify(state);
+  if (!payload || payload.uid !== user.uid || payload.company_id !== (getUserWorkspaceId(user)) || req.cookies?.cw_google_oauth_state !== state) return res.status(400).send('Google OAuth state validation failed. Please restart the connection from Caveworkers.');
+  if (req.query.error) {
+    res.clearCookie('cw_google_oauth_state', { path: '/' });
+    const returnTo = payload.return_to === '/command' ? '/command' : '/settings';
+    return res.redirect(`${returnTo}?connector_error=${encodeURIComponent(String(req.query.error))}`);
+  }
+  const code = String(req.query.code || '');
+  if (!code) return res.status(400).send('Google did not return an authorization code.');
+  try {
+    const oauth2 = googleOAuthClient();
+    const tokenResponse = await oauth2.getToken(code);
+    const tokens = tokenResponse.tokens;
+    const connections = await loadMcpConnections(payload.company_id, payload.employee_id);
+    const connection = connections.find((entry) => entry.id === Number(payload.connection_id) && entry.connection_type === payload.connection_type);
+    if (!connection) return res.status(404).send('The Google connector no longer exists.');
+    let credentials = tokens as Record<string, any>;
+    if (!credentials.refresh_token && connection.auth_token_encrypted) credentials = { ...(decryptConnectorCredentials(connection.auth_token_encrypted) || {}), ...credentials };
+    connection.auth_token_encrypted = encryptConnectorCredentials(credentials);
+    connection.oauth_expires_at = credentials.expiry_date ? new Date(Number(credentials.expiry_date)).toISOString() : undefined;
+    connection.oauth_revoked_at = undefined;
+    connection.last_refresh_at = undefined;
+    connection.auth_scopes = String(tokens.scope || '').split(' ').filter(Boolean);
+    connection.status = 'connected';
+    connection.last_error = undefined;
+    connection.updated_at = new Date().toISOString();
+    const defaultTool = payload.connection_type === 'google_gmail' ? 'gmail.search' : payload.connection_type === 'google_drive' ? 'drive.files.read' : 'sheets.read';
+    if (!connection.tool_grants.some((grant) => grant.tool_name === defaultTool)) connection.tool_grants.push({ tool_name: defaultTool, access_level: 'read_only' });
+    if (payload.connection_type === 'google_gmail' && connection.config?.gmail_send_enabled && !connection.tool_grants.some((grant) => grant.tool_name === 'gmail.send')) connection.tool_grants.push({ tool_name: 'gmail.send', access_level: 'requires_approval' });
+    try {
+      oauth2.setCredentials(credentials);
+      const identity = await google.oauth2({ version: 'v2', auth: oauth2 }).userinfo.get();
+      connection.oauth_email = identity.data.email || undefined;
+    } catch (_identityError) { /* identity is optional; the token remains valid for the requested API */ }
+    await persistMcpConnection(connection);
+    await propagateCompanyGoogleConnection(connection);
+    res.clearCookie('cw_google_oauth_state', { path: '/' });
+    const returnTo = payload.return_to === '/command' ? '/command' : '/settings';
+    const serviceName = payload.connection_type === 'google_gmail' ? 'gmail' : payload.connection_type === 'google_drive' ? 'drive' : 'sheets';
+    return res.redirect(`${returnTo}?connector=connected&service=${serviceName}`);
+  } catch (error: any) {
+    console.warn('Google OAuth callback failed:', error?.message || error);
+    return res.status(502).send('Google connection could not be completed. Check the OAuth client, redirect URI, and requested API scopes.');
+  }
+});
+
+app.get('/api/employees/:id/mcp-connections/:connectionId/tools', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = getUserWorkspaceId(user);
+  const connectionId = Number(req.params.connectionId);
+  const connections = await loadMcpConnections(companyId, req.params.id);
+  const connection = connections.find((entry) => entry.id === connectionId);
+  if (!connection) return res.status(404).json({ error: 'MCP connection not found.' });
+  if (connection.connection_type !== 'streamable_http') return res.json({ discovered: connection.discovered_tools || [] });
+  try {
+    const tools = await discoverMcpTools(connection);
+    connection.discovered_tools = tools;
+    connection.status = 'connected';
+    connection.last_error = undefined;
+    connection.updated_at = new Date().toISOString();
+    await persistMcpConnection(connection);
+    res.json({ discovered: tools.map((tool) => ({ name: tool.name, description: tool.description, risk: tool.risk })) });
+  } catch (error: any) {
+    connection.status = 'error';
+    connection.last_error = String(error?.message || 'MCP discovery failed').slice(0, 240);
+    connection.updated_at = new Date().toISOString();
+    await persistMcpConnection(connection);
+    res.status(502).json({ error: connection.last_error });
+  }
+});
+
+app.post('/api/employees/:id/mcp-connections/:connectionId/tools/:toolName', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
+  const connection = (await loadMcpConnections(companyId, req.params.id)).find((entry) => entry.id === Number(req.params.connectionId));
+  if (!connection) return res.status(404).json({ error: 'MCP connection not found.' });
+  const toolName = decodeURIComponent(req.params.toolName);
+  if (!connection.discovered_tools.some((tool) => tool.name === toolName) && !['gmail.search', 'gmail.send', 'sheets.read'].includes(toolName)) return res.status(400).json({ error: 'Discover this tool before granting it.' });
+  if (toolName === 'gmail.send' && (connection.connection_type !== 'google_gmail' || connection.config?.gmail_send_enabled !== true)) return res.status(400).json({ error: 'Enable Gmail send during connection setup, then reconnect Google before granting this action.' });
+  const accessLevel = ['read_only', 'requires_approval', 'read_write'].includes(req.body?.access_level) ? req.body.access_level : 'requires_approval';
+  connection.tool_grants = connection.tool_grants.filter((grant) => grant.tool_name !== toolName);
+  connection.tool_grants.push({ tool_name: toolName, access_level: accessLevel });
+  connection.updated_at = new Date().toISOString();
+  await persistMcpConnection(connection);
+  res.json({ ok: true, connection: connectorPublicView(connection) });
+});
+
+app.delete('/api/employees/:id/mcp-connections/:connectionId/tools/:toolName', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
+  const connection = (await loadMcpConnections(companyId, req.params.id)).find((entry) => entry.id === Number(req.params.connectionId));
+  if (!connection) return res.status(404).json({ error: 'MCP connection not found.' });
+  connection.tool_grants = connection.tool_grants.filter((grant) => grant.tool_name !== decodeURIComponent(req.params.toolName));
+  connection.updated_at = new Date().toISOString();
+  await persistMcpConnection(connection);
+  res.json({ ok: true });
+});
+
+app.post('/api/employees/:id/mcp-connections/:connectionId/test', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
+  const connection = (await loadMcpConnections(companyId, req.params.id)).find((entry) => entry.id === Number(req.params.connectionId));
+  if (!connection) return res.status(404).json({ error: 'MCP connection not found.' });
+  if (connection.connection_type === 'streamable_http') {
+    try { const tools = await discoverMcpTools(connection); connection.discovered_tools = tools; connection.status = 'connected'; connection.last_error = undefined; await persistMcpConnection(connection); return res.json({ ok: true, message: `Connection healthy. ${tools.length} tools discovered.` }); }
+    catch (error: any) { reportOperationalFailure('connector.health_check', error, { tenant_hash: anonymizeIdentifier(companyId), employee_id: req.params.id, connector_type: connection.connection_type, request_id: getRequestId(req) }); return res.status(502).json({ ok: false, error: String(error?.message || 'MCP health check failed').slice(0, 240), request_id: getRequestId(req) }); }
+  }
+  if (connection.connection_type === 'google_gmail' || connection.connection_type === 'google_drive' || connection.connection_type === 'google_sheets') return res.json({ ok: connection.status === 'connected', message: connection.status === 'connected' ? `Google ${connection.connection_type === 'google_gmail' ? 'Gmail' : connection.connection_type === 'google_drive' ? 'Drive' : 'Sheets'} connection is ready.` : 'Connect the Google account before testing.' });
+  res.json({ ok: true, message: 'Connection configuration is saved.' });
+});
+
+app.delete('/api/employees/:id/mcp-connections/:connectionId', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const companyId = getUserWorkspaceId(user);
+  const connectionId = Number(req.params.connectionId);
+  const key = `${companyId}:${req.params.id}`;
+  const list = await loadMcpConnections(companyId, req.params.id);
+  if (!list.some((entry) => entry.id === connectionId)) return res.status(404).json({ error: 'MCP connection not found.' });
+  db.mcpConnections.set(key, list.filter((entry) => entry.id !== connectionId));
+  const collection = connectorCollection(companyId);
+  if (collection) { try { await collection.doc(`${req.params.id}_${connectionId}`).delete(); } catch (_e) {} }
+  res.json({ ok: true });
+});
+
+app.get('/api/analyst/connectors', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const connections = await loadMcpConnections(getUserWorkspaceId(user), 'david');
+  res.json({ connections: connections.map(connectorPublicView) });
+});
+
+app.post('/api/employees/:id/google-drive/search', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const employeeId = String(req.params.id || '').trim();
+  if (!activeWorkforce(getUserWorkspaceId(user)).some((employee) => employee.id === employeeId)) return res.status(404).json({ error: 'Employee not found in this workspace.' });
+  const companyId = getUserWorkspaceId(user);
+  try {
+    const connections = await loadMcpConnections(companyId, employeeId);
+    const connection = connections.find((entry) => entry.connection_type === 'google_drive' && entry.status === 'connected' && entry.tool_grants.some((grant) => grant.tool_name === 'drive.files.read' && grant.access_level !== 'requires_approval'));
+    if (!connection) return res.status(409).json({ error: 'A connected read-only Google Drive capability is required for this employee.' });
+    const result = await searchGoogleDriveFiles(companyId, employeeId, connection.id, String(req.body?.query || ''), req.body?.max_results);
+    res.json({ ok: true, result });
+  } catch (error: any) { reportOperationalFailure('connector.google_drive_search', error, { tenant_hash: anonymizeIdentifier(companyId), employee_id: employeeId, request_id: getRequestId(req) }); res.status(502).json({ error: String(error?.message || 'Google Drive search failed').slice(0, 240), request_id: getRequestId(req) }); }
+});
+
+app.post('/api/analyst/google-sheets/read', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  try {
+    const result = await readGoogleSheetValues(companyId, Number(req.body?.connection_id), String(req.body?.sheet_url || ''), req.body?.range, String(req.body?.employee_id || 'david'));
+    res.json({ ok: true, result });
+  } catch (error: any) { reportOperationalFailure('connector.google_sheets_read', error, { tenant_hash: anonymizeIdentifier(companyId), request_id: getRequestId(req) }); res.status(502).json({ error: String(error?.message || 'Google Sheets read failed').slice(0, 240), request_id: getRequestId(req) }); }
+});
+
+app.post('/api/analyst/gmail/search', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  try {
+    const result = await searchGmail(companyId, Number(req.body?.connection_id), String(req.body?.query || ''), req.body?.max_results, String(req.body?.employee_id || 'david'));
+    res.json({ ok: true, result });
+  } catch (error: any) { reportOperationalFailure('connector.gmail_search', error, { tenant_hash: anonymizeIdentifier(companyId), request_id: getRequestId(req) }); res.status(502).json({ error: String(error?.message || 'Gmail search failed').slice(0, 240), request_id: getRequestId(req) }); }
+});
+
+app.post('/api/analyst/mcp/call', async (req, res) => {
+  const user = getAuthUser(req);
+  if (await enforceWorkspaceAccess(req, res)) return;
+  const companyId = getUserWorkspaceId(user);
+  const connectionId = Number(req.body?.connection_id);
+  const toolName = String(req.body?.tool_name || '').trim();
+  const connection = (await loadMcpConnections(companyId, 'david')).find((entry) => entry.id === connectionId && entry.status === 'connected');
+  if (!connection || connection.connection_type !== 'streamable_http') return res.status(404).json({ error: 'Connected custom MCP server not found.' });
+  const discovered = connection.discovered_tools.find((tool) => tool.name === toolName);
+  const grant = connection.tool_grants.find((entry) => entry.tool_name === toolName);
+  if (!discovered || !grant) return res.status(403).json({ error: 'David does not have permission for this MCP tool.' });
+  const args = req.body?.arguments && typeof req.body.arguments === 'object' ? req.body.arguments : {};
+  if (discovered.risk === 'write' || isLikelyWriteTool(toolName)) {
+    const approvalId = db.nextApprovalId++;
+    await persistAnalystApproval({ id: approvalId, company_id: companyId, task_id: 0, employee_id: 'david', tool_name: toolName, action_summary: `Run ${toolName} on ${connection.name}`, status: 'pending', payload: { origin: 'analyst', mode: 'mcp_tool_call', connector_id: connection.id, arguments: args }, created_at: new Date().toISOString() });
+    return res.status(202).json({ ok: true, status: 'awaiting_approval', approval_id: approvalId, message: 'Write-capable MCP tools always pause for manager approval before execution.' });
+  }
+  try {
+    const initialized = await mcpRpc(connection, 'initialize', { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'Caveworkers', version: '1.0.0' } });
+    const result = await mcpRpc(connection, 'tools/call', { name: toolName, arguments: args }, initialized.sessionId);
+    res.json({ ok: true, result: result.data?.result || result.data });
+  } catch (error: any) { reportOperationalFailure('connector.mcp_tool_call', error, { tenant_hash: anonymizeIdentifier(companyId), employee_id: 'david', tool_name: toolName, request_id: getRequestId(req) }); res.status(502).json({ error: String(error?.message || 'MCP tool call failed').slice(0, 240), request_id: getRequestId(req) }); }
+});
+
+app.get('/api/knowledge', (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
+  const docs = db.knowledge.get(companyId) || [];
+  res.json(docs);
+});
+
+app.post('/api/knowledge', (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getUserWorkspaceId(user);
+  const { title, content, category } = req.body || {};
+  if (!title || !content) {
+    return res.status(400).json({ error: 'Title and content are required' });
+  }
+
+  const docs = db.knowledge.get(companyId) || [];
+  const newDoc = { id: Date.now(), title, category: category || 'policy', content, created_at: new Date().toISOString() };
+  docs.unshift(newDoc);
+  db.knowledge.set(companyId, docs);
+
+  res.json({ ok: true, doc: newDoc });
+});
+
+app.get('/api/activity', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getUserWorkspaceId(user);
+  await hydrateTenantActivity(companyId);
+  const logs = db.activity.get(companyId) || [];
+  res.json({ messages: logs.filter((entry) => entry.company_id === companyId) });
+});
+
+const handleCreateOrder = async (req: express.Request, res: express.Response) => {
+  const user = getAuthUserOrDefault(req);
+  if (!razorpayClient || !RAZORPAY_KEY_ID || !RAZORPAY_KEY_SECRET) return res.status(503).json({ error: 'Payments are not configured on this server.' });
+
+  const { tier, amount, currency, receipt } = req.body || {};
+  let amountInPaise: number;
+  const targetTier = tier || user.selected_tier || 'growth';
+
+  if (amount !== undefined && amount !== null && amount !== '') {
+    amountInPaise = Math.round(Number(amount));
+    if (isNaN(amountInPaise) || amountInPaise < 100) {
+      return res.status(400).json({ error: 'Minimum order amount is 100 paise (1 INR).' });
+    }
+  } else {
+    const plan = SUBSCRIPTION_PLANS[targetTier];
+    if (!plan || targetTier === 'free_trial') {
+      return res.status(400).json({ error: 'A paid plan or valid amount (>= 100 paise) is required to create a payment order.' });
+    }
+    amountInPaise = Math.round((plan.price_inr || plan.price * 83) * 100);
+  }
+
+  try {
+    const order = await razorpayClient.orders.create({
+      amount: amountInPaise,
+      currency: currency || 'INR',
+      receipt: receipt || `rcpt_${user.uid}_${Date.now()}`,
+      notes: { uid: user.uid, company_id: getUserWorkspaceId(user), tier: targetTier }
+    });
+    pendingPaymentOrders.set(order.id, { uid: user.uid, company_id: getUserWorkspaceId(user), tier: targetTier, amount: Number(order.amount), created_at: new Date().toISOString() });
+    await persistPaymentTransaction({
+      order_id: order.id,
+      uid: user.uid,
+      company_id: getUserWorkspaceId(user),
+      tier: targetTier,
+      amount: Number(order.amount),
+      currency: order.currency,
+      status: 'created',
+      created_at: new Date().toISOString()
+    });
+    return res.json({ order_id: order.id, id: order.id, amount: order.amount, currency: order.currency, key_id: RAZORPAY_KEY_ID });
+  } catch (err: any) {
+    reportOperationalFailure('payments.order_create', err, { tenant_hash: anonymizeIdentifier(getUserWorkspaceId(user)), request_id: getRequestId(req), tier: String(targetTier).slice(0, 32) });
+    return res.status(500).json({ error: err?.message || 'Could not create a payment order. Please try again.', request_id: getRequestId(req) });
+  }
+};
+
+app.post('/api/create-order', handleCreateOrder);
+app.post('/api/payments/create-order', handleCreateOrder);
+
+app.post('/api/payments/webhook', async (req, res) => {
+  if (!RAZORPAY_WEBHOOK_SECRET) return res.status(503).json({ error: 'Payment webhooks are not configured.' });
+  const rawBody = (req as express.Request & { rawBody?: Buffer }).rawBody || Buffer.from(JSON.stringify(req.body || {}));
+  const providedSignature = req.get('x-razorpay-signature') || '';
+  const valid = verifyRazorpayWebhookSignature(rawBody, providedSignature, RAZORPAY_WEBHOOK_SECRET);
+  if (!valid) return res.status(401).json({ error: 'Invalid payment webhook signature.' });
+
+  const event = req.body?.event;
+  if (!['payment.authorized', 'payment.captured'].includes(event)) return res.json({ received: true });
+  const payment = req.body?.payload?.payment?.entity;
+  const orderId = payment?.order_id;
+  const paymentId = payment?.id;
+  if (!orderId || !paymentId) return res.status(400).json({ error: 'Payment webhook payload is incomplete.' });
+
+  try {
+    let pending = pendingPaymentOrders.get(orderId);
+    if (!pending && razorpayClient) {
+      try {
+        const order = await razorpayClient.orders.fetch(orderId);
+        const notes = order?.notes || {};
+        if (notes.uid && notes.company_id && notes.tier) {
+          pending = { uid: String(notes.uid), company_id: String(notes.company_id), tier: String(notes.tier), amount: Number(order?.amount || 0), created_at: new Date().toISOString() };
+        }
+      } catch (_fetchError) {
+        // Order fetch failure treated as non-pending order in webhook fallback
+      }
+    }
+    if (!pending) return res.status(202).json({ received: true, reason: 'Payment order is not pending in this workspace.' });
+
+    const company = await loadCompanyFromFirebase(pending.company_id) || db.companies.get(pending.company_id);
+    if (company) {
+      company.tier = pending.tier;
+      company.status = 'active';
+      company.payment_verified_at = new Date().toISOString();
+      company.payment_id = paymentId;
+      await persistCompany(company);
+    }
+    const linkedUser = await loadUserFromFirebase(pending.uid);
+    if (linkedUser) {
+      linkedUser.selected_tier = pending.tier;
+      await persistUser(linkedUser, { payment_id: paymentId });
+    }
+    pendingPaymentOrders.delete(orderId);
+    return res.json({ received: true });
+  } catch (error) {
+    reportOperationalFailure('payments.webhook_processing', error, { request_id: getRequestId(req), event_type: String(event || 'unknown').slice(0, 80), order_hash: anonymizeIdentifier(orderId) });
+    return res.status(500).json({ error: 'Webhook processing failed.', request_id: getRequestId(req) });
+  }
+});
+
+const handleVerifyPayment = async (req: express.Request, res: express.Response) => {
+  const user = getAuthUserOrDefault(req);
+
+  const { razorpay_order_id, razorpay_payment_id, razorpay_signature } = req.body || {};
+  if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
+    return res.status(400).json({ error: 'Missing required payment verification fields (razorpay_order_id, razorpay_payment_id, razorpay_signature).' });
+  }
+
+  if (!RAZORPAY_KEY_SECRET) return res.status(503).json({ error: 'Payments are not configured on this server.' });
+
+  try {
+    const valid = verifyRazorpayPaymentSignature(razorpay_order_id, razorpay_payment_id, razorpay_signature, RAZORPAY_KEY_SECRET);
+    if (!valid) return res.status(400).json({ error: 'Invalid payment signature. Signatures do not match.', success: false });
+
+    const pending = pendingPaymentOrders.get(razorpay_order_id);
+    const companyId = pending ? pending.company_id : getUserWorkspaceId(user);
+    const tier = pending ? pending.tier : (user.selected_tier || 'growth');
+
+    const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId);
+    if (company) {
+      company.tier = tier;
+      company.status = 'active';
+      company.payment_verified_at = new Date().toISOString();
+      company.payment_id = razorpay_payment_id;
+      await persistCompany(company);
+    }
+    user.selected_tier = tier;
+    await persistUser(user, { payment_id: razorpay_payment_id });
+
+    if (pending) {
+      pendingPaymentOrders.delete(razorpay_order_id);
+    }
+    await persistPaymentTransaction({
+      order_id: razorpay_order_id,
+      payment_id: razorpay_payment_id,
+      uid: user.uid,
+      company_id: companyId,
+      tier,
+      status: 'verified',
+      verified_at: new Date().toISOString()
+    });
+    return res.json({ status: 'verified', success: true, tier });
+  } catch (error) {
+    reportOperationalFailure('payments.signature_verification', error, { tenant_hash: anonymizeIdentifier(getUserWorkspaceId(user)), request_id: getRequestId(req), order_hash: anonymizeIdentifier(razorpay_order_id) });
+    return res.status(500).json({ error: 'Payment verification could not be completed.', request_id: getRequestId(req) });
+  }
+};
+
+app.post('/api/verify-payment', handleVerifyPayment);
+app.post('/api/payments/verify', handleVerifyPayment);
+
+app.get('/api/workflows/scheduled', async (req, res) => {
+  const companyId = getTenantIdOrFail(req, res);
+  if (!companyId) return;
+  const workflows = await hydrateScheduledWorkflows(companyId);
+  res.json({ workflows: workflows.sort((a, b) => Date.parse(a.next_run_at) - Date.parse(b.next_run_at)).map((workflow) => ({ ...workflow })) });
+});
+
+app.post('/api/workflows/scheduled', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = user?.company_id;
+  if (!companyId) return res.status(403).json({ error: 'A verified workspace is required.' });
+  if (await enforceWorkspaceAccess(req, res)) return;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const body = req.body || {};
+  const name = String(body.name || '').trim().slice(0, 120);
+  const prompt = String(body.prompt || body.request || '').trim().slice(0, 6000);
+  const scheduleType = body.schedule_type === 'cron' ? 'cron' : 'once';
+  const timezone = normalizeTimezone(body.timezone);
+  const maxRuns = body.max_runs === undefined || body.max_runs === null || body.max_runs === '' ? undefined : Number(body.max_runs);
+  if (!name || !prompt) return res.status(400).json({ error: 'A workflow name and task prompt are required.' });
+  if (!timezone) return res.status(400).json({ error: 'A valid IANA timezone is required.' });
+  if (detectPromptInjection(prompt).blocked) return res.status(400).json({ error: 'The scheduled prompt was blocked by the safety classifier.', code: 'prompt_injection_blocked' });
+  if (maxRuns !== undefined && (!Number.isInteger(maxRuns) || maxRuns < 1 || maxRuns > 10000)) return res.status(400).json({ error: 'max_runs must be an integer between 1 and 10000.' });
+  const now = new Date();
+  let nextRunAt: string | null = null;
+  let cronExpression: string | undefined;
+  if (scheduleType === 'once') {
+    const runAt = String(body.run_at || '').trim();
+    if (!runAt || !Number.isFinite(Date.parse(runAt)) || Date.parse(runAt) <= now.getTime() + 5_000) return res.status(400).json({ error: 'run_at must be a future ISO timestamp.' });
+    nextRunAt = new Date(runAt).toISOString();
+  } else {
+    cronExpression = String(body.cron_expression || '').trim().slice(0, 120);
+    nextRunAt = nextCronOccurrence(cronExpression, timezone, now);
+    if (!nextRunAt) return res.status(400).json({ error: 'cron_expression must be a valid five-field cron expression with minute, hour, day, month, and weekday.' });
+  }
+  const workflow: ScheduledWorkflow = {
+    id: crypto.randomUUID(), company_id: companyId, name, prompt, schedule_type: scheduleType, cron_expression: cronExpression, timezone, next_run_at: nextRunAt, preferred_employee_id: typeof body.preferred_employee_id === 'string' ? body.preferred_employee_id.trim().slice(0, 80) : undefined, email_employee_id: typeof body.email_employee_id === 'string' ? body.email_employee_id.trim().slice(0, 80) : undefined, run_count: 0, max_runs: maxRuns, status: 'active', created_by: user!.uid, created_at: now.toISOString(), updated_at: now.toISOString()
+  };
+  await persistScheduledWorkflow(workflow);
+  await auditWorkforceAction({ company_id: companyId, actor_type: 'user', actor_id: user!.uid, action: 'scheduled_workflow.created', resource_type: 'scheduled_workflow', resource_id: workflow.id, risk: 'low', status: 'prepared', summary: `Created scheduled workflow ${workflow.name}.`, correlation_id: getRequestId(req), metadata: { schedule_type: workflow.schedule_type, timezone: workflow.timezone } });
+  return res.status(201).json({ workflow });
+});
+
+app.patch('/api/workflows/scheduled/:id', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = user?.company_id;
+  if (!companyId) return res.status(403).json({ error: 'A verified workspace is required.' });
+  if (await enforceWorkspaceAccess(req, res)) return;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const workflow = db.scheduledWorkflows.get(String(req.params.id));
+  if (!workflow || workflow.company_id !== companyId) return res.status(404).json({ error: 'Scheduled workflow not found.' });
+  const body = req.body || {};
+  const updated: ScheduledWorkflow = { ...workflow, updated_at: new Date().toISOString() };
+  if (body.name !== undefined) updated.name = String(body.name).trim().slice(0, 120);
+  if (body.prompt !== undefined) {
+    updated.prompt = String(body.prompt).trim().slice(0, 6000);
+    if (!updated.prompt || detectPromptInjection(updated.prompt).blocked) return res.status(400).json({ error: 'The scheduled prompt is invalid or blocked by the safety classifier.', code: 'prompt_injection_blocked' });
+  }
+  if (body.status !== undefined) {
+    const status = String(body.status);
+    if (!['active', 'paused'].includes(status)) return res.status(400).json({ error: 'Only active and paused statuses can be selected manually.' });
+    updated.status = status as ScheduledWorkflow['status'];
+  }
+  if (body.max_runs !== undefined) {
+    const value = body.max_runs === null || body.max_runs === '' ? undefined : Number(body.max_runs);
+    if (value !== undefined && (!Number.isInteger(value) || value < 1 || value > 10000)) return res.status(400).json({ error: 'max_runs must be an integer between 1 and 10000.' });
+    updated.max_runs = value;
+  }
+  const requestedTimezone = body.timezone === undefined ? updated.timezone : normalizeTimezone(body.timezone);
+  if (!requestedTimezone) return res.status(400).json({ error: 'A valid IANA timezone is required.' });
+  updated.timezone = requestedTimezone;
+  const scheduleChanged = body.run_at !== undefined || body.cron_expression !== undefined || body.schedule_type !== undefined || body.timezone !== undefined;
+  if (scheduleChanged) {
+    const scheduleType = body.schedule_type === 'cron' || (body.schedule_type === undefined && body.cron_expression !== undefined) ? 'cron' : body.schedule_type === 'once' || body.run_at !== undefined ? 'once' : updated.schedule_type;
+    updated.schedule_type = scheduleType;
+    if (scheduleType === 'cron') {
+      updated.cron_expression = String(body.cron_expression ?? updated.cron_expression ?? '').trim().slice(0, 120);
+      updated.next_run_at = nextCronOccurrence(updated.cron_expression, updated.timezone, new Date()) || '';
+      if (!updated.next_run_at) return res.status(400).json({ error: 'cron_expression is invalid.' });
+    } else {
+      const runAt = String(body.run_at ?? updated.next_run_at).trim();
+      if (!Number.isFinite(Date.parse(runAt)) || Date.parse(runAt) <= Date.now() + 5_000) return res.status(400).json({ error: 'run_at must be a future ISO timestamp.' });
+      updated.cron_expression = undefined;
+      updated.next_run_at = new Date(runAt).toISOString();
+    }
+    updated.run_count = 0;
+    updated.last_error = undefined;
+  }
+  if (!updated.name || !updated.prompt || !updated.next_run_at) return res.status(400).json({ error: 'A workflow name, prompt, and valid schedule are required.' });
+  await persistScheduledWorkflow(updated);
+  await auditWorkforceAction({ company_id: companyId, actor_type: 'user', actor_id: user!.uid, action: 'scheduled_workflow.updated', resource_type: 'scheduled_workflow', resource_id: updated.id, risk: 'low', status: 'prepared', summary: `Updated scheduled workflow ${updated.name}.`, correlation_id: getRequestId(req), metadata: { status: updated.status } });
+  return res.json({ workflow: updated });
+});
+
+app.delete('/api/workflows/scheduled/:id', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = user?.company_id;
+  if (!companyId) return res.status(403).json({ error: 'A verified workspace is required.' });
+  if (await enforceWorkspaceAccess(req, res)) return;
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const workflow = db.scheduledWorkflows.get(String(req.params.id));
+  if (!workflow || workflow.company_id !== companyId) return res.status(404).json({ error: 'Scheduled workflow not found.' });
+  db.scheduledWorkflows.delete(workflow.id);
+  const collection = scheduledWorkflowCollection();
+  if (collection) { try { await collection.doc(workflow.id).delete(); } catch (_e) {} }
+  await auditWorkforceAction({ company_id: companyId, actor_type: 'user', actor_id: user!.uid, action: 'scheduled_workflow.deleted', resource_type: 'scheduled_workflow', resource_id: workflow.id, risk: 'medium', status: 'succeeded', summary: `Deleted scheduled workflow ${workflow.name}.`, correlation_id: getRequestId(req) });
+  return res.json({ deleted: true, id: workflow.id });
+});
+
+app.post('/api/internal/workflows/tick', async (req, res) => {
+  if (IS_PRODUCTION && !SCHEDULER_TICK_SECRET) return res.status(503).json({ error: 'Scheduler tick secret is not configured.', code: 'scheduler_secret_missing' });
+  if (!schedulerSecretMatches(req)) return res.status(401).json({ error: 'Invalid scheduler credentials.' });
+  try {
+    const result = await processDueScheduledWorkflows();
+    return res.json({ ok: true, ...result, worker_instance: WORKER_INSTANCE_ID });
+  } catch (error) {
+    reportOperationalFailure('scheduled_workflow.tick', error);
+    return res.status(500).json({ error: 'The scheduler tick failed safely.', code: 'scheduler_tick_failed' });
+  }
+});
+
+app.get('/api/tenant/:companyId/export', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = String(req.params.companyId || '');
+  if (!user || user.company_id !== companyId) return res.status(404).json({ error: 'Tenant not found.' });
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId);
+  if (!company) return res.status(404).json({ error: 'Tenant not found.' });
+  const now = new Date();
+  const record: DataExportRequest = { id: crypto.randomUUID(), company_id: companyId, requested_by: user.uid, status: 'completed', requested_at: now.toISOString(), completed_at: now.toISOString(), expires_at: new Date(now.getTime() + TENANT_EXPORT_EXPIRY_DAYS * 86400000).toISOString() };
+  try {
+    record.payload = await buildTenantExport(companyId);
+    await persistDataExport(record);
+    await auditWorkforceAction({ company_id: companyId, actor_type: 'user', actor_id: user.uid, action: 'tenant.export_requested', resource_type: 'tenant', resource_id: companyId, risk: 'medium', status: 'succeeded', summary: 'Tenant data export generated.', correlation_id: getRequestId(req), metadata: { export_id: record.id, expires_at: record.expires_at } });
+    return res.json({ export_id: record.id, status: record.status, requested_at: record.requested_at, completed_at: record.completed_at, expires_at: record.expires_at, data: record.payload });
+  } catch (error: any) {
+    record.status = 'failed';
+    record.error = String(error?.message || 'Tenant data export failed.').slice(0, 240);
+    await persistDataExport(record);
+    reportOperationalFailure('tenant.export', error, { tenant_hash: anonymizeIdentifier(companyId), request_id: getRequestId(req) });
+    return res.status(500).json({ error: 'Tenant data export could not be generated safely.', code: 'tenant_export_failed', export_id: record.id });
+  }
+});
+
+app.get('/api/tenant/:companyId/export/:exportId', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = String(req.params.companyId || '');
+  if (!user || user.company_id !== companyId) return res.status(404).json({ error: 'Tenant not found.' });
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const record = db.dataExports.get(String(req.params.exportId));
+  if (!record || record.company_id !== companyId) return res.status(404).json({ error: 'Export not found.' });
+  if (Date.parse(record.expires_at) <= Date.now()) return res.status(410).json({ error: 'This export has expired. Request a new export.' });
+  return res.json(record);
+});
+
+app.get('/api/tenant/:companyId/deletion', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = String(req.params.companyId || '');
+  if (!user || user.company_id !== companyId) return res.status(404).json({ error: 'Tenant not found.' });
+  if (!requireWorkspaceRole(req, res, 'admin')) return;
+  const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId);
+  if (!company) return res.status(404).json({ error: 'Tenant not found.' });
+  const request = company.deletion_request_id ? db.deletionRequests.get(company.deletion_request_id) : undefined;
+  return res.json({ status: company.status, deletion_requested_at: company.deletion_requested_at, deletion_scheduled_for: company.deletion_scheduled_for, request: request || null });
+});
+
+app.delete('/api/tenant/:companyId', async (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = String(req.params.companyId || '');
+  if (!user || user.company_id !== companyId) return res.status(404).json({ error: 'Tenant not found.' });
+  if (!requireWorkspaceRole(req, res, 'owner')) return;
+  const company = await loadCompanyFromFirebase(companyId) || db.companies.get(companyId);
+  if (!company) return res.status(404).json({ error: 'Tenant not found.' });
+  if (company.status === 'deleted') return res.status(410).json({ error: 'This workspace has already been deleted.' });
+  if (company.status === 'deletion_requested' && company.deletion_request_id) {
+    return res.status(202).json({ status: 'scheduled', request_id: company.deletion_request_id, deletion_scheduled_for: company.deletion_scheduled_for });
+  }
+  const now = new Date();
+  const request: TenantDeletionRequest = { id: crypto.randomUUID(), company_id: companyId, requested_by: user.uid, status: 'scheduled', requested_at: now.toISOString(), execute_after: new Date(now.getTime() + TENANT_DELETION_GRACE_DAYS * 86400000).toISOString() };
+  company.status = 'deletion_requested';
+  company.deletion_requested_at = request.requested_at;
+  company.deletion_scheduled_for = request.execute_after;
+  company.deletion_request_id = request.id;
+  await persistCompany(company);
+  for (const tenantUser of Array.from(db.users.values()).filter((entry) => entry.company_id === companyId)) await persistUser({ ...tenantUser, onboarded: false });
+  await revokeTenantConnectors(companyId);
+  await persistDeletionRequest(request);
+  await auditWorkforceAction({ company_id: companyId, actor_type: 'user', actor_id: user.uid, action: 'tenant.deletion_requested', resource_type: 'tenant', resource_id: companyId, risk: 'high', status: 'prepared', summary: `Workspace deletion scheduled after a ${TENANT_DELETION_GRACE_DAYS}-day grace period.`, correlation_id: getRequestId(req), metadata: { request_id: request.id, execute_after: request.execute_after } });
+  return res.status(202).json({ status: request.status, request_id: request.id, deletion_scheduled_for: request.execute_after, grace_period_days: TENANT_DELETION_GRACE_DAYS, message: 'Operational actions are blocked immediately. Contact Caveworkers support before the scheduled date to cancel this request.' });
+});
+
+app.get('/api/usage', async (req, res) => {
+  const user = getAuthUser(req);
+  if (!user) return res.status(401).json({ error: 'Authentication required' });
+  const companyId = getUserWorkspaceId(user);
+  const ledger = await loadUsageLedger(companyId);
+  const plan = companyPlan(companyId);
+  const activationEvents = await loadActivationEvents(companyId);
+  const activationNames: ActivationEvent['name'][] = ['workspace_created', 'employee_selected', 'connector_connected', 'first_task_created', 'first_task_completed', 'first_tool_succeeded', 'first_approval_completed'];
+  const activation = activationNames.map((name) => {
+    const event = activationEvents.find((candidate) => candidate.name === name);
+    return { name, completed: Boolean(event), occurred_at: event?.created_at || null };
+  });
+  const taskLimit = Number(plan.max_tasks_per_month || 0);
+  const toolCallLimit = Number(plan.max_tool_calls_per_month || 0);
+  res.json({
+    period: ledger.period,
+    plan: { key: (db.companies.get(companyId) as any)?.tier || 'free_trial', name: plan.name, price_inr: Number(plan.price_inr || 0) },
+    usage: ledger,
+    limits: { tasks_per_month: taskLimit, tool_calls_per_month: toolCallLimit },
+    utilization: {
+      tasks: taskLimit > 0 ? Math.min(1, ledger.tasks_created / taskLimit) : 0,
+      tool_calls: toolCallLimit > 0 ? Math.min(1, ledger.tool_calls / toolCallLimit) : 0
+    },
+    activation: { completed_count: activation.filter((step) => step.completed).length, total_count: activation.length, steps: activation, events: activationEvents }
+  });
+});
+app.get('/api/roi', (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getUserWorkspaceId(user);
+  const employees = db.orgEmployees.get(companyId) || [];
+  const tasks = Array.from(db.tasks.values()).filter((task: any) => task.company_id === companyId);
+  const approvals = Array.from(db.approvals.values()).filter((approval: any) => approval.company_id === companyId);
+  const now = Date.now();
+  const monthStart = new Date(now);
+  monthStart.setDate(1);
+  monthStart.setHours(0, 0, 0, 0);
+  const inThisMonth = (value: unknown) => {
+    const timestamp = new Date(String(value || '')).getTime();
+    return Number.isFinite(timestamp) && timestamp >= monthStart.getTime();
+  };
+  const monthTasks = tasks.filter((task: any) => inThisMonth(task.created_at));
+  const completedTasks = monthTasks.filter((task: any) => ['completed', 'succeeded'].includes(String(task.status || task.execution?.status)));
+  const successfulActions = approvals.filter((approval: any) => approval.status === 'succeeded' && inThisMonth(approval.decided_at || approval.updated_at || approval.created_at));
+  const approvalsThisMonth = approvals.filter((approval: any) => inThisMonth(approval.created_at || approval.requested_at));
+  const toolAssistedTasks = completedTasks.filter((task: any) => Array.isArray(task.live_tool_evidence) && task.live_tool_evidence.length > 0);
+  const hoursPerCompletedTask = Math.max(0.1, Number(process.env.ROI_HOURS_PER_COMPLETED_TASK || 0.5));
+  const hourlyValueInr = Math.max(1, Number(process.env.ROI_HOURLY_VALUE_INR || 500));
+  const estimatedHoursSaved = Math.round(completedTasks.length * hoursPerCompletedTask * 10) / 10;
+  const estimatedValueInr = Math.round(estimatedHoursSaved * hourlyValueInr);
+  const companyTier = String((db.companies.get(companyId) as any)?.tier || (user as any).selected_tier || 'free_trial');
+  const billing = SUBSCRIPTION_PLANS[companyTier] || SUBSCRIPTION_PLANS.free_trial;
+  res.json({
+    period: 'current_month',
+    active_employees: employees.length,
+    tasks_completed: completedTasks.length,
+    tasks_started: monthTasks.length,
+    tool_assisted_tasks: toolAssistedTasks.length,
+    approvals_requested: approvalsThisMonth.length,
+    actions_automated: successfulActions.length,
+    estimated_hours_saved: estimatedHoursSaved,
+    estimated_value_inr: estimatedValueInr,
+    subscription_cost_inr: Number(billing.price_inr || 0),
+    assumptions: { hours_per_completed_task: hoursPerCompletedTask, hourly_value_inr: hourlyValueInr },
+    evidence_note: 'Value is an estimate derived from this workspace activity and the displayed assumptions; it is not a guaranteed financial return.'
+  });
+});
+app.get('/api/office/status', (req, res) => {
+  const user = getAuthUser(req);
+  const companyId = getUserWorkspaceId(user);
+  const emps = db.orgEmployees.get(companyId) || [];
+  const pendingApprovals = Array.from(db.approvals.values()).filter((a) => a.status === 'pending');
+
+  const office = emps.map((emp, index) => {
+    let status = 'idle';
+    let currentTask = 'Monitoring tools & awaiting assignment';
+    let collaboratingWith = null;
+
+    if (pendingApprovals.some((a) => a.employee_id === emp.id)) {
+      status = 'awaiting_approval';
+      currentTask = 'Paused — waiting for human sign-off on email/action';
+    } else if (index === 0) {
+      status = 'working';
+      currentTask = 'Analyzing workspace hiring demand & candidate rubrics';
+      collaboratingWith = 'David (Data Analyst)';
+    } else if (index === 1) {
+      status = 'working';
+      currentTask = 'Querying Q3 SQL sales metrics & operating margins';
+      collaboratingWith = 'Sarah (HR Manager)';
+    }
+
+    return {
+      id: emp.id,
+      name: emp.name,
+      role: emp.role,
+      department: emp.department,
+      color: emp.color,
+      status,
+      current_task: currentTask,
+      collaborating_with: collaboratingWith,
+      autonomy_level: (EMPLOYEE_CATALOG.find((c) => c.id === emp.id)?.autonomy_level) || 'Level 3',
+      tools: emp.tools || []
+    };
+  });
+
+  res.json({
+    company_name: user.company_name || 'Workspace',
+    total_active_employees: emps.length,
+    pending_approvals_count: pendingApprovals.length,
+    office
+  });
+});
+
+// Sentry must register after all routes and before Caveworkers' redacted fallback error response.
+if (sentryEnabled) Sentry.setupExpressErrorHandler(app);
+app.use((error: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (res.headersSent) return next(error);
+  const status = Number(error?.status || error?.statusCode);
+  const safeStatus = Number.isInteger(status) && status >= 400 && status < 500 ? status : 500;
+  const message = safeStatus === 500 ? 'An unexpected server error occurred.' : String(error?.message || 'Request failed.').slice(0, 240);
+  console.error(JSON.stringify({ event: 'http_request_failure', request_id: getRequestId(req), method: req.method, path: req.path, status: safeStatus, error_name: error instanceof Error ? error.name : 'UnknownError' }));
+  res.status(safeStatus).json({ error: message, request_id: getRequestId(req) });
+});
+
+process.on('unhandledRejection', (reason) => {
+  reportOperationalFailure('process.unhandled_rejection', reason);
+});
+process.on('uncaughtExceptionMonitor', (error) => {
+  reportOperationalFailure('process.uncaught_exception', error);
+});
+
+export { app, db, pendingPaymentOrders };
+
+if (process.env.NODE_ENV !== 'test' && process.env.VITEST !== 'true') {
+  app.listen(PORT, HOST, () => {
+    console.log(`CaveWorkers backend running on http://${HOST}:${PORT}`);
+    void startAlwaysOnWorker().catch((error) => reportOperationalFailure('worker.startup', error));
+    startWorkflowScheduler();
+  });
+}

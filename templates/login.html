@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign In — CaveWorkers AI Workforce OS</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:ital,opsz,wght@0,9..40,400..700;1,9..40,400..700&family=Playfair+Display:ital,wght@0,600;1,600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/command.css">
+  <link rel="stylesheet" href="/static/motion.css">
+  <link rel="stylesheet" href="/static/ui-reimplementation.css">
+  <link rel="stylesheet" href="/static/login.css">
+</head>
+<body class="login-body">
+  <div class="sky login-sky">
+    <div class="rain"></div>
+    <div class="moon"></div>
+    <div class="meteor"></div>
+
+    <nav class="nav">
+      <div class="wrap nav-row">
+        <a href="/" class="brand">
+          <img class="brand-logo" src="/static/logo.svg" alt="">
+          CaveWorkers
+        </a>
+        <div class="nav-links">
+          <a href="/">Home</a>
+          <a href="/#pricing">Pricing</a>
+          <a href="/#workforce">AI Workforce</a>
+        </div>
+      </div>
+    </nav>
+
+    <div class="wrap login-container">
+      <div class="login-card">
+        <div class="card-glow"></div>
+        <div class="eyebrow mono"><span>✦</span> AI Workforce Platform</div>
+        <h1 class="login-title">Sign in to <em>CaveWorkers</em></h1>
+        <p class="login-subtitle">Manage your AI employees, assign tasks, and scale your workforce — all from one central dashboard.</p>
+
+        <div id="auth-error" class="auth-error" style="display: none;"></div>
+
+        <button id="google-login-btn" class="google-btn">
+          <svg class="google-icon" viewBox="0 0 24 24" width="20" height="20">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.06H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.94l2.85-2.22.81-.63z"/>
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.06l3.66 2.84c.87-2.6 3.3-4.52 6.16-4.52z"/>
+          </svg>
+          <span id="google-btn-text">Continue with Google</span>
+        </button>
+
+        <p class="google-only-note">Google authentication is required for every workspace account.</p>
+
+        <div class="trust-indicators">
+          <span>🔒 Secure Session</span>
+          <span>⚡ 10 AI Specialists Ready</span>
+          <span>💳 No setup friction</span>
+        </div>
+
+        <div class="login-footer">
+          <p>By signing in, you agree to CaveWorkers <a href="/terms">Terms of Service</a> &amp; <a href="/privacy">Privacy Policy</a>.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script type="module">
+    const firebaseConfig = <%- JSON.stringify(firebase_config || {}) %>;
+    const loginBtn = document.getElementById("google-login-btn");
+    const googleBtnText = document.getElementById("google-btn-text");
+    const errorDiv = document.getElementById("auth-error");
+
+    let auth = null;
+    let GoogleAuthProviderClass = null;
+    let signInWithPopupFn = null;
+    let signInWithRedirectFn = null;
+    let getRedirectResultFn = null;
+
+    // Safely try initializing Firebase Auth client
+    async function initAuth() {
+      if (auth) return auth;
+      try {
+        let config = firebaseConfig;
+        if (!config || !config.apiKey || config.apiKey === "dummy-api-key") {
+          const res = await fetch("/api/firebase-config");
+          if (res.ok) config = await res.json();
+        }
+
+        if (config && config.apiKey) {
+          const { initializeApp, getApps, getApp } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js");
+          const { getAuth, GoogleAuthProvider, signInWithPopup, signInWithRedirect, getRedirectResult } = await import("https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js");
+          const app = getApps().length ? getApp() : initializeApp(config);
+          auth = getAuth(app);
+          GoogleAuthProviderClass = GoogleAuthProvider;
+          signInWithPopupFn = signInWithPopup;
+          signInWithRedirectFn = signInWithRedirect;
+          getRedirectResultFn = getRedirectResult;
+        }
+      } catch (fbInitErr) {
+        console.warn("Firebase Auth client initialization:", fbInitErr?.message || fbInitErr);
+      }
+      return auth;
+    }
+
+    function createProvider() {
+      if (!GoogleAuthProviderClass) return null;
+      const provider = new GoogleAuthProviderClass();
+      provider.setCustomParameters({ prompt: "select_account" });
+      return provider;
+    }
+
+    function showError(message) {
+      errorDiv.textContent = message;
+      errorDiv.style.display = "block";
+      loginBtn.disabled = false;
+      googleBtnText.textContent = "Continue with Google";
+    }
+
+    function resetBtn() {
+      errorDiv.style.display = "none";
+      loginBtn.disabled = false;
+      googleBtnText.textContent = "Continue with Google";
+    }
+
+    async function sendSessionLogin(payload) {
+      googleBtnText.textContent = "Creating your workspace...";
+      const res = await fetch("/api/session-login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Accept": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify(payload)
+      });
+      const responseText = await res.text();
+      let data = {};
+      try { data = responseText ? JSON.parse(responseText) : {}; } catch (_err) { }
+      if (!res.ok || data.status !== "success") {
+        const suffix = data.code ? ` (${data.code})` : ` [HTTP ${res.status}]`;
+        throw new Error(`${data.error || "Could not create a secure CaveWorkers session."}${suffix}`);
+      }
+      window.location.assign(data.redirect || "/command");
+    }
+
+    async function completeRedirectLogin() {
+      await initAuth();
+      if (!auth || !getRedirectResultFn) return;
+      try {
+        const result = await getRedirectResultFn(auth);
+        if (result?.user) {
+          const idToken = await result.user.getIdToken(true);
+          await sendSessionLogin({ idToken });
+        }
+      } catch (redirectError) {
+        if (redirectError.code === "auth/popup-closed-by-user" || redirectError.code === "auth/cancelled-popup-request") {
+          resetBtn();
+          return;
+        }
+        console.warn("Google redirect sign-in outcome:", redirectError);
+        showError(redirectError?.message || "Google sign-in could not be completed. Please try again.");
+      }
+    }
+
+    // Google Sign-In click handler: Popup-first with graceful redirect fallback
+    loginBtn.addEventListener("click", async () => {
+      errorDiv.style.display = "none";
+      loginBtn.disabled = true;
+      googleBtnText.textContent = "Connecting to Google...";
+
+      await initAuth();
+      if (!auth || !GoogleAuthProviderClass) {
+        showError("Google authentication is currently initializing or unavailable. Please refresh and try again.");
+        return;
+      }
+
+      const provider = createProvider();
+      try {
+        // 1. Primary path: interactive Google popup
+        if (signInWithPopupFn) {
+          const result = await signInWithPopupFn(auth, provider);
+          if (result?.user) {
+            googleBtnText.textContent = "Authenticating...";
+            const idToken = await result.user.getIdToken(true);
+            await sendSessionLogin({ idToken });
+            return;
+          }
+        }
+      } catch (popupError) {
+        if (popupError.code === "auth/popup-closed-by-user" || popupError.code === "auth/cancelled-popup-request") {
+          resetBtn();
+          return;
+        }
+
+        // 2. If popup is blocked by browser, fall back to redirect
+        if (popupError.code === "auth/popup-blocked" && signInWithRedirectFn) {
+          try {
+            googleBtnText.textContent = "Redirecting to Google...";
+            await signInWithRedirectFn(auth, provider);
+            return;
+          } catch (redirectErr) {
+            console.error("Google redirect fallback error:", redirectErr);
+            showError(redirectErr?.message || "Popups are blocked and redirect sign-in failed. Please allow popups for this site.");
+            return;
+          }
+        }
+
+        if (popupError.code === "auth/unauthorized-domain") {
+          showError("This domain is not in Firebase Auth's Authorized Domains list. Please add this domain in the Firebase Console (Authentication > Settings > Authorized domains).");
+          return;
+        }
+
+        console.error("Google sign-in error:", popupError);
+        showError(popupError?.message || "Google sign-in could not be completed. Please try again.");
+        return;
+      }
+
+      resetBtn();
+    });
+
+    void completeRedirectLogin();
+  </script>
+  <script src="/static/motion.js"></script>
+</body>
+</html>

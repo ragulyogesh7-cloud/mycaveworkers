@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#070b1a">
+  <meta name="description" content="Caveworkers company room — direct your AI workforce in one realtime group conversation.">
+  <title>Caveworkers — Company room</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/static/command.css">
+  <link rel="stylesheet" href="/static/motion.css">
+  <link rel="stylesheet" href="/static/ui-reimplementation.css">
+</head>
+<body class="command-body room-body clean-room-body">
+  <div class="app-shell room-app-shell clean-room-shell">
+    <aside class="side-rail room-rail clean-room-rail" aria-label="Workspace navigation">
+      <a class="brand" href="/command"><img class="brand-logo" src="/static/logo.svg" alt=""><span>Caveworkers</span></a>
+      <div class="rail-label">WORKSPACE</div>
+      <a class="rail-link active" href="#company-room"><i></i>Company room <span class="rail-badge workroom-nav-badge">LIVE</span></a>
+      <div class="rail-label rail-gap">MANAGE</div>
+      <a class="rail-link" href="/settings"><i></i>Settings</a>
+      <div class="rail-footer"><span class="system-dot"></span><div><b id="rail-system-status">Connecting</b><small id="rail-system-detail">Checking workspace services</small></div></div>
+    </aside>
+
+    <main class="command-main room-main clean-room-main" id="company-room">
+      <header class="app-topbar room-topbar clean-room-topbar">
+        <button class="menu-button" id="menuButton" aria-label="Open navigation">☰</button>
+        <div class="workspace-name"><span class="status-dot"></span><span><%= (user && user.company_name) || "Your workspace" %></span><small>COMPANY ROOM</small></div>
+        <div class="top-actions"><a class="settings-link" href="/settings">Settings <span>↗</span></a><a id="logout-btn" href="/logout" class="logout-button">Sign out</a></div>
+      </header>
+
+      <div class="room-wrap clean-room-wrap">
+        <section class="trial-banner room-trial-banner" id="trial-banner" hidden aria-live="polite">
+          <div><span class="trial-banner-kicker">WORKSPACE ACCESS</span><strong id="trial-banner-text">Your free trial is active.</strong><small id="trial-banner-detail">Loading trial status…</small></div>
+          <a href="/settings#billing" class="trial-banner-action">Upgrade workspace ↗</a>
+        </section>
+
+        <section class="room-intro clean-room-intro">
+          <div><p class="eyebrow">COMPANY ROOM</p><h1>What should the crew do?</h1></div>
+          <div class="clean-room-explainer"><p>Assign an outcome in plain language. Sarah coordinates the specialists, they work together in this chat, and you see the proof when the job is actually finished.</p><span><i class="signal-dot"></i> One room · many employees · real tools</span></div>
+        </section>
+
+        <div class="room-layout clean-room-layout">
+          <section class="room-panel clean-chat-panel" aria-labelledby="room-heading">
+            <header class="room-header clean-chat-header">
+              <div class="room-heading"><div><p class="panel-kicker">LIVE WORKSPACE</p><h2 id="room-heading">Company room</h2><p id="room-connection-copy">Sarah and the team are here.</p></div></div>
+              <div class="room-header-actions"><div class="avatar-stack" id="room-avatar-stack" aria-label="Active AI employees"></div><button class="sound-toggle voice-toggle" id="voice-toggle" type="button" aria-pressed="false" title="Turn on voice mode for employee final answers"><span class="sound-toggle-icon" aria-hidden="true">◌</span><span class="sound-toggle-label">Voice off</span></button><span class="live-pill" id="workroom-status">CONNECTING…</span></div>
+            </header>
+
+            <div class="room-feed clean-room-feed" id="workroom-thread" aria-live="polite" aria-label="Realtime employee conversation">
+              <div class="room-empty"><span class="room-empty-mark">✦</span><h3>Your company room is ready.</h3><p>Assign a task below and your team’s routing, collaboration, and review steps will appear here in realtime.</p></div>
+            </div>
+
+            <div class="room-jump-wrap"><button class="room-jump" id="jump-to-latest" type="button" hidden>Jump to latest ↓</button></div>
+
+            <form class="room-composer clean-room-composer" id="room-composer">
+              <div class="room-composer-top"><label for="request">Assign work to the room</label><span><i class="signal-dot"></i> Autonomy follows each employee’s tool belt</span></div>
+              <textarea id="request" rows="3" maxlength="6000" placeholder="Tell the team the outcome you need…"></textarea>
+              <div class="composer-quickbar"><button class="connector-plus" id="connector-plus" type="button" aria-expanded="false" aria-controls="room-connector-directory" title="Connect a tool or app"><span aria-hidden="true">+</span><span>Connect a tool</span></button><span class="composer-quickhint">Browse verified tools for the whole workforce</span></div>
+              <div class="room-composer-bottom"><label class="assignment-control" for="task-assignee"><span>Lead</span><select id="task-assignee" aria-label="Choose who should lead this task"><option value="">Auto-route the team</option><option value="__whole_team__">Whole team</option></select></label><div class="composer-actions"><span class="composer-hint"><i class="signal-dot"></i> High-impact actions follow workspace policy</span><button class="run-button" id="run" type="submit">Start the work <span>↗</span></button></div></div>
+            </form>
+
+              <div class="room-directory-modal" id="room-connector-directory" hidden role="dialog" aria-modal="true" aria-labelledby="room-directory-title">
+                <div class="room-directory-backdrop" data-room-directory-close></div>
+                <div class="room-directory-inner" role="document">
+                  <header class="room-directory-header">
+                    <div class="room-directory-brand"><img src="/static/logo.svg" alt="Caveworkers"><div><p class="panel-kicker">CAVEWORKERS DIRECTORY</p><h2 id="room-directory-title">One connection. Every capable employee.</h2><p id="room-directory-summary">Browse verified apps and connect them to the workforce from this room.</p></div></div>
+                    <button class="room-directory-close" id="room-directory-close" type="button" aria-label="Close connector directory">×</button>
+                  </header>
+                  <div class="room-directory-toolbar"><label class="room-directory-search"><span aria-hidden="true">⌕</span><input id="room-directory-search" type="search" maxlength="80" placeholder="Search connectors" autocomplete="off"><kbd>/</kbd></label><div class="room-directory-categories" id="room-directory-categories" role="tablist" aria-label="Connector categories"></div></div>
+                  <div class="room-directory-catalog" id="room-directory-catalog">
+                    <section class="room-directory-section"><div class="room-directory-section-heading"><div><p class="panel-kicker">RECOMMENDED</p><h3>Top connectors</h3></div><span class="room-directory-result-count" id="room-directory-result-count">Loading…</span></div><div class="room-directory-featured-grid" id="room-directory-featured-grid"></div></section>
+                    <section class="room-directory-section room-directory-all-section"><div class="room-directory-section-heading"><div><p class="panel-kicker">FULL CATALOG</p><h3>All connectors</h3></div><button class="room-directory-toggle-all" id="room-directory-toggle-all" type="button" hidden>Show all connectors</button></div><div class="room-directory-all-grid" id="room-directory-all-grid"></div></section>
+                  </div>
+                  <section class="room-directory-setup" id="room-directory-setup" hidden aria-live="polite"><div class="room-directory-setup-heading"><div><p class="panel-kicker">SECURE SETUP</p><h3 id="room-directory-setup-title">Connect this tool</h3><p id="room-directory-setup-copy">Caveworkers will keep the connection tenant-scoped and approval-aware.</p></div><button class="room-directory-back" id="room-directory-back" type="button">← Back to directory</button></div><form id="room-directory-setup-form"><div id="room-directory-setup-fields"></div><div class="room-directory-setup-actions"><p>Existing connections are reused. New credentials are encrypted and never shown again.</p><button class="run-button" type="submit">Connect for the workforce <span>↗</span></button></div></form></section>
+                </div>
+              </div>
+            <p class="room-notice" id="room-notice" role="status" aria-live="polite"></p>
+          </section>
+
+          <aside class="room-context clean-chat-rail" aria-label="Review and team context">
+            <section class="context-card activation-card" id="activation-dashboard" aria-labelledby="activation-dashboard-title">
+              <div class="context-heading"><div><p class="panel-kicker">GETTING STARTED</p><h2 id="activation-dashboard-title">Activation progress</h2></div><span class="activation-count" id="activation-count">—</span></div>
+              <div class="activation-progress-track" aria-hidden="true"><span id="activation-progress-bar"></span></div>
+              <p class="activation-progress-copy" id="activation-progress-copy">Loading your next best action…</p>
+              <div class="activation-next" id="activation-next-action"></div>
+              <div class="activation-usage"><div><span>Tasks this month</span><b id="activation-task-usage">—</b></div><div><span>Tool calls</span><b id="activation-tool-usage">—</b></div></div>
+            </section>
+            <section class="context-card roi-card" id="roi-dashboard" aria-labelledby="roi-dashboard-title">
+              <div class="context-heading"><div><p class="panel-kicker">VALUE TRACKER</p><h2 id="roi-dashboard-title">Work delivered</h2></div><span class="roi-period">THIS MONTH</span></div>
+              <div class="roi-primary"><strong id="roi-hours-saved">—</strong><span>estimated hours saved</span></div>
+              <div class="roi-metric-grid"><div><b id="roi-tasks-completed">—</b><small>tasks completed</small></div><div><b id="roi-actions-automated">—</b><small>actions automated</small></div><div><b id="roi-approvals">—</b><small>approvals requested</small></div><div><b id="roi-value-inr">—</b><small>estimated value</small></div></div>
+              <p class="roi-note" id="roi-note">Loading workspace evidence…</p>
+            </section>
+            <section class="context-card clean-context-card" id="team-status">
+              <div class="context-heading"><div><p class="panel-kicker">THE CREW</p><h2>Who is here</h2></div><span id="room-team-count" class="context-count">0</span></div>
+              <div class="workroom-presence compact-presence" id="workroom-presence"><p class="empty-state-sm">Loading employee presence…</p></div>
+              <div class="room-communication-guide"><span class="guide-mark">@</span><p><b>Everyone has a voice.</b> Employees introduce themselves, address teammates by name, and pass verified findings to Sarah.</p></div>
+              <div class="workroom-introductions" id="workroom-introductions"><p class="empty-state-sm">Loading introductions…</p></div>
+              <a href="/settings#team" class="context-link">Manage employees ↗</a>
+            </section>
+
+            <section class="context-card clean-context-card" id="approval-queue">
+              <div class="context-heading"><div><p class="panel-kicker">YOUR TURN</p><h2>Needs review</h2></div><span class="pending-label" id="approvals-status-text">Checking</span></div>
+              <div id="approvals-list" class="approvals-list compact-approvals"><p class="empty-state-sm">Checking for approval requests…</p></div>
+            </section>
+          </aside>
+        </div>
+      </div>
+    </main>
+  </div>
+  <script src="/static/csrf.js"></script>
+  <script src="/static/google-connect.js"></script>
+  <script src="/static/command.js"></script>
+  <script src="/static/motion.js"></script>
+  <script>
+    document.getElementById('logout-btn')?.addEventListener('click', async (event) => {
+      event.preventDefault();
+      try { if (window.firebaseAuth?.signOut) await window.firebaseAuth.signOut(); } catch (_) {}
+      try { await fetch('/api/session-logout', { method: 'POST' }); } catch (_) {}
+      window.location.replace('/login');
+    });
+  </script>
+</body>
+</html>
